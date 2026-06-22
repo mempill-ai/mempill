@@ -4,5 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-mempill-types = { path = "../mempill-types" }
-mempill-core = { path = "../mempill-core" }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
