@@ -15,6 +15,8 @@
 //! receives a `&mut Txn` that is already open and appends within it.  It does NOT
 //! call `begin_atomic`, `commit`, or `rollback`.
 
+use std::collections::HashSet;
+
 use mempill_types::{
     AgentId, AssertionKind, ClaimRef, Disposition, EdgeKind, LedgerEntry, LedgerEventKind,
     TransactionTime, ValidityAssertion,
@@ -103,9 +105,20 @@ pub(crate) fn execute<P: PersistencePort>(
     let edges = port.load_edges_for(&req.agent_id, &req.superseded_ref)?;
 
     // Step 4 — Cascade: one DependentFlaggedPendingReview entry per dependent (A26).
+    //
+    // A26 IDEMPOTENCY: iterate edges in original order (preserving determinism, G1)
+    // and track already-seen dependent ClaimRefs in a HashSet to ensure each distinct
+    // dependent is flagged AT MOST ONCE per supersession event, even if duplicate
+    // DependsOn edges exist in the adjacency table (e.g. from a bug or race condition).
+    // Do NOT iterate the HashSet directly — its order is non-deterministic.
+    let mut seen_dependents: HashSet<ClaimRef> = HashSet::new();
     let mut cascade_count = 0usize;
     for edge in &edges {
         if edge.kind == EdgeKind::DependsOn && edge.to_claim == req.superseded_ref {
+            // Skip if this dependent was already flagged in this cascade (A26 idempotency).
+            if !seen_dependents.insert(edge.from_claim.clone()) {
+                continue;
+            }
             let flag_entry = LedgerEntry {
                 entry_id: uuid::Uuid::new_v4(),
                 agent_id: req.agent_id.clone(),
@@ -643,5 +656,500 @@ mod tests {
             matches!(a.kind, AssertionKind::Bound { .. }),
             "assertion kind must be Bound"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ADVERSARIAL TESTS — added by QA adversarial review (Wave 5 QA pass)
+    // Properties under attack: CASCADE CORRECTNESS (A26), ATOMICITY (I9),
+    // NON-DESTRUCTION (I1), MONOTONICITY (I10).
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // ── ADVERSARIAL: CASCADE CORRECTNESS (A26) ────────────────────────────────
+
+    /// DIAMOND topology: claims B and C both DependsOn superseded claim A.
+    /// D DependsOn B and also DependsOn C (diamond).
+    /// When we supersede A, only B and C are flagged — D is NOT flagged
+    /// (D depends on B/C, not on A).  Cascade count must be exactly 2.
+    ///
+    /// This tests that cascade does NOT transitively walk the graph.
+    /// A26 specifies only DIRECT dependents of the superseded claim are flagged.
+    #[test]
+    fn cascade_a26_diamond_direct_dependents_only_no_transitive_walk() {
+        let agent = make_agent();
+        let req = make_req(&agent); // superseded = A
+        let claim_b = ClaimRef::new_random();
+        let claim_c = ClaimRef::new_random();
+        let claim_d = ClaimRef::new_random();
+
+        // B and C directly depend on A (the superseded claim).
+        // D depends on B and C but NOT on A.
+        let edges = vec![
+            depends_on_edge(claim_b.clone(), req.superseded_ref.clone(), &agent),
+            depends_on_edge(claim_c.clone(), req.superseded_ref.clone(), &agent),
+            // D→B and D→C: these must NOT be returned by load_edges_for(A)
+            depends_on_edge(claim_d.clone(), claim_b.clone(), &agent),
+            depends_on_edge(claim_d.clone(), claim_c.clone(), &agent),
+        ];
+        let port = MockPort::new(agent.clone(), edges);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        assert_eq!(n, 2, "only B and C are direct dependents of A; D must not be flagged");
+        let committed = port.committed.lock().unwrap();
+        let flagged_refs: Vec<&ClaimRef> = committed.ledger.iter()
+            .filter(|e| e.event_kind == LedgerEventKind::DependentFlaggedPendingReview)
+            .map(|e| &e.claim_ref)
+            .collect();
+        assert!(flagged_refs.contains(&&claim_b), "B must be flagged");
+        assert!(flagged_refs.contains(&&claim_c), "C must be flagged");
+        assert!(!flagged_refs.contains(&&claim_d), "D must NOT be flagged (not a direct dependent of A)");
+    }
+
+    /// TWO DISTINCT DEPENDENTS sharing no edges: supersede claim P, with
+    /// dependents X and Y (both DependsOn P, no shared structure).
+    /// Both must be flagged — cascade count exactly 2.
+    #[test]
+    fn cascade_a26_two_distinct_dependents_both_flagged() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let dep_x = ClaimRef::new_random();
+        let dep_y = ClaimRef::new_random();
+        let edges = vec![
+            depends_on_edge(dep_x.clone(), req.superseded_ref.clone(), &agent),
+            depends_on_edge(dep_y.clone(), req.superseded_ref.clone(), &agent),
+        ];
+        let port = MockPort::new(agent.clone(), edges);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        assert_eq!(n, 2);
+        let committed = port.committed.lock().unwrap();
+        let x_flags = committed.ledger.iter()
+            .filter(|e| e.claim_ref == dep_x && e.event_kind == LedgerEventKind::DependentFlaggedPendingReview)
+            .count();
+        let y_flags = committed.ledger.iter()
+            .filter(|e| e.claim_ref == dep_y && e.event_kind == LedgerEventKind::DependentFlaggedPendingReview)
+            .count();
+        assert_eq!(x_flags, 1, "dep_x must be flagged exactly once");
+        assert_eq!(y_flags, 1, "dep_y must be flagged exactly once");
+    }
+
+    /// DUPLICATE EDGES: two structurally identical DependsOn edges from the same
+    /// dependent claim D to the superseded claim P (e.g., created by a bug or
+    /// duplicate insert).
+    ///
+    /// SPEC (A26): idempotent flagging is the sane expectation — D should be
+    /// flagged AT MOST ONCE per supersession event.  Two duplicate edges must
+    /// not produce two PendingReview entries for D.
+    ///
+    /// FINDING (if this test FAILS): the engine double-flags D, producing 2
+    /// DependentFlaggedPendingReview entries for the same dependent per
+    /// supersession.  This is a DEFECT — severity: MEDIUM (doubles downstream
+    /// review burden, may confuse projection.rs PendingReview aggregation).
+    ///
+    /// NOTE: This test is expected to FAIL against the current implementation
+    /// because execute() iterates every edge returned by load_edges_for() and
+    /// appends one ledger entry per edge — with no deduplication of from_claim.
+    /// The mock's load_edges_for does not deduplicate edges with the same
+    /// from_claim, so two duplicate edges produce two entries.
+    ///
+    /// Leave the assertion as == 1 to LOUDLY surface the bug if it is present.
+    #[test]
+    fn cascade_a26_duplicate_edges_same_dependent_flagged_exactly_once() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let dep_d = ClaimRef::new_random();
+
+        // Two structurally identical DependsOn edges: D → superseded_ref (duplicate).
+        let edge1 = depends_on_edge(dep_d.clone(), req.superseded_ref.clone(), &agent);
+        let edge2 = depends_on_edge(dep_d.clone(), req.superseded_ref.clone(), &agent);
+        // Note: edge_ids differ (uuid::Uuid::new_v4()) but from_claim == dep_d, to_claim == superseded_ref for both.
+
+        let port = MockPort::new(agent.clone(), vec![edge1, edge2]);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        // SPEC: D must be flagged exactly once regardless of duplicate edges.
+        // If this assert fails, the impl double-flags D — that is the defect.
+        assert_eq!(n, 1,
+            "DEFECT: duplicate DependsOn edges caused double-flagging of the same dependent (A26 idempotency violated)");
+        let committed = port.committed.lock().unwrap();
+        let d_flags = committed.ledger.iter()
+            .filter(|e| e.claim_ref == dep_d && e.event_kind == LedgerEventKind::DependentFlaggedPendingReview)
+            .count();
+        assert_eq!(d_flags, 1,
+            "DEFECT: dependent D was flagged {} times instead of 1 (A26 idempotency violated)", d_flags);
+    }
+
+    /// WRONG-DIRECTION (source, not target): an edge where the superseded claim is
+    /// the FROM (source) and some other claim is the TO.
+    /// Direction: superseded_ref → other_claim, kind == DependsOn.
+    /// This means: the superseded claim DEPENDS ON other_claim, not vice versa.
+    /// Such an edge must NEVER trigger a cascade PendingReview for other_claim.
+    ///
+    /// The mock's load_edges_for already filters on `to_claim == claim_ref`, so
+    /// this edge is correctly excluded at the query layer.  This test is
+    /// regression armor: verifies the query contract is not accidentally loosened.
+    #[test]
+    fn cascade_a26_outbound_depends_on_from_superseded_does_not_cascade() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let other_claim = ClaimRef::new_random();
+
+        // superseded_ref DEPENDS ON other_claim (wrong direction for cascade).
+        let wrong_direction_edge = ClaimEdge {
+            edge_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            from_claim: req.superseded_ref.clone(), // superseded is the SOURCE
+            to_claim: other_claim.clone(),
+            kind: EdgeKind::DependsOn,
+            created_at: TransactionTime::now(),
+        };
+        let port = MockPort::new(agent.clone(), vec![wrong_direction_edge]);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        assert_eq!(n, 0, "outbound DependsOn from superseded claim must not trigger cascade");
+        assert_eq!(
+            port.committed_ledger_by_kind(&LedgerEventKind::DependentFlaggedPendingReview),
+            0,
+            "other_claim must NOT be flagged when it is the TO of superseded's outbound edge"
+        );
+    }
+
+    /// DERIVED-FROM does not cascade: a DerivedFrom edge pointing AT the superseded
+    /// claim (from_claim DerivedFrom superseded_ref) must NOT generate a PendingReview.
+    /// A26 specifies only DependsOn edges trigger the cascade.
+    #[test]
+    fn cascade_a26_derived_from_inbound_does_not_cascade() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let derived_claim = ClaimRef::new_random();
+
+        let derived_from_edge = ClaimEdge {
+            edge_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            from_claim: derived_claim.clone(),
+            to_claim: req.superseded_ref.clone(),
+            kind: EdgeKind::DerivedFrom, // not DependsOn
+            created_at: TransactionTime::now(),
+        };
+        let port = MockPort::new(agent.clone(), vec![derived_from_edge]);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        assert_eq!(n, 0, "DerivedFrom edge must not cascade to PendingReview (A26 DependsOn-only)");
+        assert_eq!(
+            port.committed_ledger_by_kind(&LedgerEventKind::DependentFlaggedPendingReview),
+            0
+        );
+    }
+
+    /// MUTUAL-EXCLUSION edge does not cascade: a MutualExclusion edge from another
+    /// claim to the superseded claim must NOT generate a PendingReview.
+    #[test]
+    fn cascade_a26_mutual_exclusion_edge_does_not_cascade() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let peer_claim = ClaimRef::new_random();
+
+        let mutex_edge = ClaimEdge {
+            edge_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            from_claim: peer_claim.clone(),
+            to_claim: req.superseded_ref.clone(),
+            kind: EdgeKind::MutualExclusion,
+            created_at: TransactionTime::now(),
+        };
+        let port = MockPort::new(agent.clone(), vec![mutex_edge]);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        assert_eq!(n, 0, "MutualExclusion edge must not cascade");
+        assert_eq!(
+            port.committed_ledger_by_kind(&LedgerEventKind::DependentFlaggedPendingReview),
+            0
+        );
+    }
+
+    /// SUPERSEDES edge does not cascade: a Supersedes edge pointing at the superseded
+    /// claim (i.e., recording that the superseded claim was itself superseded by
+    /// something else previously) must not cascade.
+    #[test]
+    fn cascade_a26_supersedes_edge_does_not_cascade() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let successor_claim = ClaimRef::new_random();
+
+        let supersedes_edge = ClaimEdge {
+            edge_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            from_claim: successor_claim.clone(),
+            to_claim: req.superseded_ref.clone(),
+            kind: EdgeKind::Supersedes,
+            created_at: TransactionTime::now(),
+        };
+        let port = MockPort::new(agent.clone(), vec![supersedes_edge]);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        assert_eq!(n, 0, "Supersedes edge must not cascade to PendingReview");
+        assert_eq!(
+            port.committed_ledger_by_kind(&LedgerEventKind::DependentFlaggedPendingReview),
+            0
+        );
+    }
+
+    /// CASCADE ORDERING IS DETERMINISTIC: given a fixed ordered edge set, two
+    /// executions produce cascade entries in the same order (stable ordering of
+    /// PendingReview entries for the same edge list).
+    #[test]
+    fn cascade_a26_ordering_is_deterministic_for_fixed_edge_set() {
+        let agent = make_agent();
+        let superseded = ClaimRef::new_random();
+        let overturning = ClaimRef::new_random();
+        let bound_at = Utc::now();
+        let recorded_at = TransactionTime::now();
+
+        let dep_a = ClaimRef::new_random();
+        let dep_b = ClaimRef::new_random();
+        let dep_c = ClaimRef::new_random();
+
+        let edges = vec![
+            depends_on_edge(dep_a.clone(), superseded.clone(), &agent),
+            depends_on_edge(dep_b.clone(), superseded.clone(), &agent),
+            depends_on_edge(dep_c.clone(), superseded.clone(), &agent),
+        ];
+
+        let run_and_collect_order = || {
+            let req = SupersessionRequest {
+                agent_id: agent.clone(),
+                superseded_ref: superseded.clone(),
+                overturning_ref: overturning.clone(),
+                bound_at,
+                recorded_at: recorded_at.clone(),
+            };
+            let port = MockPort::new(agent.clone(), edges.clone());
+            let mut txn = port.begin_atomic(&agent).unwrap();
+            execute(&port, &mut txn, &req).unwrap();
+            port.commit(txn).unwrap();
+            let state = port.committed.lock().unwrap();
+            state.ledger.iter()
+                .filter(|e| e.event_kind == LedgerEventKind::DependentFlaggedPendingReview)
+                .map(|e| e.claim_ref.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let order1 = run_and_collect_order();
+        let order2 = run_and_collect_order();
+
+        assert_eq!(order1, order2,
+            "cascade ordering must be deterministic for a fixed edge set (A26, G1)");
+    }
+
+    // ── ADVERSARIAL: ATOMICITY (I9) — boundary failures ──────────────────────
+
+    /// FIRST-WRITE FAILURE: fail on write 1 (the Bound ValidityAssertion).
+    /// After rollback: zero committed assertions, zero ledger entries.
+    /// The entire unit — including the ledger entry and any cascade — must be absent.
+    #[test]
+    fn atomicity_i9_fail_on_first_write_zero_committed() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let dep = ClaimRef::new_random();
+        let edges = vec![depends_on_edge(dep, req.superseded_ref.clone(), &agent)];
+        let port = MockPort::new(agent.clone(), edges);
+
+        // Fail on write 1 = append_validity_assertion (the Bound assertion).
+        let mut txn = MockTxn::new(agent.clone()).with_fail_on(1);
+        let result = execute(&port, &mut txn, &req);
+
+        assert!(result.is_err(), "should fail on write 1");
+        port.rollback(txn).unwrap();
+        assert_eq!(port.committed_assertions(), 0, "no assertions committed after first-write failure");
+        assert_eq!(port.committed_ledger(), 0, "no ledger entries committed after first-write failure");
+    }
+
+    /// LAST-CASCADE-WRITE FAILURE: with 3 dependents, writes are:
+    ///   1 = Bound assertion
+    ///   2 = ValidityAsserted ledger entry (incumbent)
+    ///   3 = DependentFlaggedPendingReview for dep1
+    ///   4 = DependentFlaggedPendingReview for dep2
+    ///   5 = DependentFlaggedPendingReview for dep3  ← fail here
+    ///
+    /// After rollback: ZERO committed (the partial tail must not be committed).
+    /// This tests that I9 atomicity holds for the LAST write, not just mid-point.
+    #[test]
+    fn atomicity_i9_fail_on_last_cascade_write_zero_committed() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let dep1 = ClaimRef::new_random();
+        let dep2 = ClaimRef::new_random();
+        let dep3 = ClaimRef::new_random();
+        let edges = vec![
+            depends_on_edge(dep1, req.superseded_ref.clone(), &agent),
+            depends_on_edge(dep2, req.superseded_ref.clone(), &agent),
+            depends_on_edge(dep3, req.superseded_ref.clone(), &agent),
+        ];
+        let port = MockPort::new(agent.clone(), edges);
+
+        // 3 dependents = 5 total writes; fail on write 5 (last cascade entry).
+        let mut txn = MockTxn::new(agent.clone()).with_fail_on(5);
+        let result = execute(&port, &mut txn, &req);
+
+        assert!(result.is_err(), "should fail on the last cascade write (write 5)");
+        port.rollback(txn).unwrap();
+        assert_eq!(port.committed_assertions(), 0,
+            "I9 violated: partial assertion committed despite last-write failure");
+        assert_eq!(port.committed_ledger(), 0,
+            "I9 violated: partial ledger committed despite last-write failure");
+    }
+
+    /// ZERO-DEPENDENT ATOMICITY: with no dependents, the atom is just
+    /// {Bound assertion + ValidityAsserted ledger entry} — 2 writes.
+    /// Both must commit as one unit; either both present or neither.
+    #[test]
+    fn atomicity_i9_zero_dependents_two_writes_atomic() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let port = MockPort::new(agent.clone(), vec![]);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let n = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        assert_eq!(n, 0);
+        assert_eq!(port.committed_assertions(), 1, "Bound assertion must be committed");
+        assert_eq!(port.committed_ledger(), 1, "ValidityAsserted entry must be committed");
+        assert_eq!(
+            port.committed_ledger_by_kind(&LedgerEventKind::ValidityAsserted),
+            1
+        );
+    }
+
+    /// ZERO-DEPENDENT FIRST-WRITE FAILURE ROLLBACK: fail on write 1 with no dependents.
+    /// After rollback: both assertion and ledger must be absent.
+    #[test]
+    fn atomicity_i9_zero_dependents_fail_first_write_zero_committed() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let port = MockPort::new(agent.clone(), vec![]);
+
+        let mut txn = MockTxn::new(agent.clone()).with_fail_on(1);
+        let result = execute(&port, &mut txn, &req);
+
+        assert!(result.is_err());
+        port.rollback(txn).unwrap();
+        assert_eq!(port.committed_assertions(), 0);
+        assert_eq!(port.committed_ledger(), 0);
+    }
+
+    // ── ADVERSARIAL: NON-DESTRUCTION (I1) ────────────────────────────────────
+
+    /// NON-DESTRUCTION with multiple dependents: even with a large cascade,
+    /// no delete or update calls are made. The MockPort trait does not expose
+    /// delete/update — this is a compile-time guarantee — but we verify that
+    /// ALL appended items are typed as Assertion or Ledger (additive only),
+    /// and that the incumbent superseded_ref claim itself does NOT have its
+    /// claim_ref appear in any LedgerEntry as a delete-like event kind.
+    #[test]
+    fn non_destruction_i1_incumbent_not_deleted_with_cascade() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let dep1 = ClaimRef::new_random();
+        let dep2 = ClaimRef::new_random();
+        let edges = vec![
+            depends_on_edge(dep1, req.superseded_ref.clone(), &agent),
+            depends_on_edge(dep2, req.superseded_ref.clone(), &agent),
+        ];
+        let port = MockPort::new(agent.clone(), edges);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let _ = execute(&port, &mut txn, &req).unwrap();
+
+        // All appended items before commit must be typed as Assertion or Ledger.
+        let all_append_typed = txn.appends.iter().all(|a| {
+            matches!(a, MockAppend::Assertion(_) | MockAppend::Ledger(_))
+        });
+        assert!(all_append_typed, "only additive Assertion/Ledger appends present (I1)");
+
+        // The total write count: 1 (assertion) + 1 (ledger supersession) + 2 (cascade) = 4.
+        assert_eq!(txn.appends.len(), 4, "write count must be exactly 4 for 2 dependents");
+
+        port.commit(txn).unwrap();
+
+        // After commit: the incumbent superseded_ref must not appear in a
+        // DependentFlaggedPendingReview entry — it is the target, not a dependent.
+        let committed = port.committed.lock().unwrap();
+        let incumbent_flagged_as_dependent = committed.ledger.iter().any(|e| {
+            e.claim_ref == req.superseded_ref
+                && e.event_kind == LedgerEventKind::DependentFlaggedPendingReview
+        });
+        assert!(!incumbent_flagged_as_dependent,
+            "I1 / A26: the superseded claim itself must not appear as a dependent in cascade entries");
+    }
+
+    // ── ADVERSARIAL: MONOTONICITY (I10) ──────────────────────────────────────
+
+    /// MONOTONICITY (I10): supersession must be recorded as a NEW Bound assertion
+    /// (an append), never as a mutation of the incumbent claim row.
+    /// We verify: after execute(), the ValidityAssertion in committed state has a
+    /// fresh assertion_ref (uuid::Uuid), its own recorded_at, and the incumbent's
+    /// claim_ref is referenced only as `target_claim` — not replaced.
+    #[test]
+    fn monotonicity_i10_supersession_is_append_not_rewrite() {
+        let agent = make_agent();
+        let req = make_req(&agent);
+        let port = MockPort::new(agent.clone(), vec![]);
+
+        let mut txn = port.begin_atomic(&agent).unwrap();
+        let _ = execute(&port, &mut txn, &req).unwrap();
+        port.commit(txn).unwrap();
+
+        let state = port.committed.lock().unwrap();
+
+        // Exactly one new ValidityAssertion was appended (the Bound).
+        assert_eq!(state.assertions.len(), 1, "one Bound assertion appended (not zero, not two)");
+        let assertion = &state.assertions[0];
+
+        // The Bound assertion references the incumbent via target_claim — it does not
+        // replace the incumbent's claim row. target_claim must be the superseded ref.
+        assert_eq!(assertion.target_claim, req.superseded_ref,
+            "Bound assertion must target the superseded claim ref (I10: append, not rewrite)");
+
+        // The assertion_ref must be a non-nil UUID (freshly generated, not the superseded claim's UUID).
+        assert_ne!(assertion.assertion_ref, uuid::Uuid::nil(),
+            "Bound assertion must have a freshly generated assertion_ref");
+        assert_ne!(assertion.assertion_ref.as_u128(), req.superseded_ref.0.as_u128(),
+            "Bound assertion ref must differ from the superseded claim ref (I10: new row)");
+
+        // The assertion kind must be Bound.
+        assert!(
+            matches!(assertion.kind, AssertionKind::Bound { .. }),
+            "I10: supersession records a Bound assertion, not any other kind"
+        );
+
+        // The ledger entry for the incumbent uses ValidityAsserted, not a destructive event.
+        let incumbent_entry = state.ledger.iter()
+            .find(|e| e.claim_ref == req.superseded_ref)
+            .expect("ledger entry for incumbent must exist");
+        assert_eq!(incumbent_entry.event_kind, LedgerEventKind::ValidityAsserted,
+            "I10: incumbent ledger event must be ValidityAsserted (append path), not a delete event");
+        assert_eq!(incumbent_entry.disposition, Disposition::Superseded,
+            "I10: incumbent disposition must be Superseded (marking only, not deletion)");
     }
 }

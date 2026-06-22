@@ -92,5 +92,9 @@ CREATE TABLE IF NOT EXISTS claim_edges (
 
     PRIMARY KEY (edge_id),
     FOREIGN KEY (from_claim_id) REFERENCES claims(claim_id),
-    FOREIGN KEY (to_claim_id)   REFERENCES claims(claim_id)
+    FOREIGN KEY (to_claim_id)   REFERENCES claims(claim_id),
+    -- A26 IDEMPOTENCY: prevent duplicate edges at the schema level so the same
+    -- (agent, from_claim, to_claim, edge_kind) tuple can only be stored once.
+    -- Complements the in-process dedup in supersession.rs (defence-in-depth).
+    UNIQUE (agent_id, from_claim_id, to_claim_id, edge_kind)
 );
