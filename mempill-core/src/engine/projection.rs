@@ -246,6 +246,7 @@ mod tests {
     use crate::ports::persistence::PersistencePort;
     use crate::ports::persistence::Txn;
     use chrono::Utc;
+    use std::collections::HashMap;
     use mempill_types::{
         AgentId, Cardinality, Claim, ClaimEdge, ClaimRef, Confidence, Disposition,
         ExternalAnchor, ExternalKind, Fact, LedgerEntry, LedgerEventKind, ProvenanceLabel,
@@ -284,6 +285,10 @@ mod tests {
 
     fn no_assertions(_: &ClaimRef) -> Vec<ValidityAssertion> {
         vec![]
+    }
+
+    fn no_dispositions() -> HashMap<ClaimRef, Disposition> {
+        HashMap::new()
     }
 
     fn now() -> DateTime<Utc> {
@@ -340,7 +345,7 @@ mod tests {
         let query_now = now();
 
         let claim = make_claim(&agent, serde_json::json!("Paris"), old_tx, None, 0.0);
-        let fold_result = fold(vec![claim.clone()], no_assertions, query_now, &config);
+        let fold_result = fold(vec![claim.clone()], no_assertions, query_now, &config, &no_dispositions());
 
         let projection = project(&fold_result, &[], query_now, &config, false);
 
@@ -359,7 +364,7 @@ mod tests {
         let query_now = now();
 
         let claim = make_claim(&agent, serde_json::json!("Rome"), tx, None, 0.0);
-        let fold_result = fold(vec![claim], no_assertions, query_now, &config);
+        let fold_result = fold(vec![claim], no_assertions, query_now, &config, &no_dispositions());
 
         let projection = project(&fold_result, &[], query_now, &config, false);
 
@@ -375,7 +380,7 @@ mod tests {
         let query_now = now();
 
         let claim = make_claim(&agent, serde_json::json!("Berlin"), tx, None, 0.0);
-        let fold_result = fold(vec![claim], no_assertions, query_now, &config);
+        let fold_result = fold(vec![claim], no_assertions, query_now, &config, &no_dispositions());
 
         let projection = project(&fold_result, &[], query_now, &config, false);
 
@@ -415,7 +420,7 @@ mod tests {
             }
         };
 
-        let fold_result = fold(vec![claim], assertions_fn, query_now, &config);
+        let fold_result = fold(vec![claim], assertions_fn, query_now, &config, &no_dispositions());
         let projection = project(&fold_result, &[], query_now, &config, false);
 
         assert!(projection.primary.is_none(), "invalidated claim must not be the primary belief");
@@ -434,7 +439,7 @@ mod tests {
 
         let c1 = make_claim(&agent, serde_json::json!("Paris"), t1, None, 0.0);
         let c2 = make_claim(&agent, serde_json::json!("Rome"), t2, None, 0.0);
-        let fold_result = fold(vec![c1, c2], no_assertions, now(), &config);
+        let fold_result = fold(vec![c1, c2], no_assertions, now(), &config, &no_dispositions());
 
         // No silent pick — project with contested=false but fold has_conflict=true.
         let projection = project(&fold_result, &[], now(), &config, false);
@@ -457,7 +462,7 @@ mod tests {
         let claim = make_claim(&agent, serde_json::json!("Madrid"), tx, None, 0.0);
         let claim_ref = claim.claim_ref().clone();
 
-        let fold_result = fold(vec![claim], no_assertions, query_now, &config);
+        let fold_result = fold(vec![claim], no_assertions, query_now, &config, &no_dispositions());
 
         // Simulate a DependentFlaggedPendingReview ledger entry for this claim.
         let pending_entry = LedgerEntry {
@@ -493,12 +498,13 @@ mod tests {
 
         // "now" A = present time: 91 days after tx → Decayed
         let now_a = Utc::now();
-        let fold_a = fold(vec![claim.clone()], no_assertions, now_a, &config);
+        let disp = no_dispositions();
+        let fold_a = fold(vec![claim.clone()], no_assertions, now_a, &config, &disp);
         let proj_a = project(&fold_a, &[], now_a, &config, false);
 
         // "now" B = 50 days ago: at that point, claim was only ~41 days old → AgingUnconfirmed
         let now_b = Utc::now() - chrono::Duration::days(50);
-        let fold_b = fold(vec![claim], no_assertions, now_b, &config);
+        let fold_b = fold(vec![claim], no_assertions, now_b, &config, &disp);
         let proj_b = project(&fold_b, &[], now_b, &config, false);
 
         assert_eq!(proj_a.currency, CurrencyState::Decayed, "now_a: should be Decayed");
@@ -511,7 +517,7 @@ mod tests {
     #[test]
     fn no_belief_for_empty_subject_line() {
         let config = EngineConfig::default();
-        let fold_result = fold(vec![], no_assertions, now(), &config);
+        let fold_result = fold(vec![], no_assertions, now(), &config, &no_dispositions());
         let projection = project(&fold_result, &[], now(), &config, false);
 
         assert_eq!(projection.status, BeliefStatus::NoBelief);

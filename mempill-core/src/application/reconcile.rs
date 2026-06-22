@@ -6,9 +6,10 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use mempill_types::{LedgerEntry, LedgerEventKind, TransactionTime};
+use mempill_types::{ClaimEdge, LedgerEntry, LedgerEventKind, TransactionTime};
 
 use crate::{
+    application::ingest_claim::build_latest_disposition_map,
     config::EngineConfig,
     engine::{
         gate,
@@ -55,52 +56,104 @@ where
         let mut outcomes = Vec::new();
         let mut oracle_escalations = 0u32;
 
-        // Open a single Txn for the entire reconciliation pass (I9).
+        // ── DEFECT-1 FIX: Collect ALL reads BEFORE begin_atomic ──────────────────
+        // All subject-line claims, validity assertions, ledger, and edges for any
+        // supersession candidate must be loaded HERE — outside the transaction window.
+
+        // Load ledger for disposition filtering (DEFECT-2 fix).
+        let all_ledger = self.persistence
+            .load_ledger(&req.agent_id, None, 10_000)
+            .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+        let latest_disposition = build_latest_disposition_map(&all_ledger);
+
+        // Per subject-line: load claims, fold, compute decisions, pre-load edges.
+        struct SubjectLineData {
+            fold: truth_engine::FoldResult,
+            // For each live claim: (decision, preloaded_edges_for_supersession)
+            per_claim: Vec<(
+                mempill_types::ClaimRef,
+                crate::engine::gate::GateDecision,
+                Vec<ClaimEdge>,
+            )>,
+        }
+
+        let mut subject_line_data: Vec<SubjectLineData> = Vec::new();
+
+        for (subject, predicate) in &req.subject_lines {
+            let claims = self.persistence
+                .load_subject_line(&req.agent_id, subject, predicate)
+                .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+
+            let fold = truth_engine::fold(
+                claims.clone(),
+                |cref| {
+                    self.persistence
+                        .load_validity_assertions_for(&req.agent_id, cref)
+                        .unwrap_or_default()
+                },
+                tx_time.0,
+                &self.config,
+                &latest_disposition,
+            );
+
+            let incumbent = fold.live_claims.first().map(|cs| truth_engine::claim_to_belief(cs));
+
+            let mut per_claim = Vec::new();
+            for cs in &fold.live_claims {
+                let candidate = &cs.claim;
+                let proposal = reconciler::reconcile(
+                    ReconcilerInput {
+                        candidate,
+                        incumbent: incumbent.as_ref(),
+                        superseded_claim_refs: &[],
+                        measured_confidence: candidate.confidence().value_confidence,
+                        cardinality_proposal: candidate.cardinality().clone(),
+                        oracle_present,
+                    },
+                    &self.config,
+                );
+                let decision = gate::adjudicate(&proposal, &self.config);
+
+                // Pre-load edges for supersession if this will be a HeavyPath (DEFECT-1 fix).
+                let preloaded_edges = if matches!(decision.route, Route::HeavyPath) {
+                    if let Some(ref inc) = incumbent {
+                        if inc.claim_ref != *candidate.claim_ref() {
+                            self.persistence
+                                .load_edges_for(&req.agent_id, &inc.claim_ref)
+                                .map_err(|e| MemError::Persistence { source: Box::new(e) })?
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                per_claim.push((candidate.claim_ref().clone(), decision, preloaded_edges));
+            }
+
+            subject_line_data.push(SubjectLineData { fold, per_claim });
+        }
+
+        // ── Now open the transaction — writes only ─────────────────────────────
         let mut txn = self.persistence
             .begin_atomic(&req.agent_id)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         let result = (|| {
-            for (subject, predicate) in &req.subject_lines {
-                let claims = self.persistence
-                    .load_subject_line(&req.agent_id, subject, predicate)
-                    .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+            for (sld_idx, sld) in subject_line_data.iter().enumerate() {
+                let incumbent = sld.fold.live_claims.first()
+                    .map(|cs| truth_engine::claim_to_belief(cs));
+                let _ = sld_idx; // suppress unused warning
 
-                let fold = truth_engine::fold(
-                    claims.clone(),
-                    |cref| {
-                        self.persistence
-                            .load_validity_assertions_for(&req.agent_id, cref)
-                            .unwrap_or_default()
-                    },
-                    tx_time.0,
-                    &self.config,
-                );
-
-                let incumbent = fold.live_claims.first().map(|cs| truth_engine::claim_to_belief(cs));
-
-                // Re-evaluate each live claim against the incumbent.
-                for cs in &fold.live_claims {
-                    let candidate = &cs.claim;
-                    let proposal = reconciler::reconcile(
-                        ReconcilerInput {
-                            candidate,
-                            incumbent: incumbent.as_ref(),
-                            superseded_claim_refs: &[],
-                            measured_confidence: candidate.confidence().value_confidence,
-                            cardinality_proposal: candidate.cardinality().clone(),
-                            oracle_present,
-                        },
-                        &self.config,
-                    );
-
-                    let decision = gate::adjudicate(&proposal, &self.config);
-
+                for (claim_ref, decision, preloaded_edges) in &sld.per_claim {
                     // Append ledger entry for the reconciliation outcome.
                     let entry = LedgerEntry {
                         entry_id: uuid::Uuid::new_v4(),
                         agent_id: req.agent_id.clone(),
-                        claim_ref: candidate.claim_ref().clone(),
+                        claim_ref: claim_ref.clone(),
                         event_kind: LedgerEventKind::AdjudicationResolved,
                         disposition: decision.disposition.clone(),
                         rationale: Some(decision.rationale.clone()),
@@ -110,25 +163,30 @@ where
                         .append_ledger_entry(&mut txn, &entry)
                         .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
-                    // C4 supersession if heavy path.
+                    // C4 supersession if heavy path — uses preloaded_edges (DEFECT-1 fix).
                     if matches!(decision.route, Route::HeavyPath) {
-                        if let Some(inc) = &incumbent {
-                            if inc.claim_ref != *candidate.claim_ref() {
+                        if let Some(ref inc) = incumbent {
+                            if inc.claim_ref != *claim_ref {
                                 let supr = SupersessionRequest {
                                     agent_id: req.agent_id.clone(),
                                     superseded_ref: inc.claim_ref.clone(),
-                                    overturning_ref: candidate.claim_ref().clone(),
+                                    overturning_ref: claim_ref.clone(),
                                     bound_at: tx_time.0,
                                     recorded_at: tx_time.clone(),
                                 };
-                                supersession::execute(&*self.persistence, &mut txn, &supr)
-                                    .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+                                supersession::execute(
+                                    &*self.persistence,
+                                    &mut txn,
+                                    &supr,
+                                    preloaded_edges,
+                                )
+                                .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
                             }
                             oracle_escalations += 1;
                         }
                     }
 
-                    outcomes.push((candidate.claim_ref().clone(), decision.disposition));
+                    outcomes.push((claim_ref.clone(), decision.disposition.clone()));
                 }
             }
             Ok(())

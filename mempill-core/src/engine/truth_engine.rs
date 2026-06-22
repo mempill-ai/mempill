@@ -14,6 +14,8 @@
 //! - I10: fixed-history monotonicity — belief is monotone over a fixed history.
 //! - I3: belief is derived, never stored — callers always re-fold at query time.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use mempill_types::{
     AssertionKind, Belief, BeliefStatus, Cardinality, Claim, ClaimRef, CurrencySignal,
@@ -21,6 +23,19 @@ use mempill_types::{
 };
 
 use crate::config::EngineConfig;
+
+/// Dispositions that make a claim non-live regardless of ValidityAssertions.
+/// Even without a Bound assertion, a claim with one of these dispositions
+/// must be excluded from the live set (DEFECT-2 fix).
+fn is_non_live_disposition(d: &Disposition) -> bool {
+    matches!(
+        d,
+        Disposition::Quarantined
+            | Disposition::Superseded
+            | Disposition::Invalidated
+            | Disposition::Rejected
+    )
+}
 
 // ── Public result type ────────────────────────────────────────────────────────
 
@@ -129,6 +144,10 @@ pub(crate) fn is_claim_live(
 ///   claims in `claims`.  Callers supply this as a closure to keep the fold pure (no I/O here).
 /// - `as_of_tx_time`: the bi-temporal query point (≤ now for historical queries).
 /// - `config`: EngineConfig for the ordering-key confidence threshold.
+/// - `latest_disposition`: map of ClaimRef → latest Disposition from the ledger.
+///   Claims whose latest disposition is Quarantined, Superseded, Invalidated, or Rejected
+///   are excluded from the live set even if no ValidityAssertion::Bound was appended
+///   (DEFECT-2 fix — disposition-based liveness filter).
 ///
 /// Returns a `FoldResult` with live claims in canonical order.
 pub(crate) fn fold<F>(
@@ -136,6 +155,7 @@ pub(crate) fn fold<F>(
     assertions_for: F,
     as_of_tx_time: DateTime<Utc>,
     config: &EngineConfig,
+    latest_disposition: &HashMap<ClaimRef, Disposition>,
 ) -> FoldResult
 where
     F: Fn(&ClaimRef) -> Vec<ValidityAssertion>,
@@ -148,15 +168,25 @@ where
     });
 
     // Step 2 — evaluate liveness for each claim.
+    // A claim is live if:
+    //   (a) it is not bounded by a ValidityAssertion, AND
+    //   (b) its latest ledger disposition is NOT one of the non-live dispositions
+    //       (Quarantined, Superseded, Invalidated, Rejected) — DEFECT-2 fix.
     let mut with_status: Vec<ClaimWithStatus> = claims
         .into_iter()
         .map(|c| {
+            let last_disp = latest_disposition.get(c.claim_ref()).cloned();
+            let disposition_live = last_disp
+                .as_ref()
+                .map(|d| !is_non_live_disposition(d))
+                .unwrap_or(true); // no ledger entry = admitted (new claim before first write)
             let assertions = assertions_for(c.claim_ref());
-            let live = is_claim_live(&assertions, as_of_tx_time);
+            let assertion_live = is_claim_live(&assertions, as_of_tx_time);
+            let live = assertion_live && disposition_live;
             ClaimWithStatus {
                 claim: c,
                 is_live: live,
-                last_disposition: None,
+                last_disposition: last_disp,
             }
         })
         .collect();
@@ -264,6 +294,11 @@ mod tests {
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
+    /// Empty disposition map — used in tests where no ledger entries affect liveness.
+    fn no_dispositions() -> std::collections::HashMap<ClaimRef, Disposition> {
+        std::collections::HashMap::new()
+    }
+
     fn agent() -> AgentId {
         AgentId("agent-1".into())
     }
@@ -325,9 +360,10 @@ mod tests {
         // Order C: [c2, c3, c1]
         let order_c = vec![c2.clone(), c3.clone(), c1.clone()];
 
-        let result_a = fold(order_a, no_assertions, now(), &config);
-        let result_b = fold(order_b, no_assertions, now(), &config);
-        let result_c = fold(order_c, no_assertions, now(), &config);
+        let disp = no_dispositions();
+        let result_a = fold(order_a, no_assertions, now(), &config, &disp);
+        let result_b = fold(order_b, no_assertions, now(), &config, &disp);
+        let result_c = fold(order_c, no_assertions, now(), &config, &disp);
 
         // Live claims count must be identical regardless of input order.
         assert_eq!(result_a.live_claims.len(), result_b.live_claims.len(), "live count must be arrival-order independent");
@@ -440,7 +476,7 @@ mod tests {
             }
         };
 
-        let result = fold(claims, assertions_fn, query_now, &config);
+        let result = fold(claims, assertions_fn, query_now, &config, &no_dispositions());
 
         // Incumbent should be bounded (not live); newer should be the sole live claim.
         assert_eq!(result.live_claims.len(), 1, "only the newer claim should be live");
@@ -495,7 +531,7 @@ mod tests {
             }
         };
 
-        let result = fold(claims, assertions_fn, query_now, &config);
+        let result = fold(claims, assertions_fn, query_now, &config, &no_dispositions());
 
         // Total claims passed in = 2; live = 1; the other is bounded (not deleted).
         // The fold result only tracks live — history is provided by the persistence layer.
@@ -517,7 +553,7 @@ mod tests {
         let c1 = make_claim(&agent, "user", "role", serde_json::json!("admin"), t1, None, 0.0, Cardinality::Functional);
         let c2 = make_claim(&agent, "user", "role", serde_json::json!("viewer"), t2, None, 0.0, Cardinality::Functional);
 
-        let result = fold(vec![c1, c2], no_assertions, now(), &config);
+        let result = fold(vec![c1, c2], no_assertions, now(), &config, &no_dispositions());
 
         assert!(result.has_conflict, "two live Functional claims must produce has_conflict=true (I7)");
         assert_eq!(result.live_claims.len(), 2, "both live claims retained (I7 never silently picks)");
@@ -535,7 +571,7 @@ mod tests {
         let c1 = make_claim(&agent, "user", "tag", serde_json::json!("rust"), t1, None, 0.0, Cardinality::SetValued);
         let c2 = make_claim(&agent, "user", "tag", serde_json::json!("python"), t2, None, 0.0, Cardinality::SetValued);
 
-        let result = fold(vec![c1, c2], no_assertions, now(), &config);
+        let result = fold(vec![c1, c2], no_assertions, now(), &config, &no_dispositions());
 
         assert!(!result.has_conflict, "set-valued claims should not produce conflict");
         assert_eq!(result.live_claims.len(), 2, "both set-valued claims are live");
@@ -613,6 +649,7 @@ mod tests {
         let assertions = vec![bound];
         let assertions_fn_clone = assertions.clone();
 
+        let disp = no_dispositions();
         // Query in the far PAST (before the bound)
         let past_now = t0 + chrono::Duration::hours(1);
         let result_past = fold(
@@ -620,6 +657,7 @@ mod tests {
             |_| assertions_fn_clone.clone(),
             past_now,
             &config,
+            &disp,
         );
 
         // Query in the present (after the bound)
@@ -629,6 +667,7 @@ mod tests {
             |_| assertions.clone(),
             present_now,
             &config,
+            &disp,
         );
 
         // At past_now (before bound), claim should be live.

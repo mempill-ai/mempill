@@ -8,6 +8,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::{
+    application::ingest_claim::build_latest_disposition_map,
     config::EngineConfig,
     engine::{projection, truth_engine},
     error::MemError,
@@ -56,7 +57,13 @@ where
         // otherwise use the injected `now`.
         let as_of = req.as_of_tx_time.unwrap_or(now);
 
-        // C2: canonical valid-time fold.
+        // Load ledger for DEFECT-2 fix (disposition-based liveness filter) — must come before fold.
+        let all_ledger = self.persistence
+            .load_ledger(&req.agent_id, None, 10_000)
+            .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+        let latest_disposition = build_latest_disposition_map(&all_ledger);
+
+        // C2: canonical valid-time fold (with disposition filter — DEFECT-2 fix).
         let fold = truth_engine::fold(
             claims.clone(),
             |cref| {
@@ -66,19 +73,16 @@ where
             },
             as_of,
             &self.config,
+            &latest_disposition,
         );
 
-        // Load ledger entries for all claims (for A26 PendingReview detection).
-        let mut ledger_entries = Vec::new();
-        for claim in &claims {
-            let entries = self.persistence
-                .load_ledger(&req.agent_id, None, 1000)
-                .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
-            // Filter to this claim's entries.
-            ledger_entries.extend(
-                entries.into_iter().filter(|e| &e.claim_ref == claim.claim_ref())
-            );
-        }
+        // Build ledger entries per claim (for A26 PendingReview detection).
+        // Reuse the already-loaded all_ledger from above (no second load needed).
+        let ledger_entries: Vec<_> = claims.iter().flat_map(|c| {
+            all_ledger.iter()
+                .filter(|e| &e.claim_ref == c.claim_ref())
+                .cloned()
+        }).collect();
 
         // Determine contested state from ledger (Contested disposition in live claims).
         let contested = fold.live_claims.iter().any(|cs| {

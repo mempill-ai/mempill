@@ -51,9 +51,11 @@ pub(crate) struct SupersessionRequest {
 /// Performs, in order, within the ALREADY-OPEN `txn`:
 ///   1. Append `AssertionKind::Bound` `ValidityAssertion` closing the incumbent.
 ///   2. Append a `LedgerEventKind::ValidityAsserted` ledger entry for the incumbent.
-///   3. Load all `ClaimEdge`s for the incumbent (non-mutating read inside the Txn).
-///   4. For each edge where `edge.kind == EdgeKind::DependsOn && edge.to_claim == superseded_ref`,
+///   3. For each edge in `preloaded_edges` where `edge.kind == EdgeKind::DependsOn && edge.to_claim == superseded_ref`,
 ///      append a `DependentFlaggedPendingReview` ledger entry for `edge.from_claim` (A26).
+///
+/// `preloaded_edges` MUST be loaded by the caller BEFORE calling `begin_atomic()` to avoid
+/// reads inside an open transaction (DEFECT-1 fix — no reads allowed inside the Txn window).
 ///
 /// Returns the total number of `DependentFlaggedPendingReview` entries appended (useful for
 /// callers and tests).
@@ -65,6 +67,7 @@ pub(crate) fn execute<P: PersistencePort>(
     port: &P,
     txn: &mut P::Transaction,
     req: &SupersessionRequest,
+    preloaded_edges: &[mempill_types::ClaimEdge],
 ) -> Result<usize, P::Error> {
     // Step 1 — Bound ValidityAssertion (closes the incumbent's valid window, I1).
     let assertion = ValidityAssertion {
@@ -99,10 +102,11 @@ pub(crate) fn execute<P: PersistencePort>(
     };
     port.append_ledger_entry(txn, &ledger_supersession)?;
 
-    // Step 3 — Load DependsOn edges (non-mutating read within the open Txn).
-    // `load_edges_for` returns ALL edges for the superseded claim; we filter to
+    // Step 3 — DependsOn edges are already loaded by the caller (preloaded_edges).
+    // This avoids reads inside the open Txn (DEFECT-1 fix — see module doc).
+    // `preloaded_edges` contains ALL edges for the superseded claim; we filter to
     // edges where `to_claim == superseded_ref` and `kind == DependsOn`.
-    let edges = port.load_edges_for(&req.agent_id, &req.superseded_ref)?;
+    let edges = preloaded_edges;
 
     // Step 4 — Cascade: one DependentFlaggedPendingReview entry per dependent (A26).
     //
@@ -113,7 +117,7 @@ pub(crate) fn execute<P: PersistencePort>(
     // Do NOT iterate the HashSet directly — its order is non-deterministic.
     let mut seen_dependents: HashSet<ClaimRef> = HashSet::new();
     let mut cascade_count = 0usize;
-    for edge in &edges {
+    for edge in edges {
         if edge.kind == EdgeKind::DependsOn && edge.to_claim == req.superseded_ref {
             // Skip if this dependent was already flagged in this cascade (A26 idempotency).
             if !seen_dependents.insert(edge.from_claim.clone()) {
@@ -241,6 +245,8 @@ mod tests {
         /// Edges available for load_edges_for queries (set up per test).
         edges: Vec<ClaimEdge>,
         committed: Arc<Mutex<CommittedState>>,
+        /// Tracks whether a transaction is currently open (mock hardening: reads fail when open).
+        txn_open: Mutex<bool>,
     }
 
     impl MockPort {
@@ -249,6 +255,7 @@ mod tests {
                 agent_id,
                 edges,
                 committed: Arc::new(Mutex::new(CommittedState::default())),
+                txn_open: Mutex::new(false),
             }
         }
 
@@ -272,6 +279,7 @@ mod tests {
         type Error = MockError;
 
         fn begin_atomic(&self, agent_id: &AgentId) -> Result<MockTxn, MockError> {
+            *self.txn_open.lock().unwrap() = true;
             Ok(MockTxn::new(agent_id.clone()))
         }
 
@@ -312,6 +320,7 @@ mod tests {
         }
 
         fn commit(&self, txn: MockTxn) -> Result<(), MockError> {
+            *self.txn_open.lock().unwrap() = false;
             let mut state = self.committed.lock().unwrap();
             for append in txn.appends {
                 match append {
@@ -323,6 +332,7 @@ mod tests {
         }
 
         fn rollback(&self, mut txn: MockTxn) -> Result<(), MockError> {
+            *self.txn_open.lock().unwrap() = false;
             txn.rolled_back = true;
             // Discards all pending appends — nothing written to committed state.
             Ok(())
@@ -333,6 +343,10 @@ mod tests {
             _agent_id: &AgentId,
             claim_ref: &ClaimRef,
         ) -> Result<Vec<ClaimEdge>, MockError> {
+            // Mock hardening: reject reads while a transaction is open (mirrors real SqliteStore).
+            if *self.txn_open.lock().unwrap() {
+                return Err(MockError::InjectedFailure);
+            }
             // Return edges where `to_claim == claim_ref` AND kind == DependsOn,
             // mirroring the real DB query semantics expected by supersession.
             Ok(self.edges.iter()
@@ -346,34 +360,40 @@ mod tests {
         fn load_subject_line(
             &self, _: &AgentId, _: &str, _: &str,
         ) -> Result<Vec<Claim>, MockError> {
+            if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])
         }
 
         fn load_claim(
             &self, _: &AgentId, _: &ClaimRef,
         ) -> Result<Option<Claim>, MockError> {
+            if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(None)
         }
 
         fn load_validity_assertions_for(
             &self, _: &AgentId, _: &ClaimRef,
         ) -> Result<Vec<ValidityAssertion>, MockError> {
+            if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])
         }
 
         fn load_ledger(
             &self, _: &AgentId, _: Option<&TransactionTime>, _: usize,
         ) -> Result<Vec<LedgerEntry>, MockError> {
+            if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])
         }
 
         fn load_injected_claims(&self, _: &AgentId) -> Result<Vec<ClaimRef>, MockError> {
+            if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])
         }
 
         fn load_lineage(
             &self, _: &AgentId, _: &ClaimRef,
         ) -> Result<Vec<ClaimEdge>, MockError> {
+            if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])
         }
     }
@@ -443,10 +463,12 @@ mod tests {
             depends_on_edge(dep2, req.superseded_ref.clone(), &agent),
             depends_on_edge(dep3, req.superseded_ref.clone(), &agent),
         ];
-        let port = MockPort::new(agent.clone(), edges);
+        let port = MockPort::new(agent.clone(), edges.clone());
 
+        // Pre-load edges BEFORE opening the transaction (DEFECT-1 fix).
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let cascade_n = execute(&port, &mut txn, &req).unwrap();
+        let cascade_n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         // Exactly {1 Bound assertion + 1 ValidityAsserted ledger + 3 DependentFlagged} = 5 writes.
@@ -475,11 +497,13 @@ mod tests {
         let req = make_req(&agent);
         let dep = ClaimRef::new_random();
         let edges = vec![depends_on_edge(dep, req.superseded_ref.clone(), &agent)];
-        let port = MockPort::new(agent.clone(), edges);
+        let port = MockPort::new(agent.clone(), edges.clone());
 
+        // Pre-load edges BEFORE opening the transaction (DEFECT-1 fix).
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         // Fail on the 2nd write (the supersession ledger entry) — simulates mid-Txn failure.
         let mut txn = MockTxn::new(agent.clone()).with_fail_on(2);
-        let result = execute(&port, &mut txn, &req);
+        let result = execute(&port, &mut txn, &req, &preloaded);
 
         assert!(result.is_err(), "expected error from injected failure");
 
@@ -501,8 +525,9 @@ mod tests {
             .collect();
         let port = MockPort::new(agent.clone(), edges);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 3);
@@ -529,8 +554,9 @@ mod tests {
         let req = make_req(&agent);
         let port = MockPort::new(agent.clone(), vec![]); // no DependsOn edges
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 0, "no cascade when no dependents");
@@ -552,8 +578,9 @@ mod tests {
         let req = make_req(&agent);
         let port = MockPort::new(agent.clone(), vec![]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let _ = execute(&port, &mut txn, &req).unwrap();
+        let _ = execute(&port, &mut txn, &req, &preloaded).unwrap();
         // Inspect the Txn's pending appends BEFORE commit.
         // There must be only Assertion and Ledger appends — no deletes.
         let has_only_appends = txn.appends.iter().all(|a| {
@@ -588,8 +615,10 @@ mod tests {
 
         let run = || -> (usize, usize, usize) {
             let port = MockPort::new(agent.clone(), edges.clone());
+            let req = build_req();
+            let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
             let mut txn = port.begin_atomic(&agent).unwrap();
-            let n = execute(&port, &mut txn, &build_req()).unwrap();
+            let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
             port.commit(txn).unwrap();
             (
                 n,
@@ -625,8 +654,9 @@ mod tests {
         };
         let port = MockPort::new(agent.clone(), vec![unrelated_edge]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 0, "DerivedFrom edge must not trigger DependsOn cascade");
@@ -644,8 +674,9 @@ mod tests {
         let req = make_req(&agent);
         let port = MockPort::new(agent.clone(), vec![]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let _ = execute(&port, &mut txn, &req).unwrap();
+        let _ = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         let state = port.committed.lock().unwrap();
@@ -692,8 +723,9 @@ mod tests {
         ];
         let port = MockPort::new(agent.clone(), edges);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 2, "only B and C are direct dependents of A; D must not be flagged");
@@ -722,8 +754,9 @@ mod tests {
         ];
         let port = MockPort::new(agent.clone(), edges);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 2);
@@ -771,8 +804,9 @@ mod tests {
 
         let port = MockPort::new(agent.clone(), vec![edge1, edge2]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         // SPEC: D must be flagged exactly once regardless of duplicate edges.
@@ -813,8 +847,9 @@ mod tests {
         };
         let port = MockPort::new(agent.clone(), vec![wrong_direction_edge]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 0, "outbound DependsOn from superseded claim must not trigger cascade");
@@ -844,8 +879,9 @@ mod tests {
         };
         let port = MockPort::new(agent.clone(), vec![derived_from_edge]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 0, "DerivedFrom edge must not cascade to PendingReview (A26 DependsOn-only)");
@@ -873,8 +909,9 @@ mod tests {
         };
         let port = MockPort::new(agent.clone(), vec![mutex_edge]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 0, "MutualExclusion edge must not cascade");
@@ -903,8 +940,9 @@ mod tests {
         };
         let port = MockPort::new(agent.clone(), vec![supersedes_edge]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 0, "Supersedes edge must not cascade to PendingReview");
@@ -944,8 +982,9 @@ mod tests {
                 recorded_at: recorded_at.clone(),
             };
             let port = MockPort::new(agent.clone(), edges.clone());
+            let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
             let mut txn = port.begin_atomic(&agent).unwrap();
-            execute(&port, &mut txn, &req).unwrap();
+            execute(&port, &mut txn, &req, &preloaded).unwrap();
             port.commit(txn).unwrap();
             let state = port.committed.lock().unwrap();
             state.ledger.iter()
@@ -974,9 +1013,11 @@ mod tests {
         let edges = vec![depends_on_edge(dep, req.superseded_ref.clone(), &agent)];
         let port = MockPort::new(agent.clone(), edges);
 
+        // Pre-load edges before opening txn; then inject failure into a raw MockTxn.
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         // Fail on write 1 = append_validity_assertion (the Bound assertion).
         let mut txn = MockTxn::new(agent.clone()).with_fail_on(1);
-        let result = execute(&port, &mut txn, &req);
+        let result = execute(&port, &mut txn, &req, &preloaded);
 
         assert!(result.is_err(), "should fail on write 1");
         port.rollback(txn).unwrap();
@@ -1007,9 +1048,11 @@ mod tests {
         ];
         let port = MockPort::new(agent.clone(), edges);
 
+        // Pre-load edges before opening txn; then inject failure into a raw MockTxn.
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         // 3 dependents = 5 total writes; fail on write 5 (last cascade entry).
         let mut txn = MockTxn::new(agent.clone()).with_fail_on(5);
-        let result = execute(&port, &mut txn, &req);
+        let result = execute(&port, &mut txn, &req, &preloaded);
 
         assert!(result.is_err(), "should fail on the last cascade write (write 5)");
         port.rollback(txn).unwrap();
@@ -1028,8 +1071,9 @@ mod tests {
         let req = make_req(&agent);
         let port = MockPort::new(agent.clone(), vec![]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let n = execute(&port, &mut txn, &req).unwrap();
+        let n = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         assert_eq!(n, 0);
@@ -1049,8 +1093,9 @@ mod tests {
         let req = make_req(&agent);
         let port = MockPort::new(agent.clone(), vec![]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = MockTxn::new(agent.clone()).with_fail_on(1);
-        let result = execute(&port, &mut txn, &req);
+        let result = execute(&port, &mut txn, &req, &preloaded);
 
         assert!(result.is_err());
         port.rollback(txn).unwrap();
@@ -1078,8 +1123,9 @@ mod tests {
         ];
         let port = MockPort::new(agent.clone(), edges);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let _ = execute(&port, &mut txn, &req).unwrap();
+        let _ = execute(&port, &mut txn, &req, &preloaded).unwrap();
 
         // All appended items before commit must be typed as Assertion or Ledger.
         let all_append_typed = txn.appends.iter().all(|a| {
@@ -1116,8 +1162,9 @@ mod tests {
         let req = make_req(&agent);
         let port = MockPort::new(agent.clone(), vec![]);
 
+        let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
-        let _ = execute(&port, &mut txn, &req).unwrap();
+        let _ = execute(&port, &mut txn, &req, &preloaded).unwrap();
         port.commit(txn).unwrap();
 
         let state = port.committed.lock().unwrap();

@@ -116,6 +116,14 @@ where
             .load_subject_line(&req.agent_id, &req.subject, &req.predicate)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
+        // Load ledger for disposition-based filtering (DEFECT-2 fix).
+        let ledger_for_fold = self.persistence
+            .load_ledger(&req.agent_id, None, 10_000)
+            .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+
+        // Build LATEST disposition per claim from the ledger (for DEFECT-2 fold filter).
+        let latest_disposition = build_latest_disposition_map(&ledger_for_fold);
+
         // Fold the incumbent claims to get the live canonical belief.
         let as_of = tx_time.0;
         let fold_result = truth_engine::fold(
@@ -127,6 +135,7 @@ where
             },
             as_of,
             &self.config,
+            &latest_disposition,
         );
         let incumbent_belief = fold_result.live_claims.first().map(|cs| {
             truth_engine::claim_to_belief(cs)
@@ -148,6 +157,21 @@ where
         // ── Step 4: C7 gate — adjudicate ─────────────────────────────────────────
         let decision = gate::adjudicate(&proposal, &self.config);
 
+        // ── Step 4.5: Pre-load edges for supersession BEFORE begin_atomic (DEFECT-1 fix) ──
+        // If the gate decided HeavyPath and there is an incumbent, load its DependsOn edges
+        // now (outside the transaction) so supersession::execute can receive them inside the txn.
+        let preloaded_edges: Vec<ClaimEdge> = if matches!(decision.route, gate::Route::HeavyPath) {
+            if let Some(ref inc) = incumbent_belief {
+                self.persistence
+                    .load_edges_for(&req.agent_id, &inc.claim_ref)
+                    .map_err(|e| MemError::Persistence { source: Box::new(e) })?
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
         // ── Step 5: I9 atomic Txn — begin ────────────────────────────────────────
         let mut txn = self.persistence
             .begin_atomic(&req.agent_id)
@@ -159,6 +183,7 @@ where
             &incumbent_belief,
             &req.agent_id,
             tx_time.clone(),
+            &preloaded_edges,
             &mut txn,
         );
 
@@ -186,6 +211,9 @@ where
     }
 
     /// All persistence writes inside the open Txn.
+    ///
+    /// `preloaded_edges` must be loaded by the caller BEFORE opening the transaction
+    /// (DEFECT-1 fix — reads inside a SQLite exclusive transaction are not possible).
     fn append_within_txn(
         &self,
         claim: &Claim,
@@ -193,6 +221,7 @@ where
         incumbent_belief: &Option<mempill_types::Belief>,
         agent_id: &AgentId,
         tx_time: TransactionTime,
+        preloaded_edges: &[ClaimEdge],
         txn: &mut P::Transaction,
     ) -> Result<IngestClaimResponse, MemError> {
         use gate::Route;
@@ -232,6 +261,7 @@ where
         }
 
         // C4 supersession: if heavy-path overturn was decided, cascade.
+        // preloaded_edges were loaded BEFORE begin_atomic (DEFECT-1 fix).
         let mut contested_with = vec![];
         if matches!(decision.route, Route::HeavyPath) {
             if let Some(incumbent) = incumbent_belief {
@@ -242,7 +272,7 @@ where
                     bound_at: tx_time.0,
                     recorded_at: tx_time.clone(),
                 };
-                supersession::execute(&*self.persistence, txn, &supersession_req)
+                supersession::execute(&*self.persistence, txn, &supersession_req, preloaded_edges)
                     .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
                 contested_with.push(incumbent.claim_ref.clone());
             }
@@ -254,6 +284,26 @@ where
             contested_with,
         })
     }
+}
+
+/// Build a map of ClaimRef → latest Disposition from a ledger slice.
+/// "Latest" = the entry with the maximum `recorded_at`. Used by fold to exclude
+/// non-live dispositions (DEFECT-2 fix).
+pub(crate) fn build_latest_disposition_map(
+    ledger: &[mempill_types::LedgerEntry],
+) -> std::collections::HashMap<mempill_types::ClaimRef, Disposition> {
+    let mut map: std::collections::HashMap<mempill_types::ClaimRef, (mempill_types::TransactionTime, Disposition)> =
+        std::collections::HashMap::new();
+    for entry in ledger {
+        let existing = map.get(&entry.claim_ref);
+        let should_insert = existing
+            .map(|(t, _)| entry.recorded_at.0 > t.0)
+            .unwrap_or(true);
+        if should_insert {
+            map.insert(entry.claim_ref.clone(), (entry.recorded_at.clone(), entry.disposition.clone()));
+        }
+    }
+    map.into_iter().map(|(k, (_, d))| (k, d)).collect()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
