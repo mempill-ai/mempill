@@ -1,0 +1,8 @@
+[package]
+name = "mempill-sqlite"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mempill-types = { path = "../mempill-types" }
+mempill-core = { path = "../mempill-core" }

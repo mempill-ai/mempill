@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "mempill-types",
+    "mempill-core",
+    "mempill-sqlite",
+    "mempill-python",
+    "mempill-ts",
+    "mempill-mcp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

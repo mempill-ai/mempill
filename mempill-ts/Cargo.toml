@@ -1,0 +1,7 @@
+[package]
+name = "mempill-ts"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mempill-core = { path = "../mempill-core" }
