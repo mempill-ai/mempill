@@ -1,7 +1,7 @@
 //! # mempill-core
 //!
-//! Domain engine port traits, configuration, error model, and NoOp stubs for the
-//! mempill temporally-correct AI-agent memory engine.
+//! Domain engine port traits, configuration, error model, NoOp stubs, use-cases, DTOs,
+//! and the async EngineHandle for the mempill temporally-correct AI-agent memory engine.
 //!
 //! ## Crate Organization
 //!
@@ -14,32 +14,41 @@
 //! - `config`  — [`EngineConfig`] struct with all OP-3 tuning parameters.
 //! - `error`   — [`MemError`] enum (thiserror), [`WriteResult`], [`BeliefResult`] aliases.
 //! - `noop`    — [`noop::NoOpOracle`], [`noop::NoOpVector`] — do-nothing stubs for tests.
+//! - `application/` — use-cases (IngestClaim, QueryMemory, Reconcile, Audit) + public DTOs.
+//! - `engine_handle` — [`EngineHandle`] async public entry point; bridges async callers to sync core.
 //!
 //! ## Wave Scope
 //!
-//! W3 adds the engine's first business logic modules:
-//! - `engine/gateway` (C1) — ingestion gateway, provenance stamping, tx-time assignment.
-//! - `engine/gate` (C7) — deterministic adjudication gate (pure function).
-//! - `concurrency/agent_lock` — per-agent_id write lock (single-writer enforcement, A22).
+//! W7 adds the application layer:
+//! - `application/` (A27–A29) — use-cases, DTOs, DTO↔domain mapping.
+//! - `engine_handle` — async EngineHandle wrapping use-cases via `spawn_blocking`.
 //!
 //! ## Sync Core Convention (F1, A20)
 //!
 //! All port traits and engine domain functions are synchronous. Async lives ONLY at the
-//! `EngineHandle` boundary (W7) via `tokio::task::spawn_blocking`. The concurrency module
+//! `EngineHandle` boundary via `tokio::task::spawn_blocking`. The concurrency module
 //! uses `tokio::sync` primitives (Mutex/RwLock) because the lock map is acquired by async
 //! Tokio tasks — this is the lock layer, not the domain layer (A22).
 
+pub mod application;
 pub mod config;
+pub mod engine_handle;
 pub mod error;
 pub mod noop;
 pub mod ports;
 
-pub(crate) mod engine;
 pub(crate) mod concurrency;
+pub(crate) mod engine;
 
 // ── Key public re-exports ─────────────────────────────────────────────────────
 
+pub use application::{
+    AuditQueryRequest, AuditQueryResponse, AuditUseCase, IngestClaimRequest, IngestClaimResponse,
+    IngestClaimUseCase, QueryMemoryRequest, QueryMemoryResponse, QueryMemoryUseCase,
+    ReconcileRequest, ReconcileResponse, ReconcileUseCase,
+};
 pub use config::EngineConfig;
+pub use engine_handle::EngineHandle;
 pub use error::{BeliefResult, MemError, WriteResult};
 pub use noop::{NoOpOracle, NoOpVector};
 pub use ports::{

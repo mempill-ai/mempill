@@ -118,6 +118,7 @@ pub(crate) fn build_markers(
     fold: &FoldResult,
     pending_review_claim_refs: &[ClaimRef],
     contested: bool,
+    config: &EngineConfig,
 ) -> Vec<Marker> {
     let mut markers = Vec::new();
 
@@ -142,9 +143,10 @@ pub(crate) fn build_markers(
         markers.push(Marker::RecallTainted);
     }
 
-    // LowDerivationAnchor: any live claim with derivation_depth > cap.
+    // LowDerivationAnchor: any live claim whose derivation_depth exceeds the currency-boost cap (OP-1).
+    // Claims above the cap cannot receive currency boosts — surface to the caller for awareness.
     let any_low_anchor = fold.live_claims.iter().any(|cs| {
-        cs.claim.external_anchor().derivation_depth > 0 // placeholder: full cap check in W7
+        cs.claim.external_anchor().derivation_depth > config.derivation_depth_cap_for_currency_boost
     });
     if any_low_anchor {
         markers.push(Marker::LowDerivationAnchor);
@@ -205,7 +207,7 @@ pub(crate) fn project(
         .unwrap_or(mempill_types::Criticality::Low);
 
     let staleness = compute_staleness(primary.as_ref(), fold, now, config);
-    let markers = build_markers(fold, &pending_refs, contested);
+    let markers = build_markers(fold, &pending_refs, contested, config);
 
     // BeliefStatus resolution (I7 — Contested surfaces when has_conflict or contested flag).
     let status = if live_beliefs.is_empty() {

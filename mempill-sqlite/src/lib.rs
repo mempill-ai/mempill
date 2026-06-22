@@ -2,7 +2,7 @@
 //!
 //! This crate provides the SQLite-backed implementation of the `PersistencePort` trait
 //! defined in `mempill-core`.  It owns the database schema (DDL + indexes), the
-//! idempotent schema migration runner, and the write path for Wave 5.
+//! idempotent schema migration runner, and the full read + write path.
 //!
 //! # Crate organisation
 //!
@@ -11,9 +11,8 @@
 //! - [`migrations`] — deterministic, idempotent schema migration runner; embeds DDL via
 //!   `include_str!`.
 //! - [`txn`] — [`SqliteTxn`]: the concrete `Txn` handle scoped to one `agent_id` (I9).
-//! - [`store`] — [`SqlitePersistenceStore`]: `impl PersistencePort` — WRITE methods (W5).
-//!   READ methods are stubbed with `todo!("W6 — …")` pending Wave 6.
-//! - `fold.rs` — canonical valid-time fold SQL query (Wave 6, not yet implemented).
+//! - [`store`] — [`SqlitePersistenceStore`]: `impl PersistencePort` — full read + write path.
+//! - [`DefaultEngine`] — convenience type alias + constructors for the most common setup.
 //!
 //! # PRAGMA contract (applied at connection open — before migrations or any DML)
 //!
@@ -23,11 +22,12 @@
 //! PRAGMA foreign_keys = ON;      -- enforce FK constraints defined in DDL
 //! ```
 //!
-//! # Wave scope
+//! # DefaultEngine
 //!
-//! W5 (this wave): connection lifecycle, `SqliteTxn`, `SqlitePersistenceStore` WRITE path.
-//! W6: READ path (`load_subject_line`, `load_claim`, `load_validity_assertions_for`,
-//!     `load_ledger`, `load_edges_for`, `load_injected_claims`, `load_lineage`) + `fold.rs`.
+//! For the common case (SQLite store, no oracle, no vector), use:
+//! ```rust,ignore
+//! let engine = mempill_sqlite::open_default_in_memory();
+//! ```
 
 pub mod connection;
 pub mod migrations;
@@ -64,3 +64,130 @@ const _: () = {
     fn assert_send_sync<T: Send + Sync + 'static>() {}
     fn check() { assert_send_sync::<SqliteStoreError>(); }
 };
+
+// ── DefaultEngine — convenience type alias (E3/E4, A27) ──────────────────────
+//
+// Lives here in mempill-sqlite to preserve the dependency direction:
+//   mempill-sqlite → mempill-core  (allowed)
+//   mempill-core   → mempill-sqlite  (FORBIDDEN)
+
+/// The default concrete engine type: SQLite persistence, no oracle, no vector.
+///
+/// Suitable for single-process embedded use without oracle or vector search.
+/// For production with an oracle, construct `EngineHandle` directly with your port impls.
+pub type DefaultEngine = mempill_core::EngineHandle<
+    SqlitePersistenceStore,
+    mempill_core::NoOpOracle,
+    mempill_core::NoOpVector,
+>;
+
+/// Open a file-backed `DefaultEngine` at the given path.
+///
+/// The connection is fully initialised (PRAGMAs + migrations) before the handle is returned.
+///
+/// # Errors
+/// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.
+pub fn open_default(path: &str) -> Result<DefaultEngine, SqliteStoreError> {
+    let conn = connection::open(path)?;
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
+    Ok(mempill_core::EngineHandle::new(
+        store,
+        None,
+        None,
+        mempill_core::EngineConfig::default(),
+    ))
+}
+
+/// Open an **in-memory** `DefaultEngine`.
+///
+/// Useful for tests and ephemeral engine contexts.
+///
+/// # Errors
+/// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.
+pub fn open_default_in_memory() -> Result<DefaultEngine, SqliteStoreError> {
+    let conn = connection::open_in_memory()?;
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
+    Ok(mempill_core::EngineHandle::new(
+        store,
+        None,
+        None,
+        mempill_core::EngineConfig::default(),
+    ))
+}
+
+// ── End-to-end smoke tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mempill_core::application::{IngestClaimRequest, QueryMemoryRequest};
+    use mempill_types::{
+        AgentId, BeliefStatus, Cardinality, Confidence, Criticality, ExternalKind, ProvenanceLabel,
+    };
+
+    /// E2E smoke test: ingest a claim then query it back.
+    ///
+    /// This is the first real end-to-end proof: full write path (C1→C6→C3→C7 + I9 Txn)
+    /// followed by the full read path (C2→C5 projection). No mocks.
+    #[tokio::test]
+    async fn e2e_ingest_then_query_returns_belief() {
+        let engine = open_default_in_memory().expect("in-memory engine must open");
+        let agent = AgentId("e2e-agent".into());
+
+        // Ingest a claim.
+        let ingest_req = IngestClaimRequest {
+            agent_id: agent.clone(),
+            subject: "user".into(),
+            predicate: "city".into(),
+            value: serde_json::json!("Berlin"),
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            cardinality: Cardinality::Functional,
+            valid_time: None,
+            confidence: Confidence { value_confidence: 0.95, valid_time_confidence: 0.0 },
+            criticality: Criticality::Medium,
+            derived_from: vec![],
+        };
+
+        let ingest_resp = engine.ingest_claim(ingest_req).await
+            .expect("ingest must succeed");
+        assert!(!ingest_resp.claim_ref.0.is_nil(), "claim_ref must be non-nil");
+        assert_eq!(ingest_resp.disposition, mempill_types::Disposition::CommittedCheap,
+            "first External claim must be CommittedCheap");
+
+        // Query the belief back.
+        let query_req = QueryMemoryRequest {
+            agent_id: agent.clone(),
+            subject: "user".into(),
+            predicate: "city".into(),
+            as_of_tx_time: None,
+        };
+        let query_resp = engine.query_memory(query_req).await
+            .expect("query must succeed");
+
+        // The belief must reflect the ingested claim.
+        assert!(
+            matches!(
+                query_resp.belief.status,
+                BeliefStatus::Resolved | BeliefStatus::TimingUncertain
+            ),
+            "belief status must be Resolved or TimingUncertain after ingest, got {:?}",
+            query_resp.belief.status
+        );
+        assert!(query_resp.belief.primary.is_some(), "primary belief must be present");
+        let primary = query_resp.belief.primary.unwrap();
+        assert_eq!(primary.fact.value, serde_json::json!("Berlin"),
+            "fact value must match the ingested value");
+        assert_eq!(primary.claim_ref, ingest_resp.claim_ref,
+            "queried claim_ref must match the ingested claim_ref");
+    }
+
+    /// Confirm DefaultEngine type alias is in mempill-sqlite (not mempill-core).
+    /// This verifies no mempill-core → mempill-sqlite dependency was introduced.
+    #[test]
+    fn default_engine_type_alias_exists_in_mempill_sqlite() {
+        // This test compiles only if DefaultEngine is defined in this crate.
+        fn assert_is_default_engine(_: &DefaultEngine) {}
+        let engine = open_default_in_memory().unwrap();
+        assert_is_default_engine(&engine);
+    }
+}
