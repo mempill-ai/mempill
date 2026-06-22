@@ -16,3 +16,4 @@ pub(crate) mod gate;
 pub(crate) mod gateway;
 pub(crate) mod firewall;
 pub(crate) mod reconciler;
+pub(crate) mod supersession;
