@@ -17,18 +17,25 @@
 //!
 //! ## Wave Scope
 //!
-//! This is Wave 2 (W2): the foundation layer. Engine business logic (C1–C8, `engine/`),
-//! the application layer (`application/`), and `EngineHandle` are implemented in W3–W7.
+//! W3 adds the engine's first business logic modules:
+//! - `engine/gateway` (C1) — ingestion gateway, provenance stamping, tx-time assignment.
+//! - `engine/gate` (C7) — deterministic adjudication gate (pure function).
+//! - `concurrency/agent_lock` — per-agent_id write lock (single-writer enforcement, A22).
 //!
 //! ## Sync Core Convention (F1, A20)
 //!
-//! All port traits are synchronous. Async lives ONLY at the `EngineHandle` boundary (W7)
-//! via `tokio::task::spawn_blocking`. Do NOT add `async fn` to any trait in this crate.
+//! All port traits and engine domain functions are synchronous. Async lives ONLY at the
+//! `EngineHandle` boundary (W7) via `tokio::task::spawn_blocking`. The concurrency module
+//! uses `tokio::sync` primitives (Mutex/RwLock) because the lock map is acquired by async
+//! Tokio tasks — this is the lock layer, not the domain layer (A22).
 
 pub mod config;
 pub mod error;
 pub mod noop;
 pub mod ports;
+
+pub(crate) mod engine;
+pub(crate) mod concurrency;
 
 // ── Key public re-exports ─────────────────────────────────────────────────────
 

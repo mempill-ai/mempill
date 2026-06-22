@@ -19,4 +19,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "1"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+futures = "0.3"
 mempill-types = { path = "mempill-types" }
