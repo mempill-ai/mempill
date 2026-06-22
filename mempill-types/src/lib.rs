@@ -36,7 +36,7 @@ pub use belief::{
     Belief, BeliefProjection, BeliefStatus, CurrencySignal, CurrencyState, Marker, StalenessFlag,
 };
 pub use claim::{Cardinality, Claim, Confidence, Criticality, Fact};
-pub use disposition::Disposition;
+pub use disposition::{Disposition, WriteOutcome};
 pub use edge::{ClaimEdge, EdgeKind};
 pub use identity::{AgentId, ClaimRef, SubjectLineRef};
 pub use ledger::{LedgerEntry, LedgerEventKind};

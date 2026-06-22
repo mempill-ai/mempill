@@ -30,6 +30,18 @@ pub enum Disposition {
     Rejected,
 }
 
+/// The synchronous write outcome returned from the engine (SDK_CONTRACT §9, TECHNICAL_DESIGN §11).
+///
+/// For heavy-path ops, `disposition = QueuedForAdjudication`;
+/// the final state arrives asynchronously via the oracle callback.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WriteOutcome {
+    pub claim_ref: crate::identity::ClaimRef,
+    pub disposition: Disposition,
+    /// Populated when disposition is Contested or PendingConflict.
+    pub contested_with: Vec<crate::identity::ClaimRef>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
