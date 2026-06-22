@@ -17,3 +17,6 @@ pub(crate) mod gateway;
 pub(crate) mod firewall;
 pub(crate) mod reconciler;
 pub(crate) mod supersession;
+pub(crate) mod truth_engine;
+pub(crate) mod projection;
+pub(crate) mod audit_ledger;

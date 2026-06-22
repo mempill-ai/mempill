@@ -10,7 +10,7 @@ mempill-types = { path = "../mempill-types" }
 mempill-core = { path = "../mempill-core" }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-chrono = { workspace = true }
