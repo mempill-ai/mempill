@@ -573,3 +573,785 @@ mod tests {
         assert!(p.oracle_present, "oracle_present must be readable as a Proposal field (A24)");
     }
 }
+
+// ── QA ADVERSARIAL TESTS ─────────────────────────────────────────────────────
+//
+// This module is the adversarial QA layer. It deliberately attacks the five
+// correctness properties defined in TASK-1-W3-QA-GATE and is SEPARATE from
+// the implementation's own `tests` module above so authorship is clear.
+//
+// Properties under attack:
+//   P1 — DETERMINISM (G1): byte-identical output for identical inputs
+//   P2 — B7 temporal coherence boundary cases (A25)
+//   P3 — B11 oracle-absent coverage across ALL heavy-path conflict types
+//   P4 — Corroboration is a confidence MODIFIER only, never a route-flipper
+//   P5 — ROUTING completeness: every Proposal maps to exactly one Route; no panics
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+    use mempill_types::{
+        AgentId, Cardinality, Claim, ClaimRef, Confidence, Criticality, CurrencySignal,
+        CurrencyState, ExternalAnchor, ExternalKind, Fact, ProvenanceLabel, TransactionTime,
+        ValidTime,
+    };
+    use chrono::{TimeZone, Utc};
+
+    // ── shared helpers ────────────────────────────────────────────────────────
+
+    fn tx_at(year: i32, month: u32, day: u32) -> TransactionTime {
+        TransactionTime(Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap())
+    }
+
+    fn dt(year: i32, month: u32, day: u32) -> chrono::DateTime<chrono::Utc> {
+        Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap()
+    }
+
+    fn make_claim_with_confidence(
+        provenance: ProvenanceLabel,
+        valid_time: ValidTime,
+        tx_time: TransactionTime,
+        vt_confidence: f32,
+    ) -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            AgentId("agent-adv".into()),
+            Fact {
+                subject: "subject".into(),
+                predicate: "predicate".into(),
+                value: serde_json::json!("value"),
+            },
+            Cardinality::Functional,
+            provenance,
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            tx_time,
+            valid_time,
+            Confidence { value_confidence: 0.9, valid_time_confidence: vt_confidence },
+            Criticality::Medium,
+            vec![],
+            None,
+            None,
+        )
+    }
+
+    fn ext_claim(vt: ValidTime, tx: TransactionTime) -> Claim {
+        // Extract confidence BEFORE vt is moved into make_claim_with_confidence.
+        let vt_conf = vt.valid_time_confidence;
+        make_claim_with_confidence(
+            ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+            vt,
+            tx,
+            vt_conf,
+        )
+    }
+
+    fn user_asserted_claim(vt: ValidTime, tx: TransactionTime) -> Claim {
+        // Extract confidence BEFORE vt is moved into make_claim_with_confidence.
+        let vt_conf = vt.valid_time_confidence;
+        make_claim_with_confidence(
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            vt,
+            tx,
+            vt_conf,
+        )
+    }
+
+    fn recall_claim() -> Claim {
+        make_claim_with_confidence(
+            ProvenanceLabel::RecallReEntry,
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            tx_at(2026, 1, 1),
+            0.0,
+        )
+    }
+
+    fn model_claim() -> Claim {
+        make_claim_with_confidence(
+            ProvenanceLabel::ModelDerived,
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            tx_at(2026, 1, 1),
+            0.0,
+        )
+    }
+
+    fn incumbent() -> mempill_types::Belief {
+        mempill_types::Belief {
+            claim_ref: ClaimRef::new_random(),
+            fact: Fact {
+                subject: "subject".into(),
+                predicate: "predicate".into(),
+                value: serde_json::json!("old_value"),
+            },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            transaction_time: tx_at(2025, 1, 1),
+            confidence: Confidence { value_confidence: 0.8, valid_time_confidence: 0.0 },
+            currency_signal: CurrencySignal {
+                last_refreshed_at: tx_at(2025, 1, 1),
+                state: CurrencyState::Fresh,
+                corroboration_count: 0,
+            },
+            criticality: Criticality::Medium,
+        }
+    }
+
+    fn cfg() -> EngineConfig {
+        EngineConfig::default() // valid_time_confidence_threshold = 0.7
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // P1 — DETERMINISM ATTACKS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Attack: call adjudicate() 100 times on the same proposal; all results must be
+    /// byte-identical. Detects hidden clock reads, RNG leakage, or HashMap ordering.
+    #[test]
+    fn p1_repeated_calls_same_proposal_always_identical() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.88,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let reference = adjudicate(&proposal, &cfg());
+        for i in 0..100 {
+            let d = adjudicate(&proposal, &cfg());
+            assert_eq!(d.route, reference.route, "non-deterministic route on iteration {i}");
+            assert_eq!(d.disposition, reference.disposition,
+                "non-deterministic disposition on iteration {i}");
+            assert_eq!(d.rationale.to_string(), reference.rationale.to_string(),
+                "non-deterministic rationale JSON on iteration {i}");
+        }
+    }
+
+    /// Attack: verify that the rationale JSON key order is stable across calls.
+    /// serde_json preserves insertion order — this test catches any future HashMap
+    /// usage inside the rationale builder.
+    #[test]
+    fn p1_rationale_json_key_order_is_stable() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.75,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: true,
+        };
+        let d1 = adjudicate(&proposal, &cfg());
+        let d2 = adjudicate(&proposal, &cfg());
+        assert_eq!(d1.rationale.to_string(), d2.rationale.to_string(),
+            "rationale JSON key order must be stable (G1 replay basis)");
+    }
+
+    /// Attack: verify determinism holds for the heavy-path contested branch specifically,
+    /// including that conflict_type Debug repr in rationale is stable.
+    #[test]
+    fn p1_heavy_path_contested_rationale_is_deterministic() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+
+        for conflict_type in [ConflictType::SameLineConflict, ConflictType::CrossLineConflict] {
+            let claim = ext_claim(vt.clone(), tx.clone());
+            let proposal = Proposal {
+                candidate: claim,
+                incumbent: Some(incumbent()),
+                conflict_type: conflict_type.clone(),
+                measured_confidence: 0.9,
+                cardinality_proposal: Cardinality::Functional,
+                oracle_present: false,
+            };
+            let d1 = adjudicate(&proposal, &cfg());
+            let d2 = adjudicate(&proposal, &cfg());
+            assert_eq!(d1.rationale.to_string(), d2.rationale.to_string(),
+                "rationale non-deterministic for {:?}", conflict_type);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // P2 — B7 TEMPORAL COHERENCE BOUNDARY ATTACKS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Attack: start == end (zero-duration window). Must NOT be quarantined.
+    /// Spec says quarantine when start > end; equality is a valid instant window.
+    #[test]
+    fn p2_start_equals_end_is_not_quarantined() {
+        let tx = tx_at(2026, 6, 1);
+        let instant = dt(2025, 3, 15);
+        let vt = ValidTime {
+            start: Some(instant),
+            end: Some(instant),
+            valid_time_confidence: 0.9,
+        };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None,
+            conflict_type: ConflictType::NoConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_ne!(d.route, Route::Quarantine,
+            "start == end is a valid zero-duration window; must NOT be quarantined (B7 only fires on start > end)");
+        assert_eq!(d.route, Route::CheapPath);
+    }
+
+    /// Attack: valid_time_start == tx_time exactly. Must NOT be quarantined.
+    /// Spec says quarantine when start > tx_time; equality means "learned exactly at validity start".
+    #[test]
+    fn p2_start_equals_tx_time_is_not_quarantined() {
+        let tx = tx_at(2026, 6, 1);
+        let same_moment = dt(2026, 6, 1); // exactly equal to tx_time
+        let vt = ValidTime {
+            start: Some(same_moment),
+            end: None,
+            valid_time_confidence: 0.9,
+        };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None,
+            conflict_type: ConflictType::NoConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_ne!(d.route, Route::Quarantine,
+            "start == tx_time is allowed (B7 only fires on start > tx_time, not >=)");
+        assert_eq!(d.route, Route::CheapPath);
+    }
+
+    /// Attack: valid_time_confidence is EXACTLY at the threshold (0.7).
+    /// Threshold check is `< 0.7` so 0.7 is NOT below threshold — temporal check runs.
+    /// An incoherent window at exactly 0.7 confidence MUST quarantine.
+    #[test]
+    fn p2_confidence_exactly_at_threshold_triggers_temporal_check() {
+        let tx = tx_at(2026, 1, 1);
+        let future_start = dt(2026, 12, 1); // after tx_time — incoherent
+        let vt = ValidTime {
+            start: Some(future_start),
+            end: None,
+            valid_time_confidence: 0.7, // exactly at threshold — check runs
+        };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None,
+            conflict_type: ConflictType::NoConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.route, Route::Quarantine,
+            "confidence == 0.7 (threshold) must NOT bypass temporal check; incoherent window must quarantine");
+    }
+
+    /// Attack: valid_time_confidence just below threshold (0.6999).
+    /// The temporal check is skipped; an incoherent window at low confidence MUST pass through.
+    #[test]
+    fn p2_confidence_just_below_threshold_bypasses_temporal_check() {
+        let tx = tx_at(2026, 1, 1);
+        let future_start = dt(2026, 12, 1); // after tx_time — would be incoherent if checked
+        let vt = ValidTime {
+            start: Some(future_start),
+            end: None,
+            valid_time_confidence: 0.6999, // just below 0.7
+        };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None,
+            conflict_type: ConflictType::NoConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_ne!(d.route, Route::Quarantine,
+            "confidence 0.6999 < 0.7 (threshold): temporal check must be skipped; claim must not quarantine");
+        assert_eq!(d.route, Route::CheapPath);
+    }
+
+    /// Attack: far-past start and far-future end — both individually coherent.
+    /// No quarantine expected; verifies the gate does not penalize wide valid-time windows.
+    #[test]
+    fn p2_far_past_start_far_future_end_is_coherent() {
+        let tx = tx_at(2026, 6, 1);
+        let far_past = dt(1900, 1, 1);
+        let far_future = dt(9999, 12, 31);
+        let vt = ValidTime {
+            start: Some(far_past),
+            end: Some(far_future),
+            valid_time_confidence: 0.9,
+        };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None,
+            conflict_type: ConflictType::NoConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        // start(1900) < tx(2026) and start(1900) < end(9999) — coherent
+        assert_eq!(d.route, Route::CheapPath,
+            "wide but coherent valid-time window must not quarantine");
+    }
+
+    /// Attack: RecallReEntry with a deeply incoherent temporal window.
+    /// Step 1 (RecallReEntry) fires BEFORE Step 2 (temporal). The claim should NOT
+    /// be quarantined — it should be RecallTainted/CommittedCheap.
+    ///
+    /// FINDING NOTE: This documents a known ordering effect. RecallReEntry bypasses the
+    /// temporal quarantine check per §6 decision order. This is intentional per spec
+    /// (recall re-entries are already degraded; quarantine adds no further value and the
+    /// existing claim is corroborated by identity, not the incoherent window).
+    #[test]
+    fn p2_recall_reentry_with_incoherent_window_bypasses_quarantine() {
+        let tx = tx_at(2026, 1, 1);
+        let future_start = dt(2026, 12, 1); // after tx_time — would quarantine any other provenance
+        let vt = ValidTime {
+            start: Some(future_start),
+            end: None,
+            valid_time_confidence: 0.9,
+        };
+        let claim = make_claim_with_confidence(
+            ProvenanceLabel::RecallReEntry,
+            vt,
+            tx,
+            0.9,
+        );
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None,
+            conflict_type: ConflictType::NoConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        // RecallReEntry fires at step 1, before temporal check at step 2.
+        assert_eq!(d.route, Route::RecallTainted,
+            "RecallReEntry is caught at step 1 before temporal check (§6 ordering); must not quarantine");
+        assert_eq!(d.disposition, Disposition::CommittedCheap);
+    }
+
+    /// Attack: ModelDerived with an incoherent temporal window.
+    /// Step 2 (temporal) fires BEFORE Step 3 (ModelDerived). Must quarantine, not InferredRoute.
+    #[test]
+    fn p2_model_derived_with_incoherent_window_is_quarantined_not_inferred() {
+        let tx = tx_at(2026, 1, 1);
+        let future_start = dt(2026, 12, 1); // after tx_time
+        let vt = ValidTime {
+            start: Some(future_start),
+            end: None,
+            valid_time_confidence: 0.9,
+        };
+        let claim = make_claim_with_confidence(
+            ProvenanceLabel::ModelDerived,
+            vt,
+            tx,
+            0.9,
+        );
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None,
+            conflict_type: ConflictType::NoConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.route, Route::Quarantine,
+            "ModelDerived with incoherent temporal window must quarantine (step 2 before step 3)");
+        assert_ne!(d.route, Route::InferredRoute,
+            "incoherent ModelDerived must NOT silently route to InferredRoute");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // P3 — B11 ORACLE-ABSENT COVERAGE ACROSS ALL HEAVY-PATH CONFLICT TYPES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Attack: UserAsserted (also External(*)) + SameLineConflict + oracle absent.
+    /// Both ExternalFirstHand AND UserAsserted are cheap-path eligible.
+    /// B11(a) must fire for UserAsserted too.
+    #[test]
+    fn p3_user_asserted_same_line_oracle_absent_routes_to_contested() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = user_asserted_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.route, Route::HeavyPath);
+        assert_eq!(d.disposition, Disposition::Contested,
+            "UserAsserted is External(*) and thus cheap-path eligible; B11(a) must fire");
+    }
+
+    /// Attack: UserAsserted + CrossLineConflict + oracle absent.
+    /// B11(a) covers both SameLine and CrossLine per §6.
+    #[test]
+    fn p3_user_asserted_cross_line_oracle_absent_routes_to_contested() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = user_asserted_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::CrossLineConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.disposition, Disposition::Contested,
+            "CrossLineConflict + UserAsserted + oracle absent must be Contested (B11a)");
+    }
+
+    /// Attack: DependsOnSuperseded conflict + fresh External + oracle ABSENT.
+    /// DependsOnSuperseded is NOT a "contradiction" in the B11(a) sense — it is a
+    /// "dependent needs review" case. The gate should route to QueuedForAdjudication,
+    /// NOT Contested. This verifies B11(a) does not over-fire.
+    #[test]
+    fn p3_depends_on_superseded_oracle_absent_routes_to_queued_not_contested() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::DependsOnSuperseded,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        // DependsOnSuperseded is not a SameLine/CrossLine contradiction, so B11(a) does NOT fire.
+        // It routes to QueuedForAdjudication regardless of oracle_present.
+        assert_eq!(d.route, Route::HeavyPath);
+        assert_eq!(d.disposition, Disposition::QueuedForAdjudication,
+            "DependsOnSuperseded is NOT a fresh contradiction; B11(a) must not fire; expect QueuedForAdjudication");
+        assert_ne!(d.disposition, Disposition::Contested,
+            "B11(a) must not over-fire for DependsOnSuperseded");
+    }
+
+    /// Attack: DependsOnSuperseded + oracle PRESENT.
+    /// Should also route to QueuedForAdjudication (oracle-present path).
+    #[test]
+    fn p3_depends_on_superseded_oracle_present_routes_to_queued() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::DependsOnSuperseded,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: true,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.disposition, Disposition::QueuedForAdjudication);
+    }
+
+    /// Attack: oracle_present=true must NEVER short-circuit to Contested.
+    /// The oracle_present=true path must always produce QueuedForAdjudication on heavy path.
+    #[test]
+    fn p3_oracle_present_true_never_produces_contested() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+
+        for conflict_type in [
+            ConflictType::SameLineConflict,
+            ConflictType::CrossLineConflict,
+            ConflictType::DependsOnSuperseded,
+        ] {
+            let claim = ext_claim(vt.clone(), tx.clone());
+            let proposal = Proposal {
+                candidate: claim,
+                incumbent: Some(incumbent()),
+                conflict_type: conflict_type.clone(),
+                measured_confidence: 0.9,
+                cardinality_proposal: Cardinality::Functional,
+                oracle_present: true,
+            };
+            let d = adjudicate(&proposal, &cfg());
+            assert_ne!(d.disposition, Disposition::Contested,
+                "oracle_present=true must NEVER produce Contested (B11b); fired for {:?}", conflict_type);
+        }
+    }
+
+    /// Attack: ModelDerived + SameLineConflict + oracle absent.
+    /// ModelDerived is caught at Step 3, BEFORE Step 5 (heavy path).
+    /// B11 must NOT fire — ModelDerived routes to InferredRoute regardless.
+    #[test]
+    fn p3_model_derived_conflict_oracle_absent_routes_to_inferred_not_contested() {
+        let claim = model_claim();
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.route, Route::InferredRoute,
+            "ModelDerived is caught at step 3 before step 5; heavy path must not fire");
+        assert_ne!(d.disposition, Disposition::Contested,
+            "ModelDerived must NEVER produce Contested (V3-4)");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // P4 — CORROBORATION IS A MODIFIER ONLY, NEVER A ROUTE-FLIPPER
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Attack: The gate's Proposal struct has NO corroboration_count field.
+    /// Verify that no measured_confidence value — even extremely high (implying heavy
+    /// corroboration) — causes a different ROUTE than the same case without corroboration.
+    /// Route must be identical; only rationale values differ.
+    #[test]
+    fn p4_high_confidence_implying_corroboration_does_not_flip_route() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+
+        // "Low corroboration" scenario: measured_confidence = 0.5
+        let claim_low = ext_claim(vt.clone(), tx.clone());
+        let proposal_low = Proposal {
+            candidate: claim_low,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.5,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+
+        // "Heavy corroboration" scenario: measured_confidence = 0.999
+        let claim_high = ext_claim(vt.clone(), tx.clone());
+        let proposal_high = Proposal {
+            candidate: claim_high,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.999,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+
+        let d_low = adjudicate(&proposal_low, &cfg());
+        let d_high = adjudicate(&proposal_high, &cfg());
+
+        assert_eq!(d_low.route, d_high.route,
+            "measured_confidence (proxy for corroboration) must not change Route");
+        assert_eq!(d_low.disposition, d_high.disposition,
+            "measured_confidence must not change Disposition");
+    }
+
+    /// Attack: verify corroboration_count is hardcoded 0 in rationale (since it has no gate
+    /// input). The rationale must always record 0 — it is a logged annotation, not a gate input.
+    #[test]
+    fn p4_rationale_records_corroboration_count_zero_always() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: true, // oracle present → QueuedForAdjudication rationale branch
+        };
+        let d = adjudicate(&proposal, &cfg());
+        let corr = d.rationale.get("corroboration_count");
+        assert!(
+            corr.is_some() && corr.unwrap() == 0,
+            "corroboration_count must be 0 in rationale (modifier-only, no gate input). Got: {:?}",
+            d.rationale
+        );
+    }
+
+    /// Attack: verify that varying measured_confidence in the rationale-only heavy path
+    /// (oracle present) produces the same route but different rationale values.
+    #[test]
+    fn p4_measured_confidence_only_affects_rationale_not_route() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+
+        let confidences = [0.0f32, 0.5, 0.7, 0.99, 1.0];
+        let routes: Vec<Route> = confidences.iter().map(|&mc| {
+            let claim = ext_claim(vt.clone(), tx.clone());
+            let proposal = Proposal {
+                candidate: claim,
+                incumbent: Some(incumbent()),
+                conflict_type: ConflictType::SameLineConflict,
+                measured_confidence: mc,
+                cardinality_proposal: Cardinality::Functional,
+                oracle_present: true,
+            };
+            adjudicate(&proposal, &cfg()).route
+        }).collect();
+
+        let first = &routes[0];
+        for (i, route) in routes.iter().enumerate() {
+            assert_eq!(route, first,
+                "measured_confidence[{}]={} produced different route {:?} vs {:?}",
+                i, confidences[i], route, first);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // P5 — ROUTING COMPLETENESS: EVERY PROPOSAL MAPS TO EXACTLY ONE ROUTE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Attack: enumerate every ConflictType x oracle_present combination for External provenance
+    /// with an incumbent. No combination must panic or produce an unhandled case.
+    #[test]
+    fn p5_all_conflict_types_produce_valid_route_no_panic() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+
+        let all_conflict_types = [
+            ConflictType::NoConflict,
+            ConflictType::SameLineConflict,
+            ConflictType::CrossLineConflict,
+            ConflictType::DependsOnSuperseded,
+        ];
+
+        for conflict_type in &all_conflict_types {
+            for oracle_present in [false, true] {
+                let claim = ext_claim(vt.clone(), tx.clone());
+                let proposal = Proposal {
+                    candidate: claim,
+                    incumbent: Some(incumbent()),
+                    conflict_type: conflict_type.clone(),
+                    measured_confidence: 0.9,
+                    cardinality_proposal: Cardinality::Functional,
+                    oracle_present,
+                };
+                // Must not panic; result must be a valid route
+                let d = adjudicate(&proposal, &cfg());
+                let valid = matches!(
+                    d.route,
+                    Route::CheapPath
+                        | Route::InferredRoute
+                        | Route::RecallTainted
+                        | Route::HeavyPath
+                        | Route::Quarantine
+                );
+                assert!(valid,
+                    "unexpected/invalid route {:?} for {:?} oracle={}", d.route, conflict_type, oracle_present);
+            }
+        }
+    }
+
+    /// Attack: all provenance types with NoConflict + no incumbent.
+    /// Every provenance must map to a valid route without panic.
+    #[test]
+    fn p5_all_provenance_types_no_conflict_no_incumbent_produce_valid_route() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+
+        let provenances = [
+            ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ProvenanceLabel::RecallReEntry,
+            ProvenanceLabel::ModelDerived,
+        ];
+
+        for prov in &provenances {
+            let claim = make_claim_with_confidence(prov.clone(), vt.clone(), tx.clone(), 0.0);
+            let proposal = Proposal {
+                candidate: claim,
+                incumbent: None,
+                conflict_type: ConflictType::NoConflict,
+                measured_confidence: 0.9,
+                cardinality_proposal: Cardinality::Functional,
+                oracle_present: false,
+            };
+            let d = adjudicate(&proposal, &cfg());
+            let valid = matches!(
+                d.route,
+                Route::CheapPath | Route::InferredRoute | Route::RecallTainted | Route::HeavyPath | Route::Quarantine
+            );
+            assert!(valid, "invalid route for provenance {:?}: {:?}", prov, d.route);
+        }
+    }
+
+    /// Attack: NoConflict with incumbent present — should still take CheapPath.
+    /// Step 4 condition is `conflict_type == NoConflict || incumbent.is_none()`.
+    /// NoConflict trumps the incumbent presence.
+    #[test]
+    fn p5_no_conflict_with_incumbent_still_routes_cheap_path() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()), // incumbent IS present
+            conflict_type: ConflictType::NoConflict, // but no conflict declared
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.route, Route::CheapPath,
+            "NoConflict with incumbent present must still take CheapPath (step 4: NoConflict OR no incumbent)");
+        assert_eq!(d.disposition, Disposition::CommittedCheap);
+    }
+
+    /// Attack: SameLineConflict with NO incumbent (None). Step 4 fires (`incumbent.is_none()`).
+    /// This should route CheapPath, not HeavyPath — no incumbent means no belief to overturn.
+    #[test]
+    fn p5_same_line_conflict_no_incumbent_routes_cheap_path() {
+        let tx = tx_at(2026, 6, 1);
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let claim = ext_claim(vt, tx);
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: None, // no incumbent
+            conflict_type: ConflictType::SameLineConflict, // conflict declared but no one to conflict with
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.route, Route::CheapPath,
+            "SameLineConflict with no incumbent must route CheapPath (step 4: incumbent.is_none())");
+    }
+
+    /// Attack: RecallReEntry with a conflict type that would otherwise trigger heavy path.
+    /// Step 1 (RecallReEntry) must fire BEFORE any conflict-type branching.
+    #[test]
+    fn p5_recall_reentry_with_heavy_conflict_type_still_routes_recall_tainted() {
+        let claim = recall_claim();
+        let proposal = Proposal {
+            candidate: claim,
+            incumbent: Some(incumbent()),
+            conflict_type: ConflictType::SameLineConflict,
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+        };
+        let d = adjudicate(&proposal, &cfg());
+        assert_eq!(d.route, Route::RecallTainted,
+            "RecallReEntry is always caught at step 1; must not reach heavy path even with SameLineConflict");
+        assert_eq!(d.disposition, Disposition::CommittedCheap);
+    }
+}
