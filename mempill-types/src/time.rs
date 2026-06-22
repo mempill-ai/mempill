@@ -1,0 +1,115 @@
+//! Temporal types: bi-temporal model support (I2, A25).
+
+/// Machine-stamped, monotone, reliable (I2). Engine-assigned; host cannot supply this as truth.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct TransactionTime(pub chrono::DateTime<chrono::Utc>);
+
+impl TransactionTime {
+    /// Stamp the current UTC instant.
+    pub fn now() -> Self {
+        Self(chrono::Utc::now())
+    }
+}
+
+/// Valid-time interval — fallible, host-extracted (I2, F4).
+/// When start/end are None, ordering falls back to TransactionTime.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ValidTime {
+    pub start: Option<chrono::DateTime<chrono::Utc>>,
+    pub end: Option<chrono::DateTime<chrono::Utc>>,
+    /// Confidence in the valid-time extraction itself (mirrors Confidence.valid_time_confidence).
+    pub valid_time_confidence: f32,
+}
+
+impl ValidTime {
+    /// Returns true iff both start and end are None (unknown valid-time window).
+    pub fn is_unknown(&self) -> bool {
+        self.start.is_none() && self.end.is_none()
+    }
+
+    /// Returns true iff the interval is temporally incoherent: start > end,
+    /// or start > tx_time (A25 — valid-time boundary must predate or equal when it was learned).
+    pub fn is_temporally_incoherent(&self, tx_time: &TransactionTime) -> bool {
+        if let (Some(s), Some(e)) = (self.start, self.end) {
+            if s > e {
+                return true;
+            }
+        }
+        if let Some(s) = self.start {
+            if s > tx_time.0 {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn valid_time_unknown_when_both_none() {
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        assert!(vt.is_unknown());
+    }
+
+    #[test]
+    fn valid_time_not_unknown_when_start_set() {
+        let vt = ValidTime { start: Some(Utc::now()), end: None, valid_time_confidence: 0.8 };
+        assert!(!vt.is_unknown());
+    }
+
+    #[test]
+    fn incoherent_when_start_after_end() {
+        let now = Utc::now();
+        let tx = TransactionTime(now);
+        let vt = ValidTime {
+            start: Some(now + chrono::Duration::hours(1)),
+            end: Some(now),
+            valid_time_confidence: 1.0,
+        };
+        assert!(vt.is_temporally_incoherent(&tx));
+    }
+
+    #[test]
+    fn incoherent_when_valid_start_after_tx_time() {
+        let now = Utc::now();
+        let tx = TransactionTime(now);
+        let vt = ValidTime {
+            start: Some(now + chrono::Duration::hours(1)),
+            end: None,
+            valid_time_confidence: 1.0,
+        };
+        assert!(vt.is_temporally_incoherent(&tx));
+    }
+
+    #[test]
+    fn coherent_normal_interval() {
+        let now = Utc::now();
+        let tx = TransactionTime(now);
+        let vt = ValidTime {
+            start: Some(now - chrono::Duration::days(1)),
+            end: Some(now),
+            valid_time_confidence: 0.9,
+        };
+        assert!(!vt.is_temporally_incoherent(&tx));
+    }
+
+    #[test]
+    fn transaction_time_ordering() {
+        let t1 = TransactionTime(Utc::now());
+        let t2 = TransactionTime(Utc::now() + chrono::Duration::seconds(1));
+        assert!(t1 < t2);
+    }
+
+    #[test]
+    fn valid_time_round_trip_serde() {
+        let vt = ValidTime { start: Some(Utc::now()), end: None, valid_time_confidence: 0.7 };
+        let json = serde_json::to_string(&vt).unwrap();
+        let back: ValidTime = serde_json::from_str(&json).unwrap();
+        assert_eq!(vt.start, back.start);
+        assert_eq!(vt.end, back.end);
+    }
+}
