@@ -1,0 +1,6 @@
+# Ensure PyO3 (abi3-py311) links a >=3.11 interpreter for `cargo test --workspace`.
+# System PATH may have an older Python (e.g. 3.9) that conflicts with abi3-py311.
+# `relative = true` resolves against the workspace root (parent of .cargo/), so this
+# points at <workspace>/.venv and is not machine-specific.
+[env]
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
