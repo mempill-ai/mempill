@@ -1,7 +1,0 @@
-[package]
-name = "mempill-mcp"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-mempill-core = { path = "../mempill-core" }
