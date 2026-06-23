@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "mempill"
+version = "0.2.0"
+requires-python = ">=3.11"
+description = "Python bindings for the mempill AI-agent memory engine"
+license = { text = "MIT" }
+
+[tool.maturin]
+module-name = "mempill._mempill"
+python-source = "python"
+features = ["extension-module"]
