@@ -96,4 +96,15 @@ pub trait PersistencePort: Send + Sync + 'static {
         agent_id: &AgentId,
         claim_ref: &ClaimRef,
     ) -> Result<Vec<ClaimEdge>, Self::Error>;
+
+    /// Whether the store requires a global write serialization lock across all agent_ids.
+    ///
+    /// SQLite: true (single connection, no concurrent transactions possible).
+    /// Postgres: false (pool provides concurrent transactions; advisory lock per agent_id).
+    ///
+    /// EngineHandle consults this at write-path entry to decide whether to acquire
+    /// `store_write_lock`. Default = true (safe fallback for unknown adapters).
+    fn requires_global_write_serialization(&self) -> bool {
+        true
+    }
 }

@@ -3,6 +3,9 @@ name = "mempill-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 mempill-types = { workspace = true }
 thiserror = { workspace = true }

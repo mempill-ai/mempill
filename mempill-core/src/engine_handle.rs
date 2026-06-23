@@ -79,14 +79,19 @@ where
     /// Clock is read ONCE here (DETERMINISM): `now` flows into the use-case as a parameter.
     ///
     /// Locking order (must be consistent across all write methods to avoid deadlock):
-    ///   1. store_write_lock  — serializes all cross-agent SQLite writes
-    ///   2. per-agent lock    — preserves same-agent serial semantics + future-Postgres compat
+    ///   1. store_write_lock  — serializes all cross-agent SQLite writes (conditional; Postgres skips)
+    ///   2. per-agent lock    — preserves same-agent serial semantics + Postgres compat
     pub async fn ingest_claim(
         &self,
         req: IngestClaimRequest,
     ) -> Result<IngestClaimResponse, MemError> {
         let now = Utc::now(); // clock read ONCE at the async boundary
-        let _store_lock = self.store_write_lock.lock().await;
+        // Acquire global write lock only when the adapter requires it (SQLite=yes, Postgres=no).
+        let _store_lock = if self.persistence.requires_global_write_serialization() {
+            Some(self.store_write_lock.lock().await)
+        } else {
+            None
+        };
         let _guard = self.write_locks.acquire(&req.agent_id).await;
         let uc = IngestClaimUseCase::new(
             Arc::clone(&self.persistence),
@@ -118,12 +123,17 @@ where
 
     /// Reconcile path: acquires write lock per agent_id in the request.
     ///
-    /// Locking order matches ingest_claim: store_write_lock first, then per-agent lock.
+    /// Locking order matches ingest_claim: store_write_lock first (conditional), then per-agent lock.
     pub async fn reconcile(
         &self,
         req: ReconcileRequest,
     ) -> Result<ReconcileResponse, MemError> {
-        let _store_lock = self.store_write_lock.lock().await;
+        // Acquire global write lock only when the adapter requires it (SQLite=yes, Postgres=no).
+        let _store_lock = if self.persistence.requires_global_write_serialization() {
+            Some(self.store_write_lock.lock().await)
+        } else {
+            None
+        };
         let _guard = self.write_locks.acquire(&req.agent_id).await;
         let uc = ReconcileUseCase::new(
             Arc::clone(&self.persistence),
