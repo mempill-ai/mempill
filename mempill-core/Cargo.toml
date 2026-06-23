@@ -2,6 +2,7 @@
 name = "mempill-core"
 version.workspace = true
 edition.workspace = true
+readme = "README.md"
 
 [features]
 test-support = []

@@ -2,6 +2,7 @@
 name = "mempill-sqlite"
 version.workspace = true
 edition.workspace = true
+readme = "README.md"
 
 [dependencies]
 rusqlite = { workspace = true }
