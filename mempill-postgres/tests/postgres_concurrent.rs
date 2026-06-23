@@ -1,19 +1,18 @@
 //! Postgres-only concurrency proofs (topology-b, A40–A42).
 //!
-//! These tests exercise concurrent write paths that are impossible with the SQLite adapter
-//! (single-connection serialization). They prove that the Postgres pool enables genuine
-//! parallel writes across distinct agent_ids, while the advisory lock correctly serializes
-//! same-agent writes with no race on `stream_seq`.
+//! Version matrix: PG 16 and PG 18 — both tags pinned explicitly (no `:latest`).
+//! Each test function runs its own container for full isolation.
 //!
-//! Two tests, each using its own container (per-test isolation):
+//! Two concurrency proofs, each run against both PG versions:
 //!
-//! 1. `concurrent_cross_agent_writes_both_succeed` — two threads, two distinct agent_ids,
-//!    concurrent `begin_atomic + append_claim + commit`. Both must succeed (topology-b proof).
+//! 1. `cross_agent_writes_both_succeed` — two threads, two distinct agent_ids,
+//!    concurrent `begin_atomic + append_claim + commit`. Both must succeed (topology-b).
 //!
 //! 2. `advisory_lock_same_agent_serializes` — two threads, same agent_id, concurrent
 //!    `begin_atomic + append_claim + append_ledger_entry + commit`. Both must succeed;
-//!    the agent must have exactly 2 claims and `stream_seq` values {1, 2} with no duplicate
-//!    or gap (advisory lock + MAX+1 serialization proof).
+//!    `stream_seq` values must be {1, 2} — no duplicate, no gap.
+
+mod common;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -28,13 +27,10 @@ use mempill_types::{
     provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel},
     time::{TransactionTime, ValidTime},
 };
-use testcontainers_modules::testcontainers::runners::SyncRunner;
-use testcontainers_modules::testcontainers::ImageExt;
-use testcontainers_modules::postgres::Postgres;
 use chrono::Utc;
 use uuid::Uuid;
 
-// ── Shared helpers ─────────────────────────────────────────────────────────────
+// ── Shared data builders ────────────────────────────────────────────────────
 
 fn make_claim(agent_id: &AgentId, subject: &str, predicate: &str) -> Claim {
     Claim::new(
@@ -70,35 +66,18 @@ fn make_ledger_entry(agent_id: &AgentId, claim_ref: &ClaimRef) -> LedgerEntry {
     }
 }
 
-// ── Test 1: concurrent cross-agent writes (topology-b proof) ──────────────────
+// ── Shared concurrency logic ────────────────────────────────────────────────
 
-/// Spawn two threads with distinct `agent_id`s; each does `begin_atomic → append_claim → commit`
-/// concurrently on the same shared `PostgresPersistenceStore`.
+/// Core of cross-agent concurrency proof.
 ///
-/// Both threads MUST succeed (no deadlock, no pool exhaustion, no serialization error).
-/// This is impossible with SQLite's single-connection mutex — it proves topology-b.
-#[test]
-fn concurrent_cross_agent_writes_both_succeed() {
-    let node = Postgres::default()
-        .with_tag("16")
-        .start()
-        .expect("testcontainers: start postgres:16");
-
-    let host = node.get_host().expect("get_host");
-    let port = node.get_host_port_ipv4(5432).expect("get_host_port_ipv4(5432)");
-    let conn_str = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
-
-    let store = Arc::new(
-        PostgresPersistenceStore::new(&conn_str)
-            .expect("PostgresPersistenceStore::new"),
-    );
-
+/// Spawns two threads with distinct `agent_id`s; each does `begin_atomic → append_claim → commit`
+/// concurrently on the same shared store. Both must succeed — proves topology-b.
+fn run_cross_agent_proof(store: Arc<PostgresPersistenceStore>) {
     let agent_alpha = AgentId("agent-alpha".into());
     let agent_beta = AgentId("agent-beta".into());
 
-    let s1: Arc<PostgresPersistenceStore> = Arc::clone(&store);
-    let s2: Arc<PostgresPersistenceStore> = Arc::clone(&store);
-
+    let s1 = Arc::clone(&store);
+    let s2 = Arc::clone(&store);
     let a1 = agent_alpha.clone();
     let a2 = agent_beta.clone();
 
@@ -123,7 +102,6 @@ fn concurrent_cross_agent_writes_both_succeed() {
     let ref_alpha = h1.join().expect("h1: thread must not panic");
     let ref_beta = h2.join().expect("h2: thread must not panic");
 
-    // Verify: each agent can load their claim.
     let loaded_alpha = store
         .load_claim(&agent_alpha, &ref_alpha)
         .expect("load_claim alpha: must not error")
@@ -134,58 +112,30 @@ fn concurrent_cross_agent_writes_both_succeed() {
         .expect("load_claim beta: must not error")
         .expect("load_claim beta: must return Some — cross-agent write must be durable");
 
-    assert_eq!(
-        loaded_alpha.claim_ref(), &ref_alpha,
-        "agent-alpha claim_ref must round-trip"
-    );
-    assert_eq!(
-        loaded_beta.claim_ref(), &ref_beta,
-        "agent-beta claim_ref must round-trip"
-    );
+    assert_eq!(loaded_alpha.claim_ref(), &ref_alpha, "agent-alpha claim_ref must round-trip");
+    assert_eq!(loaded_beta.claim_ref(), &ref_beta, "agent-beta claim_ref must round-trip");
 }
 
-// ── Test 2: same-agent concurrent writes — advisory lock + stream_seq proof ──
-
-/// Spawn two threads with the SAME `agent_id`; each does `begin_atomic → append_claim →
-/// append_ledger_entry → commit` concurrently.
+/// Core of same-agent advisory-lock + stream_seq proof.
 ///
-/// Expected outcome:
-/// - Both threads succeed (no deadlock — advisory lock BLOCKS then releases, not fails).
-/// - The agent has exactly 2 claims.
-/// - The `stream_seq` values in `ledger_entries` are {1, 2} — no duplicate, no gap.
-///   This proves the advisory lock serialized the MAX+1 computation correctly.
-/// - Completes without deadlock (advisory lock is blocking, not failing).
-#[test]
-fn advisory_lock_same_agent_serializes() {
-    let node = Postgres::default()
-        .with_tag("16")
-        .start()
-        .expect("testcontainers: start postgres:16");
-
-    let host = node.get_host().expect("get_host");
-    let port = node.get_host_port_ipv4(5432).expect("get_host_port_ipv4(5432)");
-    let conn_str = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
-
-    let store = Arc::new(
-        PostgresPersistenceStore::new(&conn_str)
-            .expect("PostgresPersistenceStore::new"),
-    );
-
+/// Spawns two threads with the SAME `agent_id`; each does
+/// `begin_atomic → append_claim → append_ledger_entry → commit` concurrently.
+/// Both must succeed; `stream_seq` values must be {1, 2} — no duplicate, no gap.
+fn run_same_agent_proof(store: Arc<PostgresPersistenceStore>, conn_str: &str) {
     let agent = AgentId("agent-same".into());
 
-    let s1: Arc<PostgresPersistenceStore> = Arc::clone(&store);
-    let s2: Arc<PostgresPersistenceStore> = Arc::clone(&store);
-
+    let s1 = Arc::clone(&store);
+    let s2 = Arc::clone(&store);
     let a1 = agent.clone();
     let a2 = agent.clone();
 
-    // Use a barrier to maximize the chance of true concurrent execution.
+    // Barrier maximizes the chance of true concurrent entry into begin_atomic.
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let b1 = Arc::clone(&barrier);
     let b2 = Arc::clone(&barrier);
 
     let h1 = std::thread::spawn(move || {
-        b1.wait(); // synchronize start
+        b1.wait();
         let claim = make_claim(&a1, "same-agent", "predicate-t1");
         let claim_ref = claim.claim_ref().clone();
         let entry = make_ledger_entry(&a1, &claim_ref);
@@ -197,7 +147,7 @@ fn advisory_lock_same_agent_serializes() {
     });
 
     let h2 = std::thread::spawn(move || {
-        b2.wait(); // synchronize start
+        b2.wait();
         let claim = make_claim(&a2, "same-agent", "predicate-t2");
         let claim_ref = claim.claim_ref().clone();
         let entry = make_ledger_entry(&a2, &claim_ref);
@@ -208,15 +158,10 @@ fn advisory_lock_same_agent_serializes() {
         claim_ref
     });
 
-    // Both threads must complete without deadlock (advisory lock blocks, then releases).
-    let ref1 = h1
-        .join()
-        .expect("h1: must not deadlock or panic");
-    let ref2 = h2
-        .join()
-        .expect("h2: must not deadlock or panic");
+    let ref1 = h1.join().expect("h1: must not deadlock or panic");
+    let ref2 = h2.join().expect("h2: must not deadlock or panic");
 
-    // Verify: the agent has exactly 2 claims (one per thread).
+    // Verify: exactly 1 claim per predicate.
     let claims_t1 = store
         .load_subject_line(&agent, "same-agent", "predicate-t1")
         .expect("load_subject_line t1");
@@ -224,36 +169,20 @@ fn advisory_lock_same_agent_serializes() {
         .load_subject_line(&agent, "same-agent", "predicate-t2")
         .expect("load_subject_line t2");
 
-    assert_eq!(
-        claims_t1.len(), 1,
-        "same-agent: predicate-t1 must have exactly 1 claim"
-    );
-    assert_eq!(
-        claims_t2.len(), 1,
-        "same-agent: predicate-t2 must have exactly 1 claim"
-    );
-    assert_eq!(
-        claims_t1[0].claim_ref(), &ref1,
-        "same-agent: claim ref1 must round-trip"
-    );
-    assert_eq!(
-        claims_t2[0].claim_ref(), &ref2,
-        "same-agent: claim ref2 must round-trip"
-    );
+    assert_eq!(claims_t1.len(), 1, "same-agent: predicate-t1 must have exactly 1 claim");
+    assert_eq!(claims_t2.len(), 1, "same-agent: predicate-t2 must have exactly 1 claim");
+    assert_eq!(claims_t1[0].claim_ref(), &ref1, "same-agent: claim ref1 must round-trip");
+    assert_eq!(claims_t2[0].claim_ref(), &ref2, "same-agent: claim ref2 must round-trip");
 
-    // Verify: ledger has exactly 2 entries for this agent.
+    // Verify: exactly 2 ledger entries.
     let ledger = store
         .load_ledger(&agent, None, 100)
         .expect("load_ledger for same-agent");
+    assert_eq!(ledger.len(), 2, "same-agent: ledger must have exactly 2 entries (one per thread)");
 
-    assert_eq!(
-        ledger.len(), 2,
-        "same-agent: ledger must have exactly 2 entries (one per thread)"
-    );
-
-    // Query stream_seq values directly via an independent postgres::Client
-    // (pool field is pub(crate); use a fresh client against the same DB).
-    let mut verification_client = postgres::Client::connect(&conn_str, postgres::NoTls)
+    // Verify stream_seq values via an independent postgres::Client.
+    // (pool field is pub(crate); open a fresh client against the same DB.)
+    let mut verification_client = postgres::Client::connect(conn_str, postgres::NoTls)
         .expect("verification client: connect");
 
     let rows = verification_client
@@ -274,4 +203,40 @@ fn advisory_lock_same_agent_serializes() {
          Advisory lock + MAX+1 assignment must have serialized correctly. \
          Actual: {seq_values:?}"
     );
+}
+
+// ── Test functions: cross-agent (topology-b) ────────────────────────────────
+
+/// Cross-agent concurrent writes on postgres:16 — both must succeed (topology-b proof).
+#[test]
+fn cross_agent_writes_both_succeed_pg16() {
+    common::with_pg("16", |store| {
+        run_cross_agent_proof(store);
+    });
+}
+
+/// Cross-agent concurrent writes on postgres:18 — both must succeed (topology-b proof).
+#[test]
+fn cross_agent_writes_both_succeed_pg18() {
+    common::with_pg("18", |store| {
+        run_cross_agent_proof(store);
+    });
+}
+
+// ── Test functions: same-agent advisory lock + stream_seq ───────────────────
+
+/// Same-agent advisory-lock + stream_seq serialization proof on postgres:16.
+#[test]
+fn advisory_lock_same_agent_serializes_pg16() {
+    common::with_pg_and_conn("16", |store, conn_str| {
+        run_same_agent_proof(store, &conn_str);
+    });
+}
+
+/// Same-agent advisory-lock + stream_seq serialization proof on postgres:18.
+#[test]
+fn advisory_lock_same_agent_serializes_pg18() {
+    common::with_pg_and_conn("18", |store, conn_str| {
+        run_same_agent_proof(store, &conn_str);
+    });
 }
