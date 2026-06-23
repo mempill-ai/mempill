@@ -59,6 +59,19 @@ pub enum AdjudicationVerdict {
     Unknown,
 }
 
+/// The resolved outcome of an adjudication, delivered asynchronously from the oracle loop.
+/// Carries the identity of the adjudication request (`handle_id`), the final disposition
+/// applied to the challenger claim, and the claim reference the outcome targets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AdjudicationOutcome {
+    /// Correlates this outcome back to the originating [`AdjudicationRequest`].
+    pub handle_id: uuid::Uuid,
+    /// The deterministic disposition the engine will apply to the challenger claim.
+    pub disposition: crate::disposition::Disposition,
+    /// The claim this outcome acts upon.
+    pub claim_ref: crate::identity::ClaimRef,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +116,23 @@ mod tests {
             let back: AdjudicationVerdict = serde_json::from_str(&json).unwrap();
             assert_eq!(v, &back);
         }
+    }
+
+    #[test]
+    fn adjudication_outcome_round_trip_serde() {
+        use crate::disposition::Disposition;
+        use crate::identity::ClaimRef;
+
+        let outcome = AdjudicationOutcome {
+            handle_id: uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            disposition: Disposition::Superseded,
+            claim_ref: ClaimRef::new_random(),
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let back: AdjudicationOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.handle_id, outcome.handle_id);
+        assert_eq!(back.disposition, outcome.disposition);
+        assert_eq!(back.claim_ref, outcome.claim_ref);
     }
 
     #[test]
