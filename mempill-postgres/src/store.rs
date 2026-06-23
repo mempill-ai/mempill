@@ -403,8 +403,11 @@ impl PersistencePort for PostgresPersistenceStore {
         let claim_id = claim.claim_ref().0.to_string();
         let agent_id = claim.agent_id().0.clone();
         let fact = claim.fact();
-        let value_json = serde_json::to_string(&fact.value)
-            .map_err(|e| PostgresStoreError::Mapping(format!("value serialization: {e}")))?;
+        // Pass value and metadata as serde_json::Value so the postgres driver can
+        // encode them as JSONB binary directly (requires feature "with-serde_json-1").
+        // A String with `$n::jsonb` SQL cast does NOT work — the driver type-checks
+        // the Rust type against the declared column OID before the cast runs.
+        let value_jsonb: &serde_json::Value = &fact.value;
         let cardinality = cardinality_to_str(claim.cardinality()).to_owned();
         let provenance = provenance_to_str(claim.provenance()).to_owned();
         let anchor = claim.external_anchor();
@@ -423,13 +426,8 @@ impl PersistencePort for PostgresPersistenceStore {
             claim.derived_from().iter().map(|r| r.0.to_string()).collect();
         let derived_from_json = serde_json::to_string(&derived_from_refs)
             .map_err(|e| PostgresStoreError::Mapping(format!("derived_from serialization: {e}")))?;
-        let metadata_json: Option<String> = claim
-            .metadata()
-            .map(|v| {
-                serde_json::to_string(v)
-                    .map_err(|e| PostgresStoreError::Mapping(format!("metadata serialization: {e}")))
-            })
-            .transpose()?;
+        // metadata is Option<serde_json::Value>: pass as Option<&serde_json::Value>
+        let metadata_jsonb: Option<serde_json::Value> = claim.metadata().cloned();
         let snapshot_schema_version: Option<i32> =
             claim.snapshot_schema_version().map(|v| v as i32);
 
@@ -441,18 +439,18 @@ impl PersistencePort for PostgresPersistenceStore {
                 value_confidence, criticality, derived_from,
                 metadata, snapshot_schema_version, embedding_model_id
             ) VALUES (
-                $1,  $2,  $3,  $4,  $5::jsonb,  $6,
+                $1,  $2,  $3,  $4,  $5,  $6,
                 $7,  $8,  $9,
                 $10, $11, $12, $13,
                 $14, $15, $16,
-                $17::jsonb, $18, NULL
+                $17, $18, NULL
             )",
             &[
                 &claim_id,
                 &agent_id,
                 &fact.subject.as_str(),
                 &fact.predicate.as_str(),
-                &value_json,
+                &value_jsonb,
                 &cardinality,
                 &provenance,
                 &nearest_anchor,
@@ -464,7 +462,7 @@ impl PersistencePort for PostgresPersistenceStore {
                 &value_confidence,
                 &criticality,
                 &derived_from_json,
-                &metadata_json,
+                &metadata_jsonb,
                 &snapshot_schema_version,
             ],
         )?;
@@ -533,14 +531,9 @@ impl PersistencePort for PostgresPersistenceStore {
         let claim_id = entry.claim_ref.0.to_string();
         let event_kind = ledger_event_kind_to_str(&entry.event_kind).to_owned();
         let disposition = disposition_to_str(&entry.disposition).to_owned();
-        let rationale_json: Option<String> = entry
-            .rationale
-            .as_ref()
-            .map(|v| {
-                serde_json::to_string(v)
-                    .map_err(|e| PostgresStoreError::Mapping(format!("rationale serialization: {e}")))
-            })
-            .transpose()?;
+        // Pass rationale as Option<serde_json::Value> so the driver encodes it as JSONB.
+        // A String with `$6::jsonb` cast does NOT work — see append_claim note above.
+        let rationale_jsonb: Option<serde_json::Value> = entry.rationale.clone();
         let recorded_at = entry.recorded_at.0.to_rfc3339();
 
         // INVARIANT: safe only under pg_advisory_xact_lock; replace with a SEQUENCE if the lock is ever removed.
@@ -553,14 +546,14 @@ impl PersistencePort for PostgresPersistenceStore {
         txn.client().execute(
             "INSERT INTO ledger_entries (
                 entry_id, agent_id, claim_id, event_kind, disposition, rationale, recorded_at, stream_seq
-            ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)",
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             &[
                 &entry_id,
                 &agent_id,
                 &claim_id,
                 &event_kind,
                 &disposition,
-                &rationale_json,
+                &rationale_jsonb,
                 &recorded_at,
                 &stream_seq,
             ],
