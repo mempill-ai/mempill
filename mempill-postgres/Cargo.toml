@@ -1,0 +1,20 @@
+[package]
+name = "mempill-postgres"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mempill-core  = { path = "../mempill-core" }
+mempill-types = { path = "../mempill-types" }
+postgres      = "0.19"
+r2d2          = "0.8"
+r2d2_postgres = "0.18"
+refinery      = { version = "0.9", features = ["postgres"] }
+serde_json    = { workspace = true }
+uuid          = { workspace = true }
+chrono        = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+testcontainers-modules = { version = "0.15", features = ["postgres", "blocking"] }
+mempill-core = { path = "../mempill-core", features = ["test-support"] }

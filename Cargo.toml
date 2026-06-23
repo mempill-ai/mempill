@@ -3,6 +3,7 @@ members = [
     "mempill-types",
     "mempill-core",
     "mempill-sqlite",
+    "mempill-postgres",
     "mempill-python",
     "mempill-ts",
 ]
