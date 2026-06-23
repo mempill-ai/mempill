@@ -40,6 +40,9 @@ pub mod ports;
 pub(crate) mod concurrency;
 pub(crate) mod engine;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+
 // ── Key public re-exports ─────────────────────────────────────────────────────
 
 pub use application::{

@@ -3,8 +3,8 @@
 //! EmbeddingPort (F8, A10): BYO-embedding port for fuzzy candidate lookup.
 //! Engine functional in structural-only mode when this port is absent.
 //!
-//! VectorPort: UNIMPLEMENTED IN v0.1 — this is a compile-time seam only.
-//! The sqlite-vec integration will implement this in v0.2.
+//! VectorPort is a compile-time seam; both SQLite and Postgres adapters stub it as NoOp;
+//! implementation deferred beyond v0.3.
 
 use mempill_types::{AgentId, ClaimRef, SubjectLineRef};
 
@@ -25,11 +25,11 @@ pub trait EmbeddingPort: Send + Sync + 'static {
 
 /// Vector persistence seam — SEPARATE from PersistencePort (DB_REQUIREMENTS.md §3, A10).
 ///
-/// # v0.1 Status — UNIMPLEMENTED SEAM
+/// # Status — UNIMPLEMENTED SEAM
 ///
-/// This trait is defined as a compile-time seam only. No implementation exists in v0.1.
-/// The sqlite-vec integration will implement this in v0.2. Callers that need structural-only
-/// mode pass `None::<Arc<NoOpVector>>` (or equivalent) at construction.
+/// VectorPort is a compile-time seam. Both SQLite and Postgres adapters stub this as NoOp.
+/// Implementation deferred beyond v0.3. Callers that need structural-only mode pass
+/// `None::<Arc<NoOpVector>>` (or equivalent) at construction.
 pub trait VectorPort: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 

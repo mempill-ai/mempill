@@ -15,3 +15,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
+mempill-core = { path = "../mempill-core", features = ["test-support"] }
