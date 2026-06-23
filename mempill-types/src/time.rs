@@ -2,6 +2,7 @@
 
 /// Machine-stamped, monotone, reliable (I2). Engine-assigned; host cannot supply this as truth.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct TransactionTime(pub chrono::DateTime<chrono::Utc>);
 
 impl TransactionTime {
@@ -102,6 +103,20 @@ mod tests {
         let t1 = TransactionTime(Utc::now());
         let t2 = TransactionTime(Utc::now() + chrono::Duration::seconds(1));
         assert!(t1 < t2);
+    }
+
+    #[test]
+    fn transaction_time_serializes_as_bare_iso8601_string() {
+        use chrono::TimeZone;
+        // Fixed timestamp: 2024-01-15T12:00:00Z
+        let dt = Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap();
+        let tt = TransactionTime(dt);
+        let json = serde_json::to_string(&tt).unwrap();
+        // chrono serializes DateTime<Utc> as RFC3339/ISO-8601 string
+        assert!(json.starts_with('"'), "expected a bare JSON string, got: {json}");
+        assert!(json.contains("2024-01-15"), "expected date in serialized form, got: {json}");
+        let back: TransactionTime = serde_json::from_str(&json).unwrap();
+        assert_eq!(tt, back);
     }
 
     #[test]

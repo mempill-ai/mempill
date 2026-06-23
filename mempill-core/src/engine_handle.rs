@@ -46,6 +46,10 @@ where
     vector: Option<Arc<V>>,
     config: EngineConfig,
     write_locks: AgentWriteLockMap,
+    /// Store-level write lock: serializes ALL writes across agent_ids to prevent
+    /// concurrent SQLite transactions from different agents on the same connection.
+    /// Reads (query_memory, query_audit) never acquire this lock.
+    store_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<P, O, V> EngineHandle<P, O, V>
@@ -66,17 +70,23 @@ where
             vector,
             config,
             write_locks: AgentWriteLockMap::new(),
+            store_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
     /// Write path: async, acquires per-agent_id lock, delegates to IngestClaimUseCase.
     ///
     /// Clock is read ONCE here (DETERMINISM): `now` flows into the use-case as a parameter.
+    ///
+    /// Locking order (must be consistent across all write methods to avoid deadlock):
+    ///   1. store_write_lock  — serializes all cross-agent SQLite writes
+    ///   2. per-agent lock    — preserves same-agent serial semantics + future-Postgres compat
     pub async fn ingest_claim(
         &self,
         req: IngestClaimRequest,
     ) -> Result<IngestClaimResponse, MemError> {
         let now = Utc::now(); // clock read ONCE at the async boundary
+        let _store_lock = self.store_write_lock.lock().await;
         let _guard = self.write_locks.acquire(&req.agent_id).await;
         let uc = IngestClaimUseCase::new(
             Arc::clone(&self.persistence),
@@ -107,10 +117,13 @@ where
     }
 
     /// Reconcile path: acquires write lock per agent_id in the request.
+    ///
+    /// Locking order matches ingest_claim: store_write_lock first, then per-agent lock.
     pub async fn reconcile(
         &self,
         req: ReconcileRequest,
     ) -> Result<ReconcileResponse, MemError> {
+        let _store_lock = self.store_write_lock.lock().await;
         let _guard = self.write_locks.acquire(&req.agent_id).await;
         let uc = ReconcileUseCase::new(
             Arc::clone(&self.persistence),
@@ -147,6 +160,7 @@ where
             vector: self.vector.clone(),
             config: self.config.clone(),
             write_locks: self.write_locks.clone(),
+            store_write_lock: Arc::clone(&self.store_write_lock),
         }
     }
 }

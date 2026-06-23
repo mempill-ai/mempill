@@ -5,7 +5,6 @@ members = [
     "mempill-sqlite",
     "mempill-python",
     "mempill-ts",
-    "mempill-mcp",
 ]
 resolver = "2"
 

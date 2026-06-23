@@ -5,6 +5,7 @@
 /// Model-emitted content defaults to `ModelDerived` — callers cannot override this default
 /// by supplying a more prestigious label; the gateway enforces the default (see C1 gateway.rs).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "kind")]
 #[non_exhaustive]
 pub enum ProvenanceLabel {
     /// First-hand external evidence — the ONLY cheap-path-eligible channel.
@@ -95,6 +96,37 @@ mod tests {
             let back: ProvenanceLabel = serde_json::from_str(&json).unwrap();
             assert_eq!(label, &back);
         }
+    }
+
+    #[test]
+    fn provenance_label_python_friendly_json_shapes() {
+        // External(UserAsserted) → adjacently-tagged: {"type":"External","kind":"UserAsserted"}
+        let ext_ua = ProvenanceLabel::External(ExternalKind::UserAsserted);
+        let json = serde_json::to_string(&ext_ua).unwrap();
+        assert_eq!(json, r#"{"type":"External","kind":"UserAsserted"}"#);
+        let back: ProvenanceLabel = serde_json::from_str(&json).unwrap();
+        assert_eq!(ext_ua, back);
+
+        // External(ExternalFirstHand) → {"type":"External","kind":"ExternalFirstHand"}
+        let ext_fh = ProvenanceLabel::External(ExternalKind::ExternalFirstHand);
+        let json = serde_json::to_string(&ext_fh).unwrap();
+        assert_eq!(json, r#"{"type":"External","kind":"ExternalFirstHand"}"#);
+        let back: ProvenanceLabel = serde_json::from_str(&json).unwrap();
+        assert_eq!(ext_fh, back);
+
+        // RecallReEntry → {"type":"RecallReEntry"} (unit variant — no "kind" key)
+        let rre = ProvenanceLabel::RecallReEntry;
+        let json = serde_json::to_string(&rre).unwrap();
+        assert_eq!(json, r#"{"type":"RecallReEntry"}"#);
+        let back: ProvenanceLabel = serde_json::from_str(&json).unwrap();
+        assert_eq!(rre, back);
+
+        // ModelDerived → {"type":"ModelDerived"}
+        let md = ProvenanceLabel::ModelDerived;
+        let json = serde_json::to_string(&md).unwrap();
+        assert_eq!(json, r#"{"type":"ModelDerived"}"#);
+        let back: ProvenanceLabel = serde_json::from_str(&json).unwrap();
+        assert_eq!(md, back);
     }
 
     #[test]

@@ -2,10 +2,12 @@
 
 /// Opaque stable identifier for a memory agent. Primary partition key everywhere.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct AgentId(pub String);
 
 /// Opaque, stable, immutable identity of a committed claim. Minted once at injection time.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct ClaimRef(pub uuid::Uuid);
 
 impl ClaimRef {
@@ -47,6 +49,25 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let back: ClaimRef = serde_json::from_str(&json).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn claim_ref_serializes_as_bare_uuid_string() {
+        let uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let r = ClaimRef(uuid);
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#""550e8400-e29b-41d4-a716-446655440000""#);
+        let back: ClaimRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn agent_id_serializes_as_bare_string() {
+        let id = AgentId("my-agent".into());
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, r#""my-agent""#);
+        let back: AgentId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
     }
 
     #[test]
