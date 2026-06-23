@@ -34,7 +34,7 @@ pub mod migrations;
 pub mod store;
 pub mod txn;
 
-pub use store::SqlitePersistenceStore;
+pub use store::{SqlitePendingStore, SqlitePersistenceStore};
 
 // ── Crate-level error type ────────────────────────────────────────────────────
 

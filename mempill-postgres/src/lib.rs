@@ -37,7 +37,7 @@ mod store;
 mod txn;
 
 pub use connection::{PostgresPersistenceStore, PostgresStoreError};
-pub use store::open_postgres;
+pub use store::{open_postgres, PostgresPendingStore};
 pub use txn::PostgresTxn;
 
 /// Type alias for an `EngineHandle` backed by `PostgresPersistenceStore`.

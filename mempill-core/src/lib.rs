@@ -51,9 +51,10 @@ pub use application::{
     ReconcileRequest, ReconcileResponse, ReconcileUseCase,
 };
 pub use config::EngineConfig;
-pub use engine_handle::EngineHandle;
+pub use engine_handle::{EngineHandle, ErasedPendingStore, ErasedPendingStoreAdapter};
 pub use error::{BeliefResult, MemError, WriteResult};
 pub use noop::{NoOpOracle, NoOpVector};
 pub use ports::{
-    EmbeddingPort, ExtractorPort, OraclePort, PersistencePort, Txn, VectorPort,
+    EmbeddingPort, ExtractorPort, OraclePort, PendingAdjudicationPort, PendingAdjudicationRow,
+    PersistencePort, Txn, VectorPort,
 };

@@ -28,6 +28,7 @@
 use std::sync::Arc;
 
 use mempill_core::{
+    ports::pending_adjudication::{PendingAdjudicationPort, PendingAdjudicationRow},
     ports::persistence::PersistencePort,
     EngineConfig, EngineHandle,
 };
@@ -364,6 +365,17 @@ fn row_to_edge(row: &postgres::Row) -> Result<ClaimEdge, PostgresStoreError> {
 }
 
 // ── PersistencePort impl ──────────────────────────────────────────────────────
+
+impl PostgresPersistenceStore {
+    /// Return a `PostgresPendingStore` that shares the same r2d2 connection pool.
+    ///
+    /// Both `PostgresPersistenceStore` and `PostgresPendingStore` acquire connections
+    /// from the same pool. The per-agent write lock held by `EngineHandle` ensures that
+    /// the pending insert is serialized with the claim transaction commit.
+    pub fn pending_store(&self) -> PostgresPendingStore {
+        PostgresPendingStore::new(self.pool.clone())
+    }
+}
 
 impl PersistencePort for PostgresPersistenceStore {
     type Transaction = PostgresTxn;
@@ -916,6 +928,169 @@ impl PersistencePort for PostgresPersistenceStore {
     fn requires_global_write_serialization(&self) -> bool {
         false
     }
+}
+
+// ── PostgresPendingStore ──────────────────────────────────────────────────────
+
+/// PostgreSQL-backed `PendingAdjudicationPort` implementation (W3, Amendment 1).
+///
+/// Uses the same r2d2 pool as `PostgresPersistenceStore`. Each method borrows a pooled
+/// connection for the duration of a single non-transactional statement (auto-commit).
+/// Serialization is provided by the per-agent write lock in `EngineHandle`.
+pub struct PostgresPendingStore {
+    pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager<postgres::NoTls>>,
+}
+
+impl PostgresPendingStore {
+    /// Create a pending store sharing the same connection pool.
+    pub fn new(pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager<postgres::NoTls>>) -> Self {
+        Self { pool }
+    }
+}
+
+impl PendingAdjudicationPort for PostgresPendingStore {
+    type Error = PostgresStoreError;
+
+    fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+        let request_payload = serde_json::to_string(&row.request_payload)
+            .map_err(|e| PostgresStoreError::Mapping(format!("request_payload serialization: {e}")))?;
+        // queued_at and expires_at are TIMESTAMPTZ columns — pass as chrono::DateTime<Utc>
+        // directly (requires postgres feature "with-chrono-0_4"). Passing as String caused
+        // WrongType { postgres: Timestamptz, rust: "alloc::string::String" } errors.
+        let queued_at: chrono::DateTime<chrono::Utc> = row.queued_at;
+        let expires_at: Option<chrono::DateTime<chrono::Utc>> = row.expires_at;
+        conn.execute(
+            "INSERT INTO pending_adjudications (
+                handle_id, agent_id, subject, predicate,
+                challenger_claim_ref, incumbent_claim_ref,
+                request_payload, queued_at, expires_at, status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &row.handle_id.to_string(),
+                &row.agent_id.0.as_str(),
+                &row.subject.as_str(),
+                &row.predicate.as_str(),
+                &row.challenger_claim_ref.0.to_string(),
+                &row.incumbent_claim_ref.0.to_string(),
+                &request_payload.as_str(),
+                &queued_at,
+                &expires_at,
+                &row.status.as_str(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_pending(&self, handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+        let rows = conn.query(
+            "SELECT handle_id, agent_id, subject, predicate,
+                    challenger_claim_ref, incumbent_claim_ref,
+                    request_payload, queued_at, expires_at, status
+             FROM pending_adjudications
+             WHERE handle_id = $1",
+            &[&handle_id.to_string()],
+        )?;
+        match rows.into_iter().next() {
+            None => Ok(None),
+            Some(row) => Ok(Some(pg_row_to_pending(&row)?)),
+        }
+    }
+
+    fn list_pending(&self, agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+        let rows = if let Some(aid) = agent_id {
+            conn.query(
+                "SELECT handle_id, agent_id, subject, predicate,
+                        challenger_claim_ref, incumbent_claim_ref,
+                        request_payload, queued_at, expires_at, status
+                 FROM pending_adjudications
+                 WHERE agent_id = $1 AND status = 'pending'
+                 ORDER BY queued_at ASC",
+                &[&aid.0.as_str()],
+            )?
+        } else {
+            conn.query(
+                "SELECT handle_id, agent_id, subject, predicate,
+                        challenger_claim_ref, incumbent_claim_ref,
+                        request_payload, queued_at, expires_at, status
+                 FROM pending_adjudications
+                 WHERE status = 'pending'
+                 ORDER BY queued_at ASC",
+                &[],
+            )?
+        };
+        rows.iter().map(pg_row_to_pending).collect()
+    }
+
+    fn list_expired(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<PendingAdjudicationRow>, PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+        // Pass now as chrono::DateTime<Utc> directly — expires_at is TIMESTAMPTZ.
+        let rows = conn.query(
+            "SELECT handle_id, agent_id, subject, predicate,
+                    challenger_claim_ref, incumbent_claim_ref,
+                    request_payload, queued_at, expires_at, status
+             FROM pending_adjudications
+             WHERE expires_at IS NOT NULL AND expires_at <= $1 AND status = 'pending'
+             ORDER BY expires_at ASC",
+            &[&now],
+        )?;
+        rows.iter().map(pg_row_to_pending).collect()
+    }
+
+    fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE pending_adjudications SET status = 'resolved' WHERE handle_id = $1",
+            &[&handle_id.to_string()],
+        )?;
+        Ok(())
+    }
+}
+
+/// Map a Postgres `Row` from `pending_adjudications` to a `PendingAdjudicationRow`.
+///
+/// `queued_at` and `expires_at` are `TIMESTAMPTZ` columns; we read them as
+/// `chrono::DateTime<chrono::Utc>` directly via the `with-chrono-0_4` postgres feature.
+/// All other UUID-like columns are stored as TEXT and parsed manually.
+fn pg_row_to_pending(row: &postgres::Row) -> Result<PendingAdjudicationRow, PostgresStoreError> {
+    let handle_id_str: String = row.get(0);
+    let agent_id_str: String = row.get(1);
+    let subject: String = row.get(2);
+    let predicate: String = row.get(3);
+    let challenger_str: String = row.get(4);
+    let incumbent_str: String = row.get(5);
+    let payload_json: String = row.get(6);
+    // TIMESTAMPTZ columns — read as native chrono type (with-chrono-0_4 feature).
+    let queued_at: chrono::DateTime<chrono::Utc> = row.get(7);
+    let expires_at: Option<chrono::DateTime<chrono::Utc>> = row.get(8);
+    let status: String = row.get(9);
+
+    let handle_id = uuid::Uuid::parse_str(&handle_id_str)
+        .map_err(|e| PostgresStoreError::Mapping(format!("handle_id UUID: {e}")))?;
+    let challenger_claim_ref = uuid::Uuid::parse_str(&challenger_str)
+        .map(ClaimRef)
+        .map_err(|e| PostgresStoreError::Mapping(format!("challenger_claim_ref UUID: {e}")))?;
+    let incumbent_claim_ref = uuid::Uuid::parse_str(&incumbent_str)
+        .map(ClaimRef)
+        .map_err(|e| PostgresStoreError::Mapping(format!("incumbent_claim_ref UUID: {e}")))?;
+    let request_payload: mempill_types::AdjudicationRequest =
+        serde_json::from_str(&payload_json)
+            .map_err(|e| PostgresStoreError::Mapping(format!("request_payload JSON: {e}")))?;
+
+    Ok(PendingAdjudicationRow {
+        handle_id,
+        agent_id: AgentId(agent_id_str),
+        subject,
+        predicate,
+        challenger_claim_ref,
+        incumbent_claim_ref,
+        request_payload,
+        queued_at,
+        expires_at,
+        status,
+    })
 }
 
 // ── Constructor ───────────────────────────────────────────────────────────────

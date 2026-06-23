@@ -62,6 +62,8 @@ pub fn mem_err_to_pyerr(e: MemError) -> PyErr {
         // StorageError group
         MemError::Persistence { .. } => StorageError::new_err(msg),
         MemError::PragmaInitFailed { .. } => StorageError::new_err(msg),
+        // PendingStore is a storage-layer failure (W3 pending_adjudications write path).
+        MemError::PendingStore { .. } => StorageError::new_err(msg),
 
         // ConfigError group
         MemError::ConfigurationError { .. } => ConfigError::new_err(msg),

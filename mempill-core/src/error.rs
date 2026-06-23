@@ -68,8 +68,17 @@ pub enum MemError {
     PragmaInitFailed { reason: String },
 
     // ── ORACLE PORT ───────────────────────────────────────────────────────────
+    /// Oracle port returned an error (W3 `request_adjudication`, and other oracle call sites).
+    /// Use `OracleError { reason: e.to_string() }` — string-reason convention is consistent
+    /// across all non-persistence, non-internal error variants.
     #[error("Oracle port error: {reason}")]
     OracleError { reason: String },
+
+    /// Pending-adjudication store error (W3 — insert_pending / mark_resolved).
+    #[error("Pending-adjudication store error: {source}")]
+    PendingStore {
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 
     #[error("Adjudication handle not found: {handle_id}")]
     AdjudicationHandleNotFound { handle_id: uuid::Uuid },
