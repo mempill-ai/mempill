@@ -61,4 +61,4 @@ identical by the shared conformance harness.
 
 ## License
 
-AGPL-3.0 with linking exception. See the [root README](../README.md) for details.
+Apache-2.0. See [LICENSE](../LICENSE) for the full text.

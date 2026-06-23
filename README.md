@@ -2,7 +2,7 @@
 
 **Temporally-correct AI-agent memory — append-only, bi-temporal, provenance-aware.**
 
-Status: 311 tests · AGPL-3.0 · v0.3 (Rust + Python wheel + MCP adapter + PostgreSQL adapter)
+Status: 311 tests · Apache-2.0 · v0.3 (Rust + Python wheel + MCP adapter + PostgreSQL adapter)
 
 ---
 
@@ -434,9 +434,4 @@ adapters is a hard requirement.
 
 ## License
 
-mempill is licensed under **AGPL-3.0** with a **linking/binding exception**: host embedding
-of the Python, TypeScript, or other binding layers is not copyleft-propagating. The exception
-covers the FFI boundary only; derivative works of the core engine remain AGPL-3.0.
-
-A `LICENSE` file is not yet present in the repository. Adding one (with the AGPL-3.0 text
-and the linking exception clause) is recommended before any public release.
+mempill is licensed under **Apache-2.0**. See the [LICENSE](LICENSE) file for the full text.
