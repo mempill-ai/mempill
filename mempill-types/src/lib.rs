@@ -17,7 +17,7 @@
 //! - `edge`        — [`ClaimEdge`], [`EdgeKind`]
 //! - `ledger`      — [`LedgerEntry`], [`LedgerEventKind`]
 //! - `proposal`    — [`ClaimProposal`], [`AdjudicationRequest`], [`AdjudicationResponse`],
-//!                   [`AdjudicationVerdict`], [`OverturnReason`]
+//!                   [`AdjudicationVerdict`], [`OverturnReason`], [`AdjudicationOutcome`]
 
 pub mod belief;
 pub mod claim;
@@ -41,7 +41,8 @@ pub use edge::{ClaimEdge, EdgeKind};
 pub use identity::{AgentId, ClaimRef, SubjectLineRef};
 pub use ledger::{LedgerEntry, LedgerEventKind};
 pub use proposal::{
-    AdjudicationRequest, AdjudicationResponse, AdjudicationVerdict, ClaimProposal, OverturnReason,
+    AdjudicationOutcome, AdjudicationRequest, AdjudicationResponse, AdjudicationVerdict,
+    ClaimProposal, OverturnReason,
 };
 pub use provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel};
 pub use time::{TransactionTime, ValidTime};
