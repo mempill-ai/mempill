@@ -66,12 +66,16 @@ def _normalise_provenance(provenance: Any) -> dict[str, str]:
     """Accept a friendly string or dict and return a wire-shape provenance dict.
 
     Accepted string forms (case-insensitive, separator-tolerant):
-      "External:UserAsserted"    → {"type": "External", "kind": "UserAsserted"}
-      "External:ExternalFirstHand" → {"type": "External", "kind": "ExternalFirstHand"}
-      "RecallReEntry"            → {"type": "RecallReEntry"}
-      "ModelDerived"             → {"type": "ModelDerived"}
+      "External:UserAsserted"      → ProvenanceLabel.external_user_asserted()
+      "External:ExternalFirstHand" → ProvenanceLabel.external_first_hand()
+      "RecallReEntry"              → ProvenanceLabel.recall_re_entry()
+      "ModelDerived"               → ProvenanceLabel.model_derived()
 
     If a dict is passed, it is returned as-is (the engine validates it).
+
+    IMPORTANT: the string is split on ':' FIRST so that "External:ExternalFirstHand"
+    is parsed as type="External", kind="ExternalFirstHand" — NOT collapsed into the
+    single key "externalexternalfirsthand" (the previous double-external bug).
     """
     if isinstance(provenance, dict):
         return provenance
@@ -81,20 +85,45 @@ def _normalise_provenance(provenance: Any) -> dict[str, str]:
             f"provenance must be a dict or string, got {type(provenance).__name__!r}"
         )
 
-    key = provenance.strip().lower().replace("-", "").replace("_", "").replace(":", "")
-    mapping = {
-        "externaluserasserted": ProvenanceLabel.external_user_asserted(),
-        "externalfirsthand": ProvenanceLabel.external_first_hand(),
+    # Normalise the raw string: strip whitespace, lowercase, remove separators.
+    raw = provenance.strip()
+
+    # Split on ':' first to separate type prefix from kind suffix.
+    parts = raw.split(":", 1)
+    ptype = parts[0].lower().replace("-", "").replace("_", "")
+
+    if ptype == "external":
+        if len(parts) < 2:
+            raise ValueError(
+                f"Unknown provenance string {provenance!r}. "
+                "Accepted values: 'External:UserAsserted', 'External:ExternalFirstHand', "
+                "'RecallReEntry', 'ModelDerived'."
+            )
+        kind = parts[1].lower().replace("-", "").replace("_", "")
+        kind_mapping = {
+            "userasserted": ProvenanceLabel.external_user_asserted(),
+            "externalfirsthand": ProvenanceLabel.external_first_hand(),
+        }
+        if kind not in kind_mapping:
+            raise ValueError(
+                f"Unknown provenance string {provenance!r}. "
+                "Accepted values: 'External:UserAsserted', 'External:ExternalFirstHand', "
+                "'RecallReEntry', 'ModelDerived'."
+            )
+        return kind_mapping[kind]
+
+    # Simple (no-colon) provenance types.
+    simple_mapping = {
         "recallreentry": ProvenanceLabel.recall_re_entry(),
         "modelderived": ProvenanceLabel.model_derived(),
     }
-    if key not in mapping:
+    if ptype not in simple_mapping:
         raise ValueError(
             f"Unknown provenance string {provenance!r}. "
             "Accepted values: 'External:UserAsserted', 'External:ExternalFirstHand', "
             "'RecallReEntry', 'ModelDerived'."
         )
-    return mapping[key]
+    return simple_mapping[ptype]
 
 
 # ── Tool 1: ingest_claim ──────────────────────────────────────────────────────
