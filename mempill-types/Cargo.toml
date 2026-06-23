@@ -2,6 +2,8 @@
 name = "mempill-types"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+readme = "README.md"
 
 [dependencies]
 chrono = { workspace = true }

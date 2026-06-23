@@ -14,3 +14,6 @@ __pycache__/
 *.so
 *.pyd
 *.abi3.so
+
+# Orchestrator task/working notes live at the monorepo-root tasks/, never in the product repo
+tasks/
