@@ -8,7 +8,7 @@ readme = "README.md"
 [dependencies]
 mempill-core  = { path = "../mempill-core" }
 mempill-types = { path = "../mempill-types" }
-postgres      = { version = "0.19", features = ["with-serde_json-1"] }
+postgres      = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4"] }
 r2d2          = "0.8"
 r2d2_postgres = "0.18"
 refinery      = { version = "0.9", features = ["postgres"] }
@@ -20,3 +20,4 @@ thiserror     = { workspace = true }
 [dev-dependencies]
 testcontainers-modules = { version = "0.15", features = ["postgres", "blocking"] }
 mempill-core = { path = "../mempill-core", features = ["test-support"] }
+tokio = { workspace = true, features = ["rt", "macros"] }

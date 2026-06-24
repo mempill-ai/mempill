@@ -54,6 +54,12 @@ impl OraclePort for NoOpOracle {
         // No-op: accept and discard the request.
         Ok(())
     }
+
+    /// NoOpOracle never correlates responses, so return a fresh UUID.
+    /// The pending row will be persisted but never resolved (no verdict arrives).
+    fn handle_to_uuid(_handle: &Self::Handle) -> uuid::Uuid {
+        uuid::Uuid::new_v4()
+    }
 }
 
 // ── NOOP VECTOR ───────────────────────────────────────────────────────────────
@@ -218,5 +224,15 @@ mod tests {
     fn noop_vector_satisfies_trait_bounds() {
         fn assert_vector_bounds<T: VectorPort + Send + Sync + 'static>() {}
         assert_vector_bounds::<NoOpVector>();
+    }
+
+    /// W3 coverage: NoOpOracle::handle_to_uuid returns a non-nil UUID for the unit handle.
+    /// Two calls must return distinct UUIDs (because each call generates a fresh UUID v4).
+    #[test]
+    fn noop_oracle_handle_to_uuid_returns_non_nil_uuid() {
+        let uuid1 = NoOpOracle::handle_to_uuid(&());
+        let uuid2 = NoOpOracle::handle_to_uuid(&());
+        assert!(!uuid1.is_nil(), "handle_to_uuid must return a non-nil UUID");
+        assert_ne!(uuid1, uuid2, "successive handle_to_uuid calls must return distinct UUIDs");
     }
 }

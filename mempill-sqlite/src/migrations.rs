@@ -12,13 +12,16 @@ use rusqlite::{Connection, Result};
 
 /// The target schema version this runner brings the database to.
 /// Increment this constant (and add a new migration step) for every future DDL change.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Embedded DDL — the 4-table append-only schema (§5).
 const V1_INITIAL_SQL: &str = include_str!("schema/v1_initial.sql");
 
 /// Embedded index definitions (§5).
 const INDEXES_SQL: &str = include_str!("schema/indexes.sql");
+
+/// Embedded DDL — oracle adjudication queue (TASK-9, oracle loop).
+const V2_PENDING_ADJUDICATIONS_SQL: &str = include_str!("schema/v2_pending_adjudications.sql");
 
 /// Migration error wrapper.
 #[derive(Debug, thiserror::Error)]
@@ -42,7 +45,9 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), MigrationError> {
         apply_v1(conn)?;
     }
 
-    // Future migrations: add `if current < N { apply_vN(conn)?; }` blocks here.
+    if current < 2 {
+        apply_v2(conn)?;
+    }
 
     Ok(())
 }
@@ -70,6 +75,13 @@ fn apply_v1(conn: &Connection) -> Result<(), MigrationError> {
     conn.execute_batch(V1_INITIAL_SQL)?;
     conn.execute_batch(INDEXES_SQL)?;
     set_user_version(conn, 1)?;
+    Ok(())
+}
+
+/// Migration v2: create the oracle adjudication queue table and its indexes.
+fn apply_v2(conn: &Connection) -> Result<(), MigrationError> {
+    conn.execute_batch(V2_PENDING_ADJUDICATIONS_SQL)?;
+    set_user_version(conn, 2)?;
     Ok(())
 }
 
@@ -316,5 +328,69 @@ mod tests {
             v, CURRENT_SCHEMA_VERSION,
             "user_version PRAGMA must equal CURRENT_SCHEMA_VERSION after migration"
         );
+    }
+
+    #[test]
+    fn pending_adjudications_table_exists_after_migration() {
+        let conn = open_memory();
+        apply_migrations(&conn).expect("migrations should succeed");
+        assert!(
+            table_exists(&conn, "pending_adjudications"),
+            "pending_adjudications table must exist after v2 migration"
+        );
+    }
+
+    #[test]
+    fn pending_adjudications_table_has_expected_columns() {
+        let conn = open_memory();
+        apply_migrations(&conn).expect("migrations should succeed");
+
+        let cols = column_names(&conn, "pending_adjudications");
+        for expected in &[
+            "handle_id",
+            "agent_id",
+            "subject",
+            "predicate",
+            "challenger_claim_ref",
+            "incumbent_claim_ref",
+            "request_payload",
+            "queued_at",
+            "expires_at",
+            "status",
+        ] {
+            assert!(
+                cols.contains(&expected.to_string()),
+                "pending_adjudications table missing column: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_adjudications_indexes_exist_after_migration() {
+        let conn = open_memory();
+        apply_migrations(&conn).expect("migrations should succeed");
+
+        // Agent-id lookup index (oracle poller).
+        assert!(
+            index_exists(&conn, "idx_pending_adj_agent_id"),
+            "idx_pending_adj_agent_id must exist after v2 migration"
+        );
+        // Partial TTL index (WHERE expires_at IS NOT NULL AND status = 'pending').
+        assert!(
+            index_exists(&conn, "idx_pending_adj_expires_at"),
+            "idx_pending_adj_expires_at must exist after v2 migration"
+        );
+    }
+
+    #[test]
+    fn apply_migrations_v2_is_idempotent() {
+        let conn = open_memory();
+        apply_migrations(&conn).expect("first migration should succeed");
+        apply_migrations(&conn).expect("second migration must not error (idempotent)");
+        apply_migrations(&conn).expect("third migration must not error (idempotent)");
+
+        assert!(table_exists(&conn, "pending_adjudications"));
+        assert!(index_exists(&conn, "idx_pending_adj_agent_id"));
+        assert!(index_exists(&conn, "idx_pending_adj_expires_at"));
     }
 }

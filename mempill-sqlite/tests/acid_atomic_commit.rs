@@ -351,56 +351,71 @@ async fn i9_heavypath_supersession_commits_atomically() {
     );
 
     // ── Step 3: assert atomicity — original claim A is retained (I1) ──────────
-    // After supersession, claim A must still appear in the audit ledger with
-    // ClaimCommitted (it was never deleted — append-only). A ValidityAsserted entry
-    // must also exist (the bound was appended as part of the supersession transaction).
+    // After B11 Contested ingest (oracle absent), claim A must still appear in the audit
+    // ledger with ClaimCommitted. It must NOT have a ValidityAsserted entry — the incumbent
+    // is NOT superseded at ingest time (TASK-9-W4-W5-FIX: ingest-time supersession removed).
+    // Supersession only happens at submit_adjudication Affirm time.
     let audit = engine.query_audit(AuditQueryRequest {
         agent_id: agent.clone(),
         claim_ref: Some(claim_ref_a.clone()),
         from_tx_time: None,
         limit: 50,
-    }).await.expect("audit query for claim A must succeed after supersession");
+    }).await.expect("audit query for claim A must succeed after B11 contested ingest");
 
     let committed_count = audit.entries.iter()
         .filter(|e| e.claim_ref == claim_ref_a && matches!(e.event_kind, LedgerEventKind::ClaimCommitted))
         .count();
     assert_eq!(
         committed_count, 1,
-        "I9 HeavyPath atomicity: ClaimCommitted entry for claim A MUST be present after supersession \
-         (supersession committed all rows atomically — incumbent retained). Found: {}",
+        "I9 HeavyPath atomicity: ClaimCommitted entry for claim A MUST be present after B11 \
+         contested ingest (append-only — incumbent retained). Found: {}",
         committed_count
     );
 
+    // CORRECTED (TASK-9-W4-W5-FIX): ValidityAsserted MUST NOT be present at ingest time.
+    // HeavyPath (B11, oracle absent) no longer writes a Bound assertion on the incumbent.
+    // This was the root cause of the Contested-surfacing bug: the Bound assertion excluded
+    // the incumbent from live_claims, producing NoBelief after Deny and missing-incumbent
+    // Contested after Unknown. Fix: don't supersede at ingest; supersede only on Affirm.
     let validity_asserted_count = audit.entries.iter()
         .filter(|e| e.claim_ref == claim_ref_a && matches!(e.event_kind, LedgerEventKind::ValidityAsserted))
         .count();
     assert_eq!(
-        validity_asserted_count, 1,
-        "I9 HeavyPath atomicity: ValidityAsserted (bound) for claim A MUST be present — \
-         the supersession transaction committed the bound atomically. Found: {}",
+        validity_asserted_count, 0,
+        "TASK-9-W4-W5-FIX: ValidityAsserted for claim A MUST NOT be present at ingest time. \
+         The incumbent is not superseded during ingest (only at submit_adjudication Affirm). \
+         Found: {} (expected 0)",
         validity_asserted_count
     );
 
-    // ── Step 4: belief reflects the supersession ───────────────────────────────
-    // The belief must be non-empty (either Contested or a live claim for B). The
-    // exact status depends on oracle presence; oracle is None in DefaultEngine, so
-    // expect Contested or a Resolved belief for B.
+    // ── Step 4: belief reflects B11 Contested (BOTH values visible) ───────────
+    // oracle is None in DefaultEngine → B11(a) → Contested immediately.
+    // Both claim A ("old@example.com") and claim B ("new@example.com") must be visible.
     let query = engine.query_memory(QueryMemoryRequest {
         agent_id: agent.clone(),
         subject: "user".into(),
         predicate: "email".into(),
         as_of_tx_time: None,
-    }).await.expect("query after supersession must succeed");
+    }).await.expect("query after B11 Contested ingest must succeed");
 
-    assert!(
-        !matches!(query.belief.status, BeliefStatus::NoBelief),
-        "I9 HeavyPath: belief after supersession must not be NoBelief (supersession committed all rows)"
+    assert_eq!(
+        query.belief.status, BeliefStatus::Contested,
+        "I9 HeavyPath: belief after B11 contested ingest MUST be Contested (both claims live). \
+         Got {:?}", query.belief.status
     );
 
-    // At least one claim must be surfaced (primary or alternative).
-    let surfaced = query.belief.primary.is_some() || !query.belief.alternatives.is_empty();
+    let all_values: Vec<_> = query.belief.primary.iter()
+        .map(|b| b.fact.value.clone())
+        .chain(query.belief.alternatives.iter().map(|b| b.fact.value.clone()))
+        .collect();
     assert!(
-        surfaced,
-        "I9 HeavyPath: at least one claim must appear in belief after supersession (atomic commit)"
+        all_values.contains(&serde_json::json!("old@example.com")),
+        "I9 HeavyPath: 'old@example.com' (claim A / incumbent) MUST be visible in Contested. Got: {:?}",
+        all_values
+    );
+    assert!(
+        all_values.contains(&serde_json::json!("new@example.com")),
+        "I9 HeavyPath: 'new@example.com' (claim B / challenger) MUST be visible in Contested. Got: {:?}",
+        all_values
     );
 }

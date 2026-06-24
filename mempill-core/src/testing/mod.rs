@@ -5,3 +5,6 @@
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod conformance;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod oracle_conformance;

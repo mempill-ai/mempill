@@ -9,10 +9,12 @@ pub mod embedding;
 pub mod extractor;
 pub mod model;
 pub mod oracle;
+pub mod pending_adjudication;
 pub mod persistence;
 
 // Flat re-exports for ergonomic use within mempill-core and adapter crates.
 pub use embedding::{EmbeddingPort, VectorPort};
 pub use extractor::ExtractorPort;
 pub use oracle::OraclePort;
+pub use pending_adjudication::{PendingAdjudicationPort, PendingAdjudicationRow};
 pub use persistence::{PersistencePort, Txn};

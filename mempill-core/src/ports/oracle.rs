@@ -21,4 +21,11 @@ pub trait OraclePort: Send + Sync + 'static {
         agent_id: &AgentId,
         request: AdjudicationRequest,
     ) -> Result<Self::Handle, Self::Error>;
+
+    /// Convert an opaque oracle handle to the durable `handle_id` UUID used as the PK
+    /// in the `pending_adjudications` table (W3 — Risk R1).
+    ///
+    /// This bridges the oracle's opaque handle type to the engine's persistence layer.
+    /// Called immediately after `request_adjudication` returns, before the pending row is inserted.
+    fn handle_to_uuid(handle: &Self::Handle) -> uuid::Uuid;
 }
