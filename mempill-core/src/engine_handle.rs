@@ -373,13 +373,9 @@ where
 
         let row = resolve_result;
 
-        // Lazy expiry: reject before acquiring locks.
-        if let Some(expires_at) = row.expires_at {
-            if expires_at <= now {
-                return Err(MemError::AdjudicationHandleNotFound { handle_id });
-            }
-        }
-
+        // Note: TTL expiry is handled authoritatively inside SubmitAdjudicationUseCase
+        // (which also writes the AdjudicationExpired ledger entry). Do NOT early-reject
+        // here — the use-case must run so the audit trail is complete.
         let agent_id = row.agent_id.clone();
 
         // ── Step 2: Acquire locks in the same order as ingest_claim ──────────────
