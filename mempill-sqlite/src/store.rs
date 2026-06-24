@@ -28,6 +28,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use mempill_core::ports::pending_adjudication::{PendingAdjudicationPort, PendingAdjudicationRow};
 use mempill_core::ports::persistence::PersistencePort;
 use mempill_types::{
     claim::{Cardinality, Claim, Confidence, Criticality, Fact},
@@ -60,6 +61,20 @@ impl SqlitePersistenceStore {
         Self {
             conn: Arc::new(Mutex::new(Some(Box::new(conn)))),
         }
+    }
+
+    /// Return a `SqlitePendingStore` that shares the same SQLite connection.
+    ///
+    /// This is the standard way to construct the pending-adjudication adapter in W3:
+    /// ```rust,ignore
+    /// let store = SqlitePersistenceStore::new(conn);
+    /// let pending = store.pending_store();
+    /// ```
+    /// Both `SqlitePersistenceStore` and `SqlitePendingStore` share the connection Arc,
+    /// so the pending insert is serialized with the claim transaction by the EngineHandle
+    /// write lock — not by a shared rusqlite transaction.
+    pub fn pending_store(&self) -> SqlitePendingStore {
+        SqlitePendingStore::new(Arc::clone(&self.conn))
     }
 }
 
@@ -1079,6 +1094,225 @@ impl PersistencePort for SqlitePersistenceStore {
     }
 }
 
+// ── SqlitePendingStore ────────────────────────────────────────────────────────
+
+/// SQLite-backed `PendingAdjudicationPort` implementation (W3, Amendment 1).
+///
+/// Shares the same connection mutex as `SqlitePersistenceStore` but operates OUTSIDE
+/// the claim transaction — reads and writes go directly on the connection (no BEGIN/COMMIT
+/// wrapping). The per-agent write lock held by `EngineHandle` ensures these writes are
+/// serialized with the claim txn commit.
+///
+/// Construct via `SqlitePendingStore::new(conn_arc)` sharing the same connection Arc
+/// as the `SqlitePersistenceStore`.
+pub struct SqlitePendingStore {
+    conn: Arc<Mutex<Option<Box<Connection>>>>,
+}
+
+impl SqlitePendingStore {
+    /// Create a pending store sharing the connection with a `SqlitePersistenceStore`.
+    pub fn new(conn: Arc<Mutex<Option<Box<Connection>>>>) -> Self {
+        Self { conn }
+    }
+}
+
+// SAFETY: Connection is Send; Mutex makes it Sync.
+unsafe impl Send for SqlitePendingStore {}
+unsafe impl Sync for SqlitePendingStore {}
+
+impl PendingAdjudicationPort for SqlitePendingStore {
+    type Error = SqliteStoreError;
+
+    fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        let request_payload = serde_json::to_string(&row.request_payload)
+            .map_err(|e| SqliteStoreError::Mapping(format!("request_payload serialization: {e}")))?;
+        let queued_at = row.queued_at.to_rfc3339();
+        let expires_at: Option<String> = row.expires_at.map(|dt| dt.to_rfc3339());
+
+        conn.execute(
+            "INSERT INTO pending_adjudications (
+                handle_id, agent_id, subject, predicate,
+                challenger_claim_ref, incumbent_claim_ref,
+                request_payload, queued_at, expires_at, status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                row.handle_id.to_string(),
+                row.agent_id.0.as_str(),
+                row.subject.as_str(),
+                row.predicate.as_str(),
+                row.challenger_claim_ref.0.to_string(),
+                row.incumbent_claim_ref.0.to_string(),
+                request_payload.as_str(),
+                queued_at.as_str(),
+                expires_at,
+                row.status.as_str(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_pending(&self, handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT handle_id, agent_id, subject, predicate,
+                    challenger_claim_ref, incumbent_claim_ref,
+                    request_payload, queued_at, expires_at, status
+             FROM pending_adjudications
+             WHERE handle_id = ?1",
+        )?;
+
+        let mut rows = stmt.query_map(
+            rusqlite::params![handle_id.to_string()],
+            row_to_pending,
+        )?;
+
+        match rows.next() {
+            None => Ok(None),
+            Some(row) => Ok(Some(row.map_err(|e| SqliteStoreError::Mapping(e.to_string()))?)),
+        }
+    }
+
+    fn list_pending(&self, agent_id: Option<&mempill_types::AgentId>) -> Result<Vec<PendingAdjudicationRow>, SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        let rows = if let Some(aid) = agent_id {
+            let mut stmt = conn.prepare(
+                "SELECT handle_id, agent_id, subject, predicate,
+                        challenger_claim_ref, incumbent_claim_ref,
+                        request_payload, queued_at, expires_at, status
+                 FROM pending_adjudications
+                 WHERE agent_id = ?1 AND status = 'pending'
+                 ORDER BY queued_at ASC",
+            )?;
+            let mapped = stmt.query_map(rusqlite::params![aid.0.as_str()], row_to_pending)?;
+            let mut result = Vec::new();
+            for r in mapped {
+                result.push(r.map_err(|e| SqliteStoreError::Mapping(e.to_string()))?);
+            }
+            result
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT handle_id, agent_id, subject, predicate,
+                        challenger_claim_ref, incumbent_claim_ref,
+                        request_payload, queued_at, expires_at, status
+                 FROM pending_adjudications
+                 WHERE status = 'pending'
+                 ORDER BY queued_at ASC",
+            )?;
+            let mapped = stmt.query_map([], row_to_pending)?;
+            let mut result = Vec::new();
+            for r in mapped {
+                result.push(r.map_err(|e| SqliteStoreError::Mapping(e.to_string()))?);
+            }
+            result
+        };
+        Ok(rows)
+    }
+
+    fn list_expired(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<PendingAdjudicationRow>, SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        let now_str = now.to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT handle_id, agent_id, subject, predicate,
+                    challenger_claim_ref, incumbent_claim_ref,
+                    request_payload, queued_at, expires_at, status
+             FROM pending_adjudications
+             WHERE expires_at IS NOT NULL AND expires_at <= ?1 AND status = 'pending'
+             ORDER BY expires_at ASC",
+        )?;
+        let mapped = stmt.query_map(rusqlite::params![now_str.as_str()], row_to_pending)?;
+        let mut result = Vec::new();
+        for r in mapped {
+            result.push(r.map_err(|e| SqliteStoreError::Mapping(e.to_string()))?);
+        }
+        Ok(result)
+    }
+
+    fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        conn.execute(
+            "UPDATE pending_adjudications SET status = 'resolved' WHERE handle_id = ?1",
+            rusqlite::params![handle_id.to_string()],
+        )?;
+        Ok(())
+    }
+}
+
+/// Map a rusqlite `Row` from `pending_adjudications` to a `PendingAdjudicationRow`.
+///
+/// Column order (must match every SELECT):
+///   0  handle_id
+///   1  agent_id
+///   2  subject
+///   3  predicate
+///   4  challenger_claim_ref
+///   5  incumbent_claim_ref
+///   6  request_payload  (JSON text)
+///   7  queued_at        (ISO-8601)
+///   8  expires_at       (ISO-8601, nullable)
+///   9  status
+fn row_to_pending(row: &rusqlite::Row<'_>) -> Result<PendingAdjudicationRow, rusqlite::Error> {
+    let to_err = |msg: String| rusqlite::Error::InvalidColumnType(
+        0, msg, rusqlite::types::Type::Text,
+    );
+
+    let handle_id_str: String = row.get(0)?;
+    let agent_id_str: String = row.get(1)?;
+    let subject: String = row.get(2)?;
+    let predicate: String = row.get(3)?;
+    let challenger_str: String = row.get(4)?;
+    let incumbent_str: String = row.get(5)?;
+    let payload_json: String = row.get(6)?;
+    let queued_at_str: String = row.get(7)?;
+    let expires_at_str: Option<String> = row.get(8)?;
+    let status: String = row.get(9)?;
+
+    let handle_id = uuid::Uuid::parse_str(&handle_id_str)
+        .map_err(|e| to_err(format!("handle_id UUID: {e}")))?;
+    let challenger_claim_ref = uuid::Uuid::parse_str(&challenger_str)
+        .map(ClaimRef)
+        .map_err(|e| to_err(format!("challenger_claim_ref UUID: {e}")))?;
+    let incumbent_claim_ref = uuid::Uuid::parse_str(&incumbent_str)
+        .map(ClaimRef)
+        .map_err(|e| to_err(format!("incumbent_claim_ref UUID: {e}")))?;
+    let request_payload: mempill_types::AdjudicationRequest =
+        serde_json::from_str(&payload_json)
+            .map_err(|e| to_err(format!("request_payload JSON: {e}")))?;
+    let queued_at = chrono::DateTime::parse_from_rfc3339(&queued_at_str)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|e| to_err(format!("queued_at parse: {e}")))?;
+    let expires_at = expires_at_str
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| to_err(format!("expires_at parse: {e}")))
+        })
+        .transpose()?;
+
+    Ok(PendingAdjudicationRow {
+        handle_id,
+        agent_id: AgentId(agent_id_str),
+        subject,
+        predicate,
+        challenger_claim_ref,
+        incumbent_claim_ref,
+        request_payload,
+        queued_at,
+        expires_at,
+        status,
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1827,5 +2061,160 @@ mod tests {
         assert_eq!(assertions, 1, "one validity_assertion row must exist");
         assert_eq!(ledger_count, 1, "one ledger_entry row must exist");
         assert_eq!(edges, 1, "one claim_edge row must exist");
+    }
+
+    // ── W3: SqlitePendingStore tests ──────────────────────────────────────────
+
+    use mempill_core::ports::pending_adjudication::{PendingAdjudicationPort, PendingAdjudicationRow};
+    use mempill_types::{
+        AdjudicationRequest, Belief, CurrencySignal, CurrencyState, OverturnReason, SubjectLineRef,
+    };
+
+    fn make_adj_request(agent: &AgentId) -> AdjudicationRequest {
+        let claim_ref = ClaimRef(Uuid::new_v4());
+        let now = TransactionTime(Utc::now());
+        AdjudicationRequest {
+            subject_line: SubjectLineRef {
+                agent_id: agent.clone(),
+                subject: "user".into(),
+                predicate: "city".into(),
+            },
+            incumbent: Belief {
+                claim_ref: claim_ref.clone(),
+                fact: mempill_types::Fact {
+                    subject: "user".into(),
+                    predicate: "city".into(),
+                    value: serde_json::json!("Berlin"),
+                },
+                provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+                valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+                transaction_time: now.clone(),
+                confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+                currency_signal: CurrencySignal {
+                    last_refreshed_at: now.clone(),
+                    state: CurrencyState::Fresh,
+                    corroboration_count: 0,
+                },
+                criticality: Criticality::Low,
+            },
+            challenger: make_claim(agent),
+            criticality: Criticality::Low,
+            reason: OverturnReason::ExternalContradiction,
+        }
+    }
+
+    fn make_pending_row(agent: &AgentId) -> PendingAdjudicationRow {
+        PendingAdjudicationRow {
+            handle_id: Uuid::new_v4(),
+            agent_id: agent.clone(),
+            subject: "user".into(),
+            predicate: "city".into(),
+            challenger_claim_ref: ClaimRef(Uuid::new_v4()),
+            incumbent_claim_ref: ClaimRef(Uuid::new_v4()),
+            request_payload: make_adj_request(agent),
+            queued_at: Utc::now(),
+            expires_at: None,
+            status: "pending".to_string(),
+        }
+    }
+
+    /// W3: insert_pending + get_pending round-trip.
+    #[test]
+    fn w3_sqlite_pending_insert_and_get_round_trip() {
+        let store = make_store();
+        let pending = store.pending_store();
+        let agent = make_agent();
+        let row = make_pending_row(&agent);
+        let handle_id = row.handle_id;
+
+        pending.insert_pending(&row).expect("insert_pending must succeed");
+
+        let fetched = pending.get_pending(handle_id).expect("get_pending must succeed");
+        let fetched = fetched.expect("row must be present");
+        assert_eq!(fetched.handle_id, handle_id);
+        assert_eq!(fetched.agent_id, agent);
+        assert_eq!(fetched.subject, "user");
+        assert_eq!(fetched.predicate, "city");
+        assert_eq!(fetched.challenger_claim_ref, row.challenger_claim_ref);
+        assert_eq!(fetched.incumbent_claim_ref, row.incumbent_claim_ref);
+        assert_eq!(fetched.status, "pending");
+        assert!(fetched.expires_at.is_none());
+    }
+
+    /// W3: get_pending returns None for unknown handle_id.
+    #[test]
+    fn w3_sqlite_pending_get_nonexistent_returns_none() {
+        let store = make_store();
+        let pending = store.pending_store();
+        let result = pending.get_pending(Uuid::new_v4()).expect("get_pending must not error");
+        assert!(result.is_none(), "unknown handle_id must return None");
+    }
+
+    /// W3: list_pending returns only pending rows for the given agent.
+    #[test]
+    fn w3_sqlite_pending_list_pending_by_agent() {
+        let store = make_store();
+        let pending = store.pending_store();
+        let agent = make_agent();
+        let agent2 = AgentId("other-agent".into());
+
+        let row1 = make_pending_row(&agent);
+        let row2 = make_pending_row(&agent);
+        let row3 = make_pending_row(&agent2);
+
+        pending.insert_pending(&row1).unwrap();
+        pending.insert_pending(&row2).unwrap();
+        pending.insert_pending(&row3).unwrap();
+
+        let agent_rows = pending.list_pending(Some(&agent)).unwrap();
+        assert_eq!(agent_rows.len(), 2, "must return exactly 2 rows for agent");
+
+        let all_rows = pending.list_pending(None).unwrap();
+        assert_eq!(all_rows.len(), 3, "list_pending(None) must return all 3 rows");
+    }
+
+    /// W3: mark_resolved changes status to 'resolved'; resolved row no longer in list_pending.
+    #[test]
+    fn w3_sqlite_pending_mark_resolved() {
+        let store = make_store();
+        let pending = store.pending_store();
+        let agent = make_agent();
+        let row = make_pending_row(&agent);
+        let handle_id = row.handle_id;
+
+        pending.insert_pending(&row).unwrap();
+        pending.mark_resolved(handle_id).unwrap();
+
+        // get_pending should still find it (status = 'resolved').
+        let fetched = pending.get_pending(handle_id).unwrap().unwrap();
+        assert_eq!(fetched.status, "resolved", "status must be 'resolved' after mark_resolved");
+
+        // list_pending should not include it.
+        let pending_rows = pending.list_pending(Some(&agent)).unwrap();
+        assert!(pending_rows.is_empty(), "resolved row must not appear in list_pending");
+    }
+
+    /// W3 durability: persist a pending row, drop the store, reopen on the same in-memory
+    /// connection via the shared Arc, and confirm get_pending still finds the row.
+    ///
+    /// NOTE: true file-backed durability (drop + reopen file) is tested in lib.rs integration.
+    /// Here we verify the row survives dropping and re-acquiring the store handle.
+    #[test]
+    fn w3_sqlite_pending_durability_shared_arc() {
+        let conn = open_in_memory().expect("in-memory connection must open");
+        let persistence = SqlitePersistenceStore::new(conn);
+        let pending = persistence.pending_store();
+        let agent = make_agent();
+        let row = make_pending_row(&agent);
+        let handle_id = row.handle_id;
+
+        pending.insert_pending(&row).unwrap();
+        drop(pending); // drop the pending store handle — Arc keeps connection alive
+
+        // Re-acquire a new pending store from the same persistence store.
+        let pending2 = persistence.pending_store();
+        let fetched = pending2.get_pending(handle_id).unwrap();
+        assert!(fetched.is_some(), "pending row must survive store handle drop (durability via shared Arc)");
+        assert_eq!(fetched.unwrap().handle_id, handle_id);
     }
 }
