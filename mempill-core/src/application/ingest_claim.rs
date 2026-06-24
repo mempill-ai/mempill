@@ -256,6 +256,12 @@ where
                 match oracle.request_adjudication(&req.agent_id, adj_request.clone()) {
                     Ok(handle) => {
                         let handle_id = O::handle_to_uuid(&handle);
+                        // Compute expires_at from the configured TTL (W6).
+                        // Per-request TTL override is deferred to a future wave; config
+                        // default is the v1 mechanism (default_adjudication_ttl field).
+                        let expires_at = self.config.default_adjudication_ttl
+                            .map(|ttl| now + chrono::Duration::from_std(ttl)
+                                .unwrap_or(chrono::Duration::seconds(0)));
                         let pending_row = PendingAdjudicationRow {
                             handle_id,
                             agent_id: req.agent_id.clone(),
@@ -265,7 +271,7 @@ where
                             incumbent_claim_ref: incumbent.claim_ref.clone(),
                             request_payload: adj_request,
                             queued_at: now,
-                            expires_at: None, // TTL is W6
+                            expires_at,
                             status: "pending".to_string(),
                         };
                         // NOTE: post-commit orphan window — the claim txn has already committed
@@ -563,6 +569,20 @@ mod tests {
             }
             Ok(())
         }
+
+        fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), MockErr> {
+            let mut rows = self.rows.lock().unwrap();
+            for row in rows.iter_mut() {
+                if row.handle_id == handle_id {
+                    row.status = "expired".to_string();
+                }
+            }
+            Ok(())
+        }
+
+        fn list_queued_orphan_claims(&self) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, MockErr> {
+            Ok(vec![])
+        }
     }
 
     // ── TestOracle with deterministic UUID handle ─────────────────────────────
@@ -766,6 +786,12 @@ mod tests {
                     fn mark_resolved(&self, id: uuid::Uuid) -> Result<(), MockErr> {
                         self.0.mark_resolved(id)
                     }
+                    fn mark_expired(&self, id: uuid::Uuid) -> Result<(), MockErr> {
+                        self.0.mark_expired(id)
+                    }
+                    fn list_queued_orphan_claims(&self) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, MockErr> {
+                        self.0.list_queued_orphan_claims()
+                    }
                 }
                 SharedWrapper(Arc::clone(&shared_pending))
             }));
@@ -864,6 +890,8 @@ mod tests {
                 fn list_pending(&self, a: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, MockErr> { self.0.list_pending(a) }
                 fn list_expired(&self, now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, MockErr> { self.0.list_expired(now) }
                 fn mark_resolved(&self, id: uuid::Uuid) -> Result<(), MockErr> { self.0.mark_resolved(id) }
+                fn mark_expired(&self, id: uuid::Uuid) -> Result<(), MockErr> { self.0.mark_expired(id) }
+                fn list_queued_orphan_claims(&self) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, MockErr> { self.0.list_queued_orphan_claims() }
             }
             Arc::new(ErasedPendingStoreAdapter::new(SharedWrapper(Arc::clone(&shared_pending))))
         };

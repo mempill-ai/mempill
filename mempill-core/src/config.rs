@@ -4,6 +4,8 @@
 //! Default values are the illustrative OP-3 starting points from TECHNICAL_DESIGN.md §12.
 //! Tagged `// OP-3: calibrate post-v0.1` on every tunable field.
 
+use std::time::Duration;
+
 use mempill_types::Criticality;
 
 /// Configuration for the mempill engine (A21, OP-3).
@@ -54,6 +56,16 @@ pub struct EngineConfig {
     /// Days since last currency refresh before a belief enters the Decayed state (I11, V3-6).
     // OP-3: calibrate post-v0.1
     pub decayed_threshold_days: u32,
+
+    /// Default TTL for pending adjudications (W6).
+    ///
+    /// When `Some(d)`, every pending row gets `expires_at = queued_at + d`. When `None`,
+    /// no TTL is set and pending rows never expire via the engine sweep.
+    ///
+    /// Per-request TTL override is deferred to a future wave (the `IngestClaimRequest` DTO
+    /// does not yet carry a TTL field); the config default is the v1 mechanism.
+    // OP-3: calibrate post-v0.1
+    pub default_adjudication_ttl: Option<Duration>,
 }
 
 impl Default for EngineConfig {
@@ -70,6 +82,7 @@ impl Default for EngineConfig {
             quarantine_burst_threshold: 10,
             aging_unconfirmed_threshold_days: 30,
             decayed_threshold_days: 90,
+            default_adjudication_ttl: None,
         }
     }
 }

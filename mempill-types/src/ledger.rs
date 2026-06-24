@@ -31,6 +31,8 @@ pub enum LedgerEventKind {
     DependentFlaggedPendingReview,
     /// Claim was served as a query result — recorded so C6 can detect later recall re-entry (A23, F3).
     ServedAsInjected,
+    /// Adjudication TTL elapsed — challenger reverted to Contested (W6 sweep / lazy expiry).
+    AdjudicationExpired,
 }
 
 #[cfg(test)]
@@ -75,6 +77,7 @@ mod tests {
             LedgerEventKind::Quarantined,
             LedgerEventKind::DependentFlaggedPendingReview,
             LedgerEventKind::ServedAsInjected,
+            LedgerEventKind::AdjudicationExpired,
         ];
         for k in &kinds {
             let json = serde_json::to_string(k).unwrap();

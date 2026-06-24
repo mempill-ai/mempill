@@ -32,6 +32,7 @@ use crate::{
         query_memory::QueryMemoryUseCase,
         reconcile::ReconcileUseCase,
         submit_adjudication::SubmitAdjudicationUseCase,
+        sweep_adjudications::SweepAdjudicationsUseCase,
     },
     concurrency::agent_lock::AgentWriteLockMap,
     config::EngineConfig,
@@ -73,6 +74,15 @@ pub trait ErasedPendingStore: Send + Sync + 'static {
         &self,
         handle_id: uuid::Uuid,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
+
+    fn mark_expired_erased(
+        &self,
+        handle_id: uuid::Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
+
+    fn list_queued_orphan_claims_erased(
+        &self,
+    ) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, Box<dyn std::error::Error + Send + Sync + 'static>>;
 }
 
 /// Adapter that wraps a concrete `PendingAdjudicationPort` impl as `dyn ErasedPendingStore`.
@@ -120,6 +130,19 @@ impl<S: PendingAdjudicationPort> ErasedPendingStore for ErasedPendingStoreAdapte
         handle_id: uuid::Uuid,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         self.inner.mark_resolved(handle_id).map_err(|e| Box::new(e) as _)
+    }
+
+    fn mark_expired_erased(
+        &self,
+        handle_id: uuid::Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        self.inner.mark_expired(handle_id).map_err(|e| Box::new(e) as _)
+    }
+
+    fn list_queued_orphan_claims_erased(
+        &self,
+    ) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, Box<dyn std::error::Error + Send + Sync + 'static>> {
+        self.inner.list_queued_orphan_claims().map_err(|e| Box::new(e) as _)
     }
 }
 
@@ -351,6 +374,97 @@ where
         task::spawn_blocking(move || uc.execute(handle_id, response, now))
             .await
             .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
+    }
+
+    /// Sweep all expired pending-adjudication rows and orphaned QueuedForAdjudication claims.
+    ///
+    /// For each expired pending row (expires_at <= now):
+    ///   1. Acquires store_write_lock + per-agent write lock (same order as ingest_claim).
+    ///   2. Atomically reverts the challenger QueuedForAdjudication → Contested + ledger entry.
+    ///   3. Marks the pending row expired.
+    ///
+    /// Then sweeps orphan claims (QueuedForAdjudication with no pending row):
+    ///   4. Per orphan: acquires locks, reverts challenger → Contested + ledger entry.
+    ///
+    /// Returns the total count of claims reverted (expired + orphan).
+    ///
+    /// The engine MUST NOT spawn a background task — the host calls this on its own schedule.
+    ///
+    /// If no pending store is configured, returns `Ok(0)` (sweep is a no-op without oracle queue).
+    pub async fn sweep_expired_adjudications(&self) -> Result<usize, MemError> {
+        let now = Utc::now();
+
+        let pending_store = match &self.pending_store {
+            Some(ps) => Arc::clone(ps),
+            None => return Ok(0),
+        };
+
+        // ── Phase 1: Sweep expired pending rows ──────────────────────────────────
+        let expired_rows = pending_store
+            .list_expired_erased(now)
+            .map_err(|e| MemError::PendingStore { source: e })?;
+
+        let mut swept = 0usize;
+
+        for row in expired_rows {
+            let agent_id = row.agent_id.clone();
+
+            let _store_lock = if self.persistence.requires_global_write_serialization() {
+                Some(self.store_write_lock.lock().await)
+            } else {
+                None
+            };
+            let _guard = self.write_locks.acquire(&agent_id).await;
+
+            let persistence = Arc::clone(&self.persistence);
+            let ps = Arc::clone(&pending_store);
+            let row_clone = row.clone();
+
+            let result = task::spawn_blocking(move || {
+                let uc = SweepAdjudicationsUseCase::new(persistence, ps);
+                uc.revert_expired_row(&row_clone, now)
+            })
+            .await
+            .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })??;
+
+            if result {
+                swept += 1;
+            }
+        }
+
+        // ── Phase 2: Orphan recovery ──────────────────────────────────────────────
+        // Detect QueuedForAdjudication claims with no matching pending row.
+        let orphans = pending_store
+            .list_queued_orphan_claims_erased()
+            .map_err(|e| MemError::PendingStore { source: e })?;
+
+        for orphan in orphans {
+            let agent_id = orphan.agent_id.clone();
+
+            let _store_lock = if self.persistence.requires_global_write_serialization() {
+                Some(self.store_write_lock.lock().await)
+            } else {
+                None
+            };
+            let _guard = self.write_locks.acquire(&agent_id).await;
+
+            let persistence = Arc::clone(&self.persistence);
+            let ps = Arc::clone(&pending_store);
+            let orphan_clone = orphan.clone();
+
+            let result = task::spawn_blocking(move || {
+                let uc = SweepAdjudicationsUseCase::new(persistence, ps);
+                uc.revert_orphan(&orphan_clone, now)
+            })
+            .await
+            .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })??;
+
+            if result {
+                swept += 1;
+            }
+        }
+
+        Ok(swept)
     }
 }
 

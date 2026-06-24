@@ -9,6 +9,7 @@ pub mod ingest_claim;
 pub mod query_memory;
 pub mod reconcile;
 pub mod submit_adjudication;
+pub mod sweep_adjudications;
 
 pub use audit::AuditUseCase;
 pub use dto::{

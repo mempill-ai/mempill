@@ -73,6 +73,39 @@ pub trait PendingAdjudicationPort: Send + Sync + 'static {
     /// Returns `Ok(())` if the row existed and was updated; `Ok(())` if the row was already
     /// resolved (idempotent). Returns `Err` only on DB error.
     fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error>;
+
+    /// Mark a pending row as expired (status = 'expired'). Used by W6 sweep + lazy expiry.
+    ///
+    /// Idempotent: re-marking an already-expired row is `Ok(())`. Returns `Err` only on DB error.
+    fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error>;
+
+    /// Return all `ClaimRef`s whose LATEST ledger disposition is `QueuedForAdjudication`
+    /// AND that have NO matching row in `pending_adjudications` with `status = 'pending'`
+    /// (i.e., crash-orphaned claims with no pending row).
+    ///
+    /// Used by W6 orphan recovery sweep. Both adapters implement this as a cross-table SQL
+    /// query. The returned tuples are `(agent_id, challenger_claim_ref, incumbent_claim_ref)`
+    /// where `incumbent_claim_ref` is the most-recent CommittedCheap claim on the same
+    /// (agent_id, subject, predicate) line — or `None` if not determinable (sweep skips those).
+    ///
+    /// NOTE: cross-table reads are safe here because orphan recovery is read-only discovery;
+    /// all writes happen inside per-agent locked transactions.
+    fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error>;
+}
+
+/// A QueuedForAdjudication claim with no matching pending_adjudications row.
+/// Produced by `list_queued_orphan_claims` for the W6 orphan-recovery sweep.
+#[derive(Debug, Clone)]
+pub struct OrphanedQueuedClaim {
+    pub agent_id: AgentId,
+    pub challenger_claim_ref: ClaimRef,
+    /// The current live incumbent on the same (agent_id, subject, predicate) line,
+    /// as determined by the adapter query. `None` if no incumbent could be found
+    /// (the sweep skips such entries; they cannot be reliably reverted without knowing
+    /// which incumbent to surface as Contested).
+    pub incumbent_claim_ref: Option<ClaimRef>,
+    pub subject: String,
+    pub predicate: String,
 }
 
 // ── NoPendingStore ────────────────────────────────────────────────────────────
@@ -119,5 +152,13 @@ impl PendingAdjudicationPort for NoPendingStore {
 
     fn mark_resolved(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> {
         unreachable!("NoPendingStore::mark_resolved must never be called")
+    }
+
+    fn mark_expired(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> {
+        unreachable!("NoPendingStore::mark_expired must never be called")
+    }
+
+    fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> {
+        unreachable!("NoPendingStore::list_queued_orphan_claims must never be called")
     }
 }
