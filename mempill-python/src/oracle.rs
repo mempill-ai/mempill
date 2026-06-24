@@ -288,6 +288,67 @@ impl PyOracleEngine {
             .map_err(mem_err_to_pyerr)?;
         Ok(count)
     }
+
+    /// List all pending-adjudication rows awaiting human resolution.
+    ///
+    /// Returns a list of dicts. Each dict has the shape (Python pseudocode):
+    ///
+    /// ```text
+    /// {
+    ///     "handle_id":        str,   # UUID of the adjudication handle
+    ///     "agent_id":         str,
+    ///     "subject":          str,
+    ///     "predicate":        str,
+    ///     "incumbent_value":  Any,   # JSON value from AdjudicationRequest.incumbent.fact.value
+    ///     "challenger_value": Any,   # JSON value from AdjudicationRequest.challenger.fact.value
+    ///     "queued_at":        str,   # RFC-3339
+    ///     "expires_at":       str | None,
+    ///     "status":           str,   # "pending" | "resolved" | "expired"
+    ///     "request_payload":  dict,  # full AdjudicationRequest for oracle context
+    /// }
+    /// ```
+    ///
+    /// When `agent_id` is `None` (the default), rows for ALL agents are returned.
+    /// Rows are ordered by `queued_at ASC` (oldest first).
+    ///
+    /// Raises `StorageError` if a persistence error occurs.
+    #[pyo3(signature = (agent_id=None))]
+    fn list_pending_adjudications<'py>(
+        &self,
+        py: Python<'py>,
+        agent_id: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let filter = agent_id.map(|s| mempill_types::AgentId(s.to_owned()));
+        let engine = self.engine.clone();
+        let rows = py
+            .detach(|| oracle_runtime().block_on(engine.list_pending_adjudications(filter)))
+            .map_err(mem_err_to_pyerr)?;
+
+        // Build a Python list of dicts.
+        let list = pyo3::types::PyList::empty(py);
+        for row in rows {
+            // Decode incumbent_value and challenger_value from the request_payload.
+            let incumbent_value = row.request_payload.incumbent.fact.value.clone();
+            let challenger_value = row.request_payload.challenger.fact().value.clone();
+
+            let d = pyo3::types::PyDict::new(py);
+            d.set_item("handle_id", row.handle_id.to_string())?;
+            d.set_item("agent_id", row.agent_id.0.as_str())?;
+            d.set_item("subject", row.subject.as_str())?;
+            d.set_item("predicate", row.predicate.as_str())?;
+            d.set_item("incumbent_value", pythonize(py, &incumbent_value)?)?;
+            d.set_item("challenger_value", pythonize(py, &challenger_value)?)?;
+            d.set_item("queued_at", row.queued_at.to_rfc3339())?;
+            d.set_item(
+                "expires_at",
+                row.expires_at.map(|t| t.to_rfc3339()),
+            )?;
+            d.set_item("status", row.status.as_str())?;
+            d.set_item("request_payload", pythonize(py, &row.request_payload)?)?;
+            list.append(d)?;
+        }
+        Ok(list.into_any())
+    }
 }
 
 // ── Module-level constructors ─────────────────────────────────────────────────
