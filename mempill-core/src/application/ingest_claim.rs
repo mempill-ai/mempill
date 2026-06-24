@@ -311,7 +311,7 @@ where
         &self,
         claim: &Claim,
         decision: &gate::GateDecision,
-        _incumbent_belief: &Option<mempill_types::Belief>,
+        incumbent_belief: &Option<mempill_types::Belief>,
         agent_id: &AgentId,
         tx_time: TransactionTime,
         preloaded_edges: &[ClaimEdge],
@@ -371,7 +371,22 @@ where
         // avoid reads inside the open txn. They are unused here now but kept in scope for
         // the pattern integrity if a future deterministic-supersede path is added.
         let _ = preloaded_edges; // DEFECT-1 preload preserved; HeavyPath never supersedes at ingest
-        let contested_with = vec![];
+
+        // Populate contested_with when the disposition signals a conflict (Contested or
+        // QueuedForAdjudication). The incumbent's claim_ref is passed in from the caller
+        // so that the Python (and any other) binding can surface BOTH conflicting refs.
+        // An empty vec is correct for all non-conflict dispositions (CheapPath, etc.).
+        let contested_with = if matches!(
+            decision.disposition,
+            Disposition::Contested | Disposition::QueuedForAdjudication
+        ) {
+            incumbent_belief
+                .as_ref()
+                .map(|b| vec![b.claim_ref.clone()])
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
 
         Ok(IngestClaimResponse {
             claim_ref,

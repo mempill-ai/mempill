@@ -64,18 +64,22 @@ def test_both_values_surfaced_not_silently_picked(engine: mempill.Engine, agent_
     r1 = _ingest(engine, agent_id, "Berlin", ProvenanceLabel.external_user_asserted())
     r2 = _ingest(engine, agent_id, "Paris", ProvenanceLabel.external_first_hand())
 
-    # The primary claim in the belief must have ONE of the two values.
     qresp = engine.query_memory({"agent_id": agent_id, "subject": "user", "predicate": "city"})
     belief = qresp["belief"]
-    primary_value = belief["primary"]["fact"]["value"]
 
-    # The primary must be one of the two submitted values.
-    assert primary_value in ("Berlin", "Paris"), (
-        f"primary value {primary_value!r} is neither 'Berlin' nor 'Paris'"
+    # For a Contested belief the projection sets primary=None and places BOTH conflicting
+    # claims in alternatives (no silent pick). primary must be absent.
+    assert belief["primary"] is None, (
+        "Contested belief must NOT have a primary — that would be a silent pick"
     )
 
-    # The contested disposition must still be present — a "silent pick" would lose this.
+    # The contested disposition must still be present.
     assert belief["status"] == "Contested", "Contested status must survive query"
+
+    # Both values must appear in alternatives — this is the headline guarantee.
+    alt_values = [alt["fact"]["value"] for alt in belief["alternatives"]]
+    assert "Berlin" in alt_values, f"'Berlin' missing from alternatives: {alt_values}"
+    assert "Paris" in alt_values, f"'Paris' missing from alternatives: {alt_values}"
 
     # Both claim_refs must be traceable: ingest r2 references r1 as contested.
     assert r2["claim_ref"] != r1["claim_ref"], "Two distinct claims must have distinct refs"
