@@ -397,6 +397,31 @@ where
             .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
     }
 
+    /// Read path: list all pending-adjudication rows for an agent (or all agents).
+    ///
+    /// This is a read-only operation — no write lock is acquired.  All DB access
+    /// is performed inside `spawn_blocking` so no `postgres::Client` is created or
+    /// dropped on the async executor thread (same invariant as `submit_adjudication`).
+    ///
+    /// Returns `Ok(vec![])` when no pending store is configured.
+    pub async fn list_pending_adjudications(
+        &self,
+        agent_id: Option<mempill_types::AgentId>,
+    ) -> Result<Vec<crate::ports::pending_adjudication::PendingAdjudicationRow>, MemError> {
+        let pending_store = match &self.pending_store {
+            Some(ps) => Arc::clone(ps),
+            None => return Ok(vec![]),
+        };
+
+        task::spawn_blocking(move || {
+            pending_store
+                .list_pending_erased(agent_id.as_ref())
+                .map_err(|e| MemError::PendingStore { source: e })
+        })
+        .await
+        .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
+    }
+
     /// Sweep all expired pending-adjudication rows and orphaned QueuedForAdjudication claims.
     ///
     /// For each expired pending row (expires_at <= now):

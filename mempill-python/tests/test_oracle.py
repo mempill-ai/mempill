@@ -243,3 +243,117 @@ def test_py_engine_unaffected(engine: mempill.Engine, agent_id: str) -> None:
         "derived_from": [],
     })
     assert resp["disposition"] == Disposition.CommittedCheap
+
+
+# ── Tests: list_pending_adjudications ────────────────────────────────────────
+
+def test_list_pending_after_conflict(
+    oracle_engine: PyOracleEngine,
+    oracle: RecordingOracle,
+    agent_id: str,
+) -> None:
+    """After a conflict is queued, list_pending_adjudications returns exactly 1 row
+    with the correct handle_id, subject, predicate, and decoded incumbent/challenger values.
+    Then submit resolves it and the queue becomes empty."""
+    # Ingest incumbent ("Berlin") — no conflict.
+    _ingest(oracle_engine, agent_id, "Berlin", ProvenanceLabel.external_user_asserted())
+
+    # Ingest challenger ("Paris") — conflict triggers oracle, QueuedForAdjudication.
+    r2 = _ingest(oracle_engine, agent_id, "Paris", ProvenanceLabel.external_first_hand())
+    assert r2["disposition"] == Disposition.QueuedForAdjudication
+
+    # Exactly one handle was stored by the oracle.
+    assert len(oracle.requests) == 1
+    handle_id = next(iter(oracle.requests))
+
+    # list_pending_adjudications must return exactly one row.
+    rows = oracle_engine.list_pending_adjudications()
+    assert len(rows) == 1, f"Expected 1 pending row, got {len(rows)}"
+
+    row = rows[0]
+    print("list_pending_adjudications sample row:", row)  # visible in pytest -s output
+
+    # Check identifying fields.
+    assert row["handle_id"] == handle_id, (
+        f"handle_id mismatch: expected {handle_id}, got {row['handle_id']}"
+    )
+    assert row["agent_id"] == agent_id
+    assert row["subject"] == "user"
+    assert row["predicate"] == "city"
+    assert row["status"] == "pending"
+
+    # Decoded scalar values.
+    assert row["incumbent_value"] == "Berlin", (
+        f"incumbent_value must be 'Berlin', got {row['incumbent_value']!r}"
+    )
+    assert row["challenger_value"] == "Paris", (
+        f"challenger_value must be 'Paris', got {row['challenger_value']!r}"
+    )
+
+    # request_payload must be present and have the full AdjudicationRequest shape.
+    assert "request_payload" in row
+    assert "incumbent" in row["request_payload"]
+    assert "challenger" in row["request_payload"]
+
+    # Submit the adjudication → queue must become empty.
+    _submit(oracle_engine, handle_id, "Affirm")
+    rows_after = oracle_engine.list_pending_adjudications()
+    assert len(rows_after) == 0, (
+        f"Queue must be empty after submit, got {len(rows_after)} rows"
+    )
+
+
+def test_list_pending_defer_persists(
+    oracle_engine: PyOracleEngine,
+    oracle: RecordingOracle,
+    agent_id: str,
+) -> None:
+    """A conflict left unsubmitted (deferred) must still appear in list_pending_adjudications.
+    A second independent conflict also appears, proving the queue holds multiple rows."""
+    # First conflict on subject=user / predicate=city.
+    _ingest(oracle_engine, agent_id, "Berlin", ProvenanceLabel.external_user_asserted())
+    _ingest(oracle_engine, agent_id, "Paris", ProvenanceLabel.external_first_hand())
+    assert len(oracle.requests) == 1, "First conflict must have been sent to oracle"
+
+    # Submit the first conflict to clear it.
+    handle_id_first = next(iter(oracle.requests))
+    _submit(oracle_engine, handle_id_first, "Affirm")
+
+    rows_after_first = oracle_engine.list_pending_adjudications()
+    assert len(rows_after_first) == 0, "Queue must be empty after first submit"
+
+    # Create a SECOND conflict on a different predicate (country) — leave it unsubmitted.
+    oracle_engine.ingest_claim({
+        "agent_id": agent_id,
+        "subject": "user",
+        "predicate": "country",
+        "value": "Germany",
+        "provenance": ProvenanceLabel.external_user_asserted(),
+        "cardinality": "Functional",
+        "valid_time": None,
+        "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.0},
+        "criticality": "Medium",
+        "derived_from": [],
+    })
+    oracle_engine.ingest_claim({
+        "agent_id": agent_id,
+        "subject": "user",
+        "predicate": "country",
+        "value": "France",
+        "provenance": ProvenanceLabel.external_first_hand(),
+        "cardinality": "Functional",
+        "valid_time": None,
+        "confidence": {"value_confidence": 0.9, "valid_time_confidence": 0.0},
+        "criticality": "Medium",
+        "derived_from": [],
+    })
+
+    # Queue must now have exactly 1 deferred row for country.
+    deferred_rows = oracle_engine.list_pending_adjudications()
+    assert len(deferred_rows) == 1, (
+        f"Deferred conflict must remain in queue, got {len(deferred_rows)} rows"
+    )
+    assert deferred_rows[0]["predicate"] == "country"
+    assert deferred_rows[0]["status"] == "pending"
+    assert deferred_rows[0]["incumbent_value"] == "Germany"
+    assert deferred_rows[0]["challenger_value"] == "France"
