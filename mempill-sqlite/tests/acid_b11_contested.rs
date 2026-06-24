@@ -103,7 +103,9 @@ async fn b11_oracle_absent_external_contradiction_resolves_to_contested() {
         query_resp.belief.status
     );
 
-    // Contested: no silent primary winner — at least one of the two claims surfaced.
+    // STRENGTHENED (TASK-9-W4-W5-FIX): BOTH values must surface in the Contested projection,
+    // not just one. The previous assertion only checked that at least one was visible — this
+    // masked the bug where the incumbent was excluded (only challenger surfaced).
     let all_surfaced_refs: Vec<_> = query_resp.belief.primary
         .iter()
         .map(|b| b.claim_ref.clone())
@@ -111,9 +113,32 @@ async fn b11_oracle_absent_external_contradiction_resolves_to_contested() {
         .collect();
 
     assert!(
-        all_surfaced_refs.contains(&resp_a.claim_ref)
-            || all_surfaced_refs.contains(&resp_b.claim_ref),
-        "B11: at least one of the contested claims must be surfaced in belief projection."
+        all_surfaced_refs.contains(&resp_a.claim_ref),
+        "B11: the INCUMBENT (claim A / 'Berlin') MUST be surfaced in Contested projection. \
+         It was not — the incumbent was excluded by ingest-time supersession (now fixed). \
+         Surfaced refs: {:?}",
+        all_surfaced_refs
+    );
+    assert!(
+        all_surfaced_refs.contains(&resp_b.claim_ref),
+        "B11: the CHALLENGER (claim B / 'Paris') MUST be surfaced in Contested projection. \
+         Surfaced refs: {:?}",
+        all_surfaced_refs
+    );
+
+    // Values check: both "Berlin" and "Paris" must appear in alternatives.
+    let all_surfaced_values: Vec<_> = query_resp.belief.primary
+        .iter()
+        .map(|b| b.fact.value.clone())
+        .chain(query_resp.belief.alternatives.iter().map(|b| b.fact.value.clone()))
+        .collect();
+    assert!(
+        all_surfaced_values.contains(&serde_json::json!("Berlin")),
+        "B11: 'Berlin' (incumbent value) MUST be visible in Contested. Got: {:?}", all_surfaced_values
+    );
+    assert!(
+        all_surfaced_values.contains(&serde_json::json!("Paris")),
+        "B11: 'Paris' (challenger value) MUST be visible in Contested. Got: {:?}", all_surfaced_values
     );
 }
 

@@ -31,6 +31,7 @@ use crate::{
         ingest_claim::IngestClaimUseCase,
         query_memory::QueryMemoryUseCase,
         reconcile::ReconcileUseCase,
+        submit_adjudication::SubmitAdjudicationUseCase,
     },
     concurrency::agent_lock::AgentWriteLockMap,
     config::EngineConfig,
@@ -287,6 +288,67 @@ where
     ) -> Result<AuditQueryResponse, MemError> {
         let uc = AuditUseCase::new(Arc::clone(&self.persistence));
         task::spawn_blocking(move || uc.execute(req))
+            .await
+            .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
+    }
+
+    /// Oracle resolution path: deliver an oracle verdict and apply it atomically.
+    ///
+    /// Acquires locks in the SAME ORDER as `ingest_claim` to prevent deadlock:
+    ///   1. `store_write_lock`  — serializes all cross-agent SQLite writes (conditional).
+    ///   2. per-agent lock      — keyed on the `agent_id` retrieved from the pending row.
+    ///
+    /// The `agent_id` is resolved by a brief pre-lock read of the pending row. The lock
+    /// is then acquired before `spawn_blocking` dispatches to `SubmitAdjudicationUseCase`.
+    ///
+    /// # Errors
+    ///
+    /// - `MemError::AdjudicationHandleNotFound` — handle unknown, expired, or stale.
+    /// - `MemError::PendingStore` — pending-store I/O error.
+    /// - `MemError::Persistence` — DB write error during verdict apply.
+    /// - `MemError::SpawnBlocking` — tokio task join error.
+    pub async fn submit_adjudication(
+        &self,
+        handle_id: uuid::Uuid,
+        response: mempill_types::AdjudicationResponse,
+    ) -> Result<mempill_types::AdjudicationOutcome, MemError> {
+        let now = Utc::now(); // clock read ONCE at the async boundary (DETERMINISM)
+
+        // ── Step 1: Resolve agent_id from the pending row (brief pre-lock read) ──
+        // This read is outside the write lock; we read again inside spawn_blocking for
+        // the full state-guard (the use-case re-reads inside the txn boundary).
+        let pending_store = self.pending_store.as_ref()
+            .ok_or(MemError::AdjudicationHandleNotFound { handle_id })?;
+
+        let row = pending_store
+            .get_pending_erased(handle_id)
+            .map_err(|e| MemError::PendingStore { source: e })?
+            .ok_or(MemError::AdjudicationHandleNotFound { handle_id })?;
+
+        // Lazy expiry: reject before acquiring locks.
+        if let Some(expires_at) = row.expires_at {
+            if expires_at <= now {
+                return Err(MemError::AdjudicationHandleNotFound { handle_id });
+            }
+        }
+
+        let agent_id = row.agent_id.clone();
+
+        // ── Step 2: Acquire locks in the same order as ingest_claim ──────────────
+        let _store_lock = if self.persistence.requires_global_write_serialization() {
+            Some(self.store_write_lock.lock().await)
+        } else {
+            None
+        };
+        let _guard = self.write_locks.acquire(&agent_id).await;
+
+        // ── Step 3: Dispatch to sync use-case via spawn_blocking ─────────────────
+        let pending_store_arc = Arc::clone(pending_store);
+        let uc = SubmitAdjudicationUseCase::new(
+            Arc::clone(&self.persistence),
+            pending_store_arc,
+        );
+        task::spawn_blocking(move || uc.execute(handle_id, response, now))
             .await
             .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
     }

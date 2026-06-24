@@ -105,20 +105,24 @@ async fn acid_allergy_first_claim_committed_cheap() {
     );
 }
 
-/// DEFECT-1 fix verification: supersession succeeds end-to-end.
+/// B11 oracle-absent contested ingest: BOTH claims stay live, incumbent is NEVER superseded at ingest.
 ///
-/// Before the fix: second ingest on the same subject-line (SameLineConflict → HeavyPath →
-/// supersession::execute → load_edges_for → TxnAlreadyOpen) returned an error.
+/// TASK-9-W4-W5-FIX: The old behavior was to run supersession::execute at ingest time for HeavyPath,
+/// writing a ValidityAssertion::Bound + Superseded ledger entry on the incumbent. This was incorrect:
+/// it silently excluded the incumbent before the oracle could respond (or in oracle-absent cases,
+/// before the Contested state could be properly surfaced with BOTH values).
 ///
-/// After the fix: edges are pre-loaded BEFORE begin_atomic(), supersession succeeds,
-/// original penicillin-allergy claim row is retained in the audit ledger (I1), and
-/// the current belief reflects the superseding state.
+/// After the fix:
+///   - HeavyPath at ingest NEVER supersedes the incumbent.
+///   - Oracle absent (B11a): challenger=Contested, incumbent=CommittedCheap (still live).
+///   - The audit ledger for the incumbent shows ONLY ClaimCommitted — no ValidityAsserted.
+///   - query_memory returns BeliefStatus::Contested with BOTH values visible.
 #[tokio::test]
 async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
     let engine = open_default_in_memory().expect("in-memory engine must open");
     let agent = AgentId("acid-allergy-supersession-agent".into());
 
-    // Ingest original allergy.
+    // Ingest original allergy (incumbent).
     let original = engine
         .ingest_claim(IngestClaimRequest {
             agent_id: agent.clone(),
@@ -138,9 +142,9 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
     assert_eq!(original.disposition, Disposition::CommittedCheap, "first ingest must be CommittedCheap");
     let original_ref = original.claim_ref.clone();
 
-    // Second ingest with a conflicting value: triggers HeavyPath supersession.
-    // DEFECT-1 FIX: edges are pre-loaded before begin_atomic — this must SUCCEED now.
-    let supersession_resp = engine
+    // Second ingest with a conflicting value: oracle absent → B11(a) → Contested.
+    // Fix (TASK-9-W4-W5-FIX): incumbent is NOT superseded at ingest time.
+    let challenger_resp = engine
         .ingest_claim(IngestClaimRequest {
             agent_id: agent.clone(),
             subject: "patient".into(),
@@ -154,15 +158,16 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
             derived_from: vec![],
         })
         .await
-        .expect("DEFECT-1 FIXED: supersession must succeed; edges are now pre-loaded before begin_atomic");
+        .expect("B11 contested ingest must succeed");
 
-    // The supersession should produce a Contested or Superseded-like response (HeavyPath outcome).
-    assert_ne!(
-        supersession_resp.disposition, Disposition::CommittedCheap,
-        "second conflicting claim must not be CommittedCheap (it triggers HeavyPath)"
+    // B11(a): oracle absent + conflict → Contested (not CommittedCheap, not Superseded).
+    assert_eq!(
+        challenger_resp.disposition, Disposition::Contested,
+        "B11(a): oracle absent + conflicting External claim MUST be Contested. Got {:?}",
+        challenger_resp.disposition
     );
 
-    // I1 — original claim must still be in the audit ledger (never deleted).
+    // I1 — original claim must still be in the audit ledger (never deleted, never superseded).
     let audit = engine
         .query_audit(AuditQueryRequest {
             agent_id: agent.clone(),
@@ -184,12 +189,15 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
 
     assert_eq!(
         committed, 1,
-        "I1 (DEFECT-1 FIXED): original penicillin-allergy claim MUST still have \
-         its ClaimCommitted audit entry after successful supersession (append-only). Found: {}",
+        "I1: original penicillin-allergy claim MUST still have its ClaimCommitted audit entry \
+         after B11 contested ingest (append-only). Found: {}",
         committed
     );
 
-    // The superseded claim should now have a ValidityAsserted entry in the audit trail.
+    // CORRECTED ASSERTION (TASK-9-W4-W5-FIX): the incumbent must NOT have a ValidityAsserted
+    // (Bound) entry in the audit trail after ingest. Supersession of the incumbent only happens
+    // at submit_adjudication time (Affirm verdict). At ingest time (oracle absent / B11),
+    // the incumbent remains CommittedCheap and live.
     let validity_asserted = audit
         .entries
         .iter()
@@ -200,14 +208,38 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
         .count();
 
     assert_eq!(
-        validity_asserted, 1,
-        "I1: superseded claim must have a ValidityAsserted audit entry (bound appended, not deleted). Found: {}",
+        validity_asserted, 0,
+        "TASK-9-W4-W5-FIX: the incumbent MUST NOT have a ValidityAsserted entry at ingest time. \
+         Ingest-time supersession of the incumbent was the root cause of the Contested-surfacing bug. \
+         Found: {} (expected 0). Supersession only happens at submit_adjudication Affirm.",
         validity_asserted
     );
 
+    // query_memory must surface Contested with BOTH values visible.
+    let qr = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "patient".into(),
+        predicate: "allergy".into(),
+        as_of_tx_time: None,
+    }).await.expect("query must succeed");
+
+    assert_eq!(
+        qr.belief.status, BeliefStatus::Contested,
+        "I1+B11: belief MUST be Contested with BOTH values visible. Got {:?}", qr.belief.status
+    );
+
+    let all_values: Vec<_> = qr.belief.primary.iter()
+        .map(|b| b.fact.value.clone())
+        .chain(qr.belief.alternatives.iter().map(|b| b.fact.value.clone()))
+        .collect();
+    assert!(
+        all_values.contains(&serde_json::json!("penicillin")),
+        "I1+B11: incumbent 'penicillin' MUST be visible in Contested belief. Got: {:?}", all_values
+    );
+
     println!(
-        "I1 FULL PASS (DEFECT-1 FIXED): supersession succeeded. \
-         original_ref={} still in audit ledger with ClaimCommitted + ValidityAsserted.",
+        "I1+B11 PASS: original_ref={} retained in audit (ClaimCommitted only, NO ValidityAsserted). \
+         Belief=Contested with both values.",
         original_ref.0
     );
 }
@@ -286,17 +318,18 @@ async fn acid_allergy_three_distinct_first_ingests_all_committed() {
     );
 }
 
-/// I1 end-to-end audit trail: after successful supersession, original claim is retained.
+/// I1 non-destruction audit trail: after B11 contested ingest (oracle absent), both claims live.
 ///
-/// After DEFECT-1 fix: supersession succeeds. The original claim remains in the audit ledger
-/// (I1 — append-only, never deleted). The audit trail shows both ClaimCommitted (for the
-/// original) and ValidityAsserted (for the bound). The new belief reflects the supersession.
+/// TASK-9-W4-W5-FIX: After the fix, a conflicting ingest with no oracle produces B11(a) Contested.
+/// The incumbent is NEVER superseded at ingest time. Only ClaimCommitted appears in the audit trail
+/// for the incumbent. No ValidityAsserted (Bound) entry exists until an Affirm verdict is submitted.
+/// The belief is Contested with BOTH the incumbent AND challenger values visible.
 #[tokio::test]
 async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
     let engine = open_default_in_memory().expect("in-memory engine must open");
     let agent = AgentId("acid-allergy-audit-agent".into());
 
-    // Ingest the original allergy.
+    // Ingest the original allergy (incumbent).
     let original = engine
         .ingest_claim(IngestClaimRequest {
             agent_id: agent.clone(),
@@ -316,8 +349,8 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
     let original_ref = original.claim_ref.clone();
     assert_eq!(original.disposition, Disposition::CommittedCheap);
 
-    // Supersession — DEFECT-1 is fixed, this must succeed.
-    let superseding = engine
+    // Conflicting ingest (oracle absent → B11(a) → Contested).
+    let challenger = engine
         .ingest_claim(IngestClaimRequest {
             agent_id: agent.clone(),
             subject: "patient".into(),
@@ -331,15 +364,16 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
             derived_from: vec![],
         })
         .await
-        .expect("DEFECT-1 FIXED: supersession must succeed");
+        .expect("B11 contested ingest must succeed");
 
-    // Superseding disposition must be non-cheap (HeavyPath gate fired).
-    assert_ne!(
-        superseding.disposition, Disposition::CommittedCheap,
-        "superseding ingest must not be CommittedCheap (HeavyPath override expected)"
+    // B11(a): oracle absent → Contested (not CommittedCheap).
+    assert_eq!(
+        challenger.disposition, Disposition::Contested,
+        "B11(a): conflicting External claim with no oracle MUST be Contested. Got {:?}",
+        challenger.disposition
     );
 
-    // I1: original claim must still be in audit ledger (append-only, never deleted).
+    // I1: original claim must still be in audit ledger (append-only, never deleted, never superseded).
     let audit = engine
         .query_audit(AuditQueryRequest {
             agent_id: agent.clone(),
@@ -348,7 +382,7 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
             limit: 50,
         })
         .await
-        .expect("audit query for original must succeed after supersession");
+        .expect("audit query for original must succeed after B11 contested ingest");
 
     let committed = audit
         .entries
@@ -361,12 +395,13 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
 
     assert_eq!(
         committed, 1,
-        "I1 FULL PASS (DEFECT-1 FIXED): original penicillin-allergy claim MUST still \
-         have its ClaimCommitted audit entry after supersession (append-only). Found: {}",
+        "I1: original penicillin-allergy claim MUST have exactly 1 ClaimCommitted audit entry. Found: {}",
         committed
     );
 
-    // The bound (ValidityAsserted) must also be in the audit trail.
+    // CORRECTED (TASK-9-W4-W5-FIX): no ValidityAsserted at ingest time for oracle-absent B11.
+    // The incumbent is retained as CommittedCheap (live) — no Bound assertion is written.
+    // Only an Affirm verdict at submit_adjudication time would produce a ValidityAsserted entry.
     let validity_asserted = audit
         .entries
         .iter()
@@ -377,14 +412,41 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
         .count();
 
     assert_eq!(
-        validity_asserted, 1,
-        "I1: superseded original must have ValidityAsserted audit entry (bound, not delete). Found: {}",
+        validity_asserted, 0,
+        "TASK-9-W4-W5-FIX: incumbent MUST NOT have ValidityAsserted at ingest time (B11 oracle-absent path). \
+         Ingest-time supersession was the bug. Supersession only via Affirm at submit_adjudication. \
+         Found: {} (expected 0)",
         validity_asserted
     );
 
+    // The belief MUST be Contested with both "penicillin" (incumbent) and "none" (challenger).
+    let qr = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "patient".into(),
+        predicate: "allergy".into(),
+        as_of_tx_time: None,
+    }).await.expect("query must succeed");
+
+    assert_eq!(
+        qr.belief.status, BeliefStatus::Contested,
+        "I1+B11: belief MUST be Contested. Got {:?}", qr.belief.status
+    );
+    let all_values: Vec<_> = qr.belief.primary.iter()
+        .map(|b| b.fact.value.clone())
+        .chain(qr.belief.alternatives.iter().map(|b| b.fact.value.clone()))
+        .collect();
+    assert!(
+        all_values.contains(&serde_json::json!("penicillin")),
+        "I1+B11: 'penicillin' (incumbent) MUST be visible in Contested. Got: {:?}", all_values
+    );
+    assert!(
+        all_values.contains(&serde_json::json!("none")),
+        "I1+B11: 'none' (challenger) MUST be visible in Contested. Got: {:?}", all_values
+    );
+
     println!(
-        "I1 FULL PASS (DEFECT-1 FIXED): original allergy (claim_ref={}) \
-         is in audit ledger with ClaimCommitted + ValidityAsserted after successful supersession.",
+        "I1+B11 PASS: original allergy (claim_ref={}) retained in audit (ClaimCommitted only, \
+         NO ValidityAsserted at ingest). Belief=Contested with both values.",
         original_ref.0
     );
 }
