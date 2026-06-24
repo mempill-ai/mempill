@@ -35,7 +35,6 @@ use crate::{
         gate,
         gateway::{self, IngestInput},
         reconciler::{self, ReconcilerInput},
-        supersession::{self, SupersessionRequest},
         truth_engine,
     },
     engine_handle::ErasedPendingStore,
@@ -179,20 +178,15 @@ where
         // ── Step 4: C7 gate — adjudicate ─────────────────────────────────────────
         let decision = gate::adjudicate(&proposal, &self.config);
 
-        // ── Step 4.5: Pre-load edges for supersession BEFORE begin_atomic (DEFECT-1 fix) ──
-        // If the gate decided HeavyPath and there is an incumbent, load its DependsOn edges
-        // now (outside the transaction) so supersession::execute can receive them inside the txn.
-        let preloaded_edges: Vec<ClaimEdge> = if matches!(decision.route, gate::Route::HeavyPath) {
-            if let Some(ref inc) = incumbent_belief {
-                self.persistence
-                    .load_edges_for(&req.agent_id, &inc.claim_ref)
-                    .map_err(|e| MemError::Persistence { source: Box::new(e) })?
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
+        // ── Step 4.5: Edge pre-load (DEFECT-1 fix — historical note) ────────────────
+        // Previously, DependsOn edges were pre-loaded here for the HeavyPath supersession call
+        // inside the transaction. Since ingest-time supersession on HeavyPath was the root cause
+        // of the Contested-surfacing bug (TASK-9-W4-W5-FIX), that supersession call is removed.
+        // No edges need to be pre-loaded at ingest time; all supersession now happens only at
+        // submit_adjudication (Affirm verdict). An empty vec is kept so the append_within_txn
+        // signature is unchanged (forward-compatible if a future deterministic-supersede path
+        // is added to the gate).
+        let preloaded_edges: Vec<ClaimEdge> = vec![];
 
         // ── Step 5: I9 atomic Txn — begin ────────────────────────────────────────
         let mut txn = self.persistence
@@ -304,20 +298,19 @@ where
 
     /// All persistence writes inside the open Txn.
     ///
-    /// `preloaded_edges` must be loaded by the caller BEFORE opening the transaction
-    /// (DEFECT-1 fix — reads inside a SQLite exclusive transaction are not possible).
+    /// `preloaded_edges` is kept for signature stability but is currently always empty —
+    /// ingest-time supersession was removed (TASK-9-W4-W5-FIX) so no edges are needed here.
+    /// If a future deterministic-supersede path is added to the gate, this parameter carries it.
     fn append_within_txn(
         &self,
         claim: &Claim,
         decision: &gate::GateDecision,
-        incumbent_belief: &Option<mempill_types::Belief>,
+        _incumbent_belief: &Option<mempill_types::Belief>,
         agent_id: &AgentId,
         tx_time: TransactionTime,
         preloaded_edges: &[ClaimEdge],
         txn: &mut P::Transaction,
     ) -> Result<IngestClaimResponse, MemError> {
-        use gate::Route;
-
         // Append the claim.
         let claim_ref = self.persistence
             .append_claim(txn, claim)
@@ -352,23 +345,27 @@ where
                 .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         }
 
-        // C4 supersession: if heavy-path overturn was decided, cascade.
-        // preloaded_edges were loaded BEFORE begin_atomic (DEFECT-1 fix).
-        let mut contested_with = vec![];
-        if matches!(decision.route, Route::HeavyPath) {
-            if let Some(incumbent) = incumbent_belief {
-                let supersession_req = SupersessionRequest {
-                    agent_id: agent_id.clone(),
-                    superseded_ref: incumbent.claim_ref.clone(),
-                    overturning_ref: claim_ref.clone(),
-                    bound_at: tx_time.0,
-                    recorded_at: tx_time.clone(),
-                };
-                supersession::execute(&*self.persistence, txn, &supersession_req, preloaded_edges)
-                    .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
-                contested_with.push(incumbent.claim_ref.clone());
-            }
-        }
+        // C4 supersession: at ingest time, the incumbent must NEVER be superseded on the
+        // HeavyPath. HeavyPath always produces Contested or QueuedForAdjudication — both
+        // of which require the incumbent to remain live (either for immediate Contested
+        // surfacing, or for oracle resolution later). Supersession of the incumbent only
+        // happens at submit_adjudication time via an Affirm verdict (bound_claim there).
+        //
+        // Historically, this block ran supersession::execute unconditionally for HeavyPath,
+        // which wrote a ValidityAssertion::Bound + Superseded ledger entry on the incumbent
+        // at ingest time. This caused:
+        //   - QUEUED: incumbent excluded from live_claims → only challenger visible
+        //   - DENY: incumbent excluded → NoBelief (both bounded/Superseded)
+        //   - UNKNOWN: incumbent excluded → only challenger visible
+        //   - B11 (oracle absent / Contested): incumbent excluded → only challenger visible
+        // The fix: do NOT call supersession::execute at ingest time for HeavyPath.
+        // The incumbent remains CommittedCheap (live) until the oracle resolves.
+        //
+        // preloaded_edges retain their DEFECT-1 fix value: loaded before begin_atomic to
+        // avoid reads inside the open txn. They are unused here now but kept in scope for
+        // the pattern integrity if a future deterministic-supersede path is added.
+        let _ = preloaded_edges; // DEFECT-1 preload preserved; HeavyPath never supersedes at ingest
+        let contested_with = vec![];
 
         Ok(IngestClaimResponse {
             claim_ref,

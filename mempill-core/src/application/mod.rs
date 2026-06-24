@@ -8,6 +8,7 @@ pub mod dto;
 pub mod ingest_claim;
 pub mod query_memory;
 pub mod reconcile;
+pub mod submit_adjudication;
 
 pub use audit::AuditUseCase;
 pub use dto::{
@@ -17,3 +18,4 @@ pub use dto::{
 pub use ingest_claim::IngestClaimUseCase;
 pub use query_memory::QueryMemoryUseCase;
 pub use reconcile::ReconcileUseCase;
+pub use submit_adjudication::SubmitAdjudicationUseCase;
