@@ -1203,3 +1203,35 @@ where
     let store = PostgresPersistenceStore::new(connection_string)?;
     Ok(EngineHandle::new(Arc::new(store), oracle, vector, config))
 }
+
+/// Convenience constructor: build a `PostgresEngine<O, V>` wired with a real oracle
+/// and the Postgres-backed pending-adjudication store.
+///
+/// Mirrors `open_postgres` but calls `EngineHandle::new_with_pending_store` so that
+/// `QueuedForAdjudication` rows are persisted and verdicts can be delivered via
+/// `EngineHandle::submit_adjudication`.
+///
+/// `open_postgres` (no-oracle variant) is left UNCHANGED.
+pub fn open_postgres_with_oracle<O, V>(
+    connection_string: &str,
+    oracle: Arc<O>,
+    vector: Option<Arc<V>>,
+    config: EngineConfig,
+) -> Result<EngineHandle<PostgresPersistenceStore, O, V>, PostgresStoreError>
+where
+    O: mempill_core::ports::OraclePort + Send + Sync + 'static,
+    V: mempill_core::ports::VectorPort + Send + Sync + 'static,
+{
+    let store = PostgresPersistenceStore::new(connection_string)?;
+    let store_arc = Arc::new(store);
+    let pending_store: Arc<dyn mempill_core::ErasedPendingStore> = Arc::new(
+        mempill_core::ErasedPendingStoreAdapter::new(store_arc.pending_store()),
+    );
+    Ok(EngineHandle::new_with_pending_store::<()>(
+        store_arc,
+        Some(oracle),
+        vector,
+        pending_store,
+        config,
+    ))
+}

@@ -321,8 +321,21 @@ where
     ///   1. `store_write_lock`  — serializes all cross-agent SQLite writes (conditional).
     ///   2. per-agent lock      — keyed on the `agent_id` retrieved from the pending row.
     ///
-    /// The `agent_id` is resolved by a brief pre-lock read of the pending row. The lock
-    /// is then acquired before `spawn_blocking` dispatches to `SubmitAdjudicationUseCase`.
+    /// # Postgres / async-runtime safety
+    ///
+    /// The postgres sync crate (`postgres 0.19`) wraps `tokio-postgres` and calls `block_on`
+    /// in `Client::drop`. Dropping a postgres `Client` while a tokio runtime is active on the
+    /// current thread panics with "Cannot start a runtime from within a runtime".
+    ///
+    /// ALL pending-store I/O (including the agent_id resolution read) is therefore performed
+    /// inside `spawn_blocking` so no `postgres::Client` is ever created or dropped on the
+    /// async executor thread. This is the same discipline used by `ingest_claim`.
+    ///
+    /// # Protocol
+    ///
+    /// 1. `spawn_blocking` — resolve `agent_id` from the pending row (DB read, safe).
+    /// 2. Acquire `store_write_lock` (SQLite-only) + per-agent write lock (async).
+    /// 3. `spawn_blocking` — run `SubmitAdjudicationUseCase::execute` (all DB writes).
     ///
     /// # Errors
     ///
@@ -337,16 +350,28 @@ where
     ) -> Result<mempill_types::AdjudicationOutcome, MemError> {
         let now = Utc::now(); // clock read ONCE at the async boundary (DETERMINISM)
 
-        // ── Step 1: Resolve agent_id from the pending row (brief pre-lock read) ──
-        // This read is outside the write lock; we read again inside spawn_blocking for
-        // the full state-guard (the use-case re-reads inside the txn boundary).
+        // ── Step 1: Resolve agent_id via spawn_blocking (NO async-context DB access) ──
+        //
+        // The postgres sync crate calls `block_on` in `Client::drop`. Reading the pending
+        // store directly in the async context would drop a postgres connection on the tokio
+        // thread, causing a panic. `spawn_blocking` moves the drop to a dedicated OS thread
+        // where no tokio runtime is active. The use-case re-reads the row inside its own
+        // spawn_blocking (Step 3) for the authoritative state-guard.
         let pending_store = self.pending_store.as_ref()
             .ok_or(MemError::AdjudicationHandleNotFound { handle_id })?;
+        let pending_store_arc = Arc::clone(pending_store);
 
-        let row = pending_store
-            .get_pending_erased(handle_id)
-            .map_err(|e| MemError::PendingStore { source: e })?
-            .ok_or(MemError::AdjudicationHandleNotFound { handle_id })?;
+        let resolve_result = task::spawn_blocking(move || {
+            let row = pending_store_arc
+                .get_pending_erased(handle_id)
+                .map_err(|e| MemError::PendingStore { source: e })?
+                .ok_or(MemError::AdjudicationHandleNotFound { handle_id })?;
+            Ok::<_, MemError>(row)
+        })
+        .await
+        .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })??;
+
+        let row = resolve_result;
 
         // Lazy expiry: reject before acquiring locks.
         if let Some(expires_at) = row.expires_at {
@@ -366,10 +391,10 @@ where
         let _guard = self.write_locks.acquire(&agent_id).await;
 
         // ── Step 3: Dispatch to sync use-case via spawn_blocking ─────────────────
-        let pending_store_arc = Arc::clone(pending_store);
+        let pending_store_arc2 = Arc::clone(pending_store);
         let uc = SubmitAdjudicationUseCase::new(
             Arc::clone(&self.persistence),
-            pending_store_arc,
+            pending_store_arc2,
         );
         task::spawn_blocking(move || uc.execute(handle_id, response, now))
             .await
@@ -391,6 +416,12 @@ where
     /// The engine MUST NOT spawn a background task — the host calls this on its own schedule.
     ///
     /// If no pending store is configured, returns `Ok(0)` (sweep is a no-op without oracle queue).
+    ///
+    /// # Postgres / async-runtime safety
+    ///
+    /// ALL pending-store reads (`list_expired`, `list_queued_orphan_claims`) are performed
+    /// inside `spawn_blocking` so no `postgres::Client` is created or dropped on the tokio
+    /// executor thread (same invariant as `submit_adjudication`).
     pub async fn sweep_expired_adjudications(&self) -> Result<usize, MemError> {
         let now = Utc::now();
 
@@ -399,10 +430,15 @@ where
             None => return Ok(0),
         };
 
-        // ── Phase 1: Sweep expired pending rows ──────────────────────────────────
-        let expired_rows = pending_store
-            .list_expired_erased(now)
-            .map_err(|e| MemError::PendingStore { source: e })?;
+        // ── Phase 1: Collect expired rows via spawn_blocking (NO async-context DB access) ──
+        let ps_for_list = Arc::clone(&pending_store);
+        let expired_rows = task::spawn_blocking(move || {
+            ps_for_list
+                .list_expired_erased(now)
+                .map_err(|e| MemError::PendingStore { source: e })
+        })
+        .await
+        .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })??;
 
         let mut swept = 0usize;
 
@@ -432,11 +468,16 @@ where
             }
         }
 
-        // ── Phase 2: Orphan recovery ──────────────────────────────────────────────
+        // ── Phase 2: Collect orphans via spawn_blocking (NO async-context DB access) ──
         // Detect QueuedForAdjudication claims with no matching pending row.
-        let orphans = pending_store
-            .list_queued_orphan_claims_erased()
-            .map_err(|e| MemError::PendingStore { source: e })?;
+        let ps_for_orphans = Arc::clone(&pending_store);
+        let orphans = task::spawn_blocking(move || {
+            ps_for_orphans
+                .list_queued_orphan_claims_erased()
+                .map_err(|e| MemError::PendingStore { source: e })
+        })
+        .await
+        .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })??;
 
         for orphan in orphans {
             let agent_id = orphan.agent_id.clone();

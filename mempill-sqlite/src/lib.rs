@@ -36,6 +36,10 @@ pub mod txn;
 
 pub use store::{SqlitePendingStore, SqlitePersistenceStore};
 
+// Re-export OraclePort bound so callers can write the `open_with_oracle` constraint
+// without adding a direct dependency on mempill-core in their Cargo.toml.
+pub use mempill_core::ports::OraclePort;
+
 // ── Crate-level error type ────────────────────────────────────────────────────
 
 /// Error type for all `mempill-sqlite` operations.
@@ -80,6 +84,73 @@ pub type DefaultEngine = mempill_core::EngineHandle<
     mempill_core::NoOpOracle,
     mempill_core::NoOpVector,
 >;
+
+// ── OracleEngine — type alias for a SQLite engine with a real oracle ──────────
+
+/// An `EngineHandle` backed by SQLite persistence, a caller-supplied oracle, and no vector.
+///
+/// Use `open_with_oracle` or `open_with_oracle_in_memory` to obtain one.
+pub type OracleEngine<O> = mempill_core::EngineHandle<
+    SqlitePersistenceStore,
+    O,
+    mempill_core::NoOpVector,
+>;
+
+// ── open_with_oracle constructors ─────────────────────────────────────────────
+
+/// Open a **file-backed** SQLite engine wired with a real oracle.
+///
+/// The pending-adjudication store is constructed from the same SQLite connection,
+/// enabling full W4–W5 oracle resolution. `open_default` / `DefaultEngine` remain unchanged.
+///
+/// # Errors
+/// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.
+pub fn open_with_oracle<O>(
+    path: &str,
+    oracle: std::sync::Arc<O>,
+) -> Result<OracleEngine<O>, SqliteStoreError>
+where
+    O: OraclePort + Send + Sync + 'static,
+{
+    let conn = connection::open(path)?;
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
+    let pending_store: std::sync::Arc<dyn mempill_core::ErasedPendingStore> =
+        std::sync::Arc::new(mempill_core::ErasedPendingStoreAdapter::new(store.pending_store()));
+    Ok(mempill_core::EngineHandle::new_with_pending_store::<()>(
+        store,
+        Some(oracle),
+        None::<std::sync::Arc<mempill_core::NoOpVector>>,
+        pending_store,
+        mempill_core::EngineConfig::default(),
+    ))
+}
+
+/// Open an **in-memory** SQLite engine wired with a real oracle.
+///
+/// Useful for integration tests and ephemeral oracle-enabled contexts.
+///
+/// # Errors
+/// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.
+pub fn open_with_oracle_in_memory<O>(
+    oracle: std::sync::Arc<O>,
+) -> Result<OracleEngine<O>, SqliteStoreError>
+where
+    O: OraclePort + Send + Sync + 'static,
+{
+    let conn = connection::open_in_memory()?;
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
+    let pending_store: std::sync::Arc<dyn mempill_core::ErasedPendingStore> =
+        std::sync::Arc::new(mempill_core::ErasedPendingStoreAdapter::new(store.pending_store()));
+    Ok(mempill_core::EngineHandle::new_with_pending_store::<()>(
+        store,
+        Some(oracle),
+        None::<std::sync::Arc<mempill_core::NoOpVector>>,
+        pending_store,
+        mempill_core::EngineConfig::default(),
+    ))
+}
+
+// ── DefaultEngine constructors ────────────────────────────────────────────────
 
 /// Open a file-backed `DefaultEngine` at the given path.
 ///
