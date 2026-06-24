@@ -20,3 +20,4 @@ thiserror     = { workspace = true }
 [dev-dependencies]
 testcontainers-modules = { version = "0.15", features = ["postgres", "blocking"] }
 mempill-core = { path = "../mempill-core", features = ["test-support"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
