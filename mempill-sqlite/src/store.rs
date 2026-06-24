@@ -178,6 +178,7 @@ fn str_to_edge_kind(s: &str) -> Result<EdgeKind, SqliteStoreError> {
 }
 
 fn ledger_event_kind_to_str(k: &LedgerEventKind) -> &'static str {
+    // AdjudicationExpired maps to "AdjudicationExpired" for W6 (TTL sweep + lazy expiry).
     match k {
         LedgerEventKind::ClaimCommitted => "ClaimCommitted",
         LedgerEventKind::ValidityAsserted => "ValidityAsserted",
@@ -187,6 +188,7 @@ fn ledger_event_kind_to_str(k: &LedgerEventKind) -> &'static str {
         LedgerEventKind::Quarantined => "Quarantined",
         LedgerEventKind::DependentFlaggedPendingReview => "DependentFlaggedPendingReview",
         LedgerEventKind::ServedAsInjected => "ServedAsInjected",
+        LedgerEventKind::AdjudicationExpired => "AdjudicationExpired",
     }
 }
 
@@ -200,6 +202,7 @@ fn str_to_ledger_event_kind(s: &str) -> Result<LedgerEventKind, SqliteStoreError
         "Quarantined" => Ok(LedgerEventKind::Quarantined),
         "DependentFlaggedPendingReview" => Ok(LedgerEventKind::DependentFlaggedPendingReview),
         "ServedAsInjected" => Ok(LedgerEventKind::ServedAsInjected),
+        "AdjudicationExpired" => Ok(LedgerEventKind::AdjudicationExpired),
         other => Err(SqliteStoreError::Mapping(format!(
             "unknown ledger event_kind value: {other}"
         ))),
@@ -1246,6 +1249,86 @@ impl PendingAdjudicationPort for SqlitePendingStore {
         )?;
         Ok(())
     }
+
+    fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        conn.execute(
+            "UPDATE pending_adjudications SET status = 'expired' WHERE handle_id = ?1",
+            rusqlite::params![handle_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Detect QueuedForAdjudication claims (by latest ledger disposition) with no matching
+    /// pending row (status = 'pending').
+    ///
+    /// Approach: find claim_ids whose most-recent ledger entry has disposition =
+    /// 'QueuedForAdjudication' via a subquery on max(recorded_at), then check for absence
+    /// of a matching pending_adjudications row. Returns orphaned claim refs with
+    /// agent_id, subject, predicate, and best-guess incumbent.
+    ///
+    /// NOTE: The schema uses `claim_id` (not `claim_ref`) in `ledger_entries` and `claims`.
+    fn list_queued_orphan_claims(
+        &self,
+    ) -> Result<Vec<mempill_core::ports::pending_adjudication::OrphanedQueuedClaim>, SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        // Step 1: Find all (agent_id, claim_id) pairs whose latest ledger disposition is
+        // 'QueuedForAdjudication' with no matching pending_adjudications row (status='pending').
+        let mut stmt = conn.prepare(
+            "SELECT l.agent_id, l.claim_id, c.subject, c.predicate
+             FROM ledger_entries l
+             JOIN claims c ON c.claim_id = l.claim_id AND c.agent_id = l.agent_id
+             WHERE l.disposition = 'QueuedForAdjudication'
+               AND l.recorded_at = (
+                   SELECT MAX(l2.recorded_at) FROM ledger_entries l2
+                   WHERE l2.claim_id = l.claim_id AND l2.agent_id = l.agent_id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM pending_adjudications pa
+                   WHERE pa.challenger_claim_ref = l.claim_id
+                     AND pa.agent_id = l.agent_id
+                     AND pa.status = 'pending'
+               )",
+        )?;
+
+        let orphan_rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut results = Vec::new();
+        for (agent_id_str, challenger_str, subject, predicate) in orphan_rows {
+            use mempill_types::ClaimRef;
+
+            let challenger_ref = uuid::Uuid::parse_str(&challenger_str)
+                .map(ClaimRef)
+                .map_err(|e| SqliteStoreError::Mapping(format!("challenger_claim_ref UUID: {e}")))?;
+
+            // Step 2: Find the incumbent (CommittedCheap) on the same subject line.
+            let incumbent_ref = find_committed_cheap_claim(conn, &agent_id_str, &subject, &predicate)?;
+
+            results.push(mempill_core::ports::pending_adjudication::OrphanedQueuedClaim {
+                agent_id: mempill_types::AgentId(agent_id_str),
+                challenger_claim_ref: challenger_ref,
+                incumbent_claim_ref: incumbent_ref,
+                subject,
+                predicate,
+            });
+        }
+
+        Ok(results)
+    }
 }
 
 /// Map a rusqlite `Row` from `pending_adjudications` to a `PendingAdjudicationRow`.
@@ -1311,6 +1394,50 @@ fn row_to_pending(row: &rusqlite::Row<'_>) -> Result<PendingAdjudicationRow, rus
         expires_at,
         status,
     })
+}
+
+/// Find the most recent CommittedCheap claim on the same (agent_id, subject, predicate)
+/// subject line, used to identify the incumbent during orphan recovery.
+///
+/// Returns `None` if no CommittedCheap claim exists (sweep will skip reverting such orphans
+/// — they cannot be surfaced as Contested without a known incumbent).
+///
+/// NOTE: The schema uses `claim_id` (not `claim_ref`) in both `claims` and `ledger_entries`.
+fn find_committed_cheap_claim(
+    conn: &Connection,
+    agent_id: &str,
+    subject: &str,
+    predicate: &str,
+) -> Result<Option<mempill_types::ClaimRef>, SqliteStoreError> {
+    // Find the claim_id from the same subject line whose latest ledger entry is CommittedCheap.
+    let mut stmt = conn.prepare(
+        "SELECT l.claim_id
+         FROM ledger_entries l
+         JOIN claims c ON c.claim_id = l.claim_id AND c.agent_id = l.agent_id
+         WHERE l.agent_id = ?1
+           AND c.subject = ?2
+           AND c.predicate = ?3
+           AND l.disposition = 'CommittedCheap'
+           AND l.recorded_at = (
+               SELECT MAX(l2.recorded_at) FROM ledger_entries l2
+               WHERE l2.claim_id = l.claim_id AND l2.agent_id = l.agent_id
+           )
+         ORDER BY l.recorded_at DESC
+         LIMIT 1",
+    )?;
+
+    let mut rows = stmt.query_map(rusqlite::params![agent_id, subject, predicate], |row| {
+        row.get::<_, String>(0)
+    })?;
+
+    if let Some(Ok(ref_str)) = rows.next() {
+        let claim_ref = uuid::Uuid::parse_str(&ref_str)
+            .map(mempill_types::ClaimRef)
+            .map_err(|e| SqliteStoreError::Mapping(format!("incumbent_claim_ref UUID: {e}")))?;
+        Ok(Some(claim_ref))
+    } else {
+        Ok(None)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

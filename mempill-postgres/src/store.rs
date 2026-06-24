@@ -135,6 +135,7 @@ fn ledger_event_kind_to_str(k: &LedgerEventKind) -> &'static str {
         LedgerEventKind::Quarantined => "Quarantined",
         LedgerEventKind::DependentFlaggedPendingReview => "DependentFlaggedPendingReview",
         LedgerEventKind::ServedAsInjected => "ServedAsInjected",
+        LedgerEventKind::AdjudicationExpired => "AdjudicationExpired",
     }
 }
 
@@ -148,6 +149,7 @@ fn str_to_ledger_event_kind(s: &str) -> Result<LedgerEventKind, PostgresStoreErr
         "Quarantined" => Ok(LedgerEventKind::Quarantined),
         "DependentFlaggedPendingReview" => Ok(LedgerEventKind::DependentFlaggedPendingReview),
         "ServedAsInjected" => Ok(LedgerEventKind::ServedAsInjected),
+        "AdjudicationExpired" => Ok(LedgerEventKind::AdjudicationExpired),
         other => Err(PostgresStoreError::Mapping(format!("unknown ledger event_kind: {other}"))),
     }
 }
@@ -1046,6 +1048,95 @@ impl PendingAdjudicationPort for PostgresPendingStore {
             &[&handle_id.to_string()],
         )?;
         Ok(())
+    }
+
+    fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE pending_adjudications SET status = 'expired' WHERE handle_id = $1",
+            &[&handle_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Detect QueuedForAdjudication claims with no matching pending row (Postgres adapter).
+    ///
+    /// Same approach as SQLite: cross-table query joining ledger_entries + claims + pending_adjudications.
+    fn list_queued_orphan_claims(
+        &self,
+    ) -> Result<Vec<mempill_core::ports::pending_adjudication::OrphanedQueuedClaim>, PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+
+        // Phase 1: find orphaned QueuedForAdjudication claim refs.
+        // NOTE: the schema column is `claim_id` in both `ledger_entries` and `claims`
+        // (not `claim_ref` — that was the original bug caught by live PG tests).
+        let orphan_rows = conn.query(
+            "SELECT l.agent_id, l.claim_id, c.subject, c.predicate
+             FROM ledger_entries l
+             JOIN claims c ON c.claim_id = l.claim_id AND c.agent_id = l.agent_id
+             WHERE l.disposition = 'QueuedForAdjudication'
+               AND l.recorded_at = (
+                   SELECT MAX(l2.recorded_at) FROM ledger_entries l2
+                   WHERE l2.claim_id = l.claim_id AND l2.agent_id = l.agent_id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM pending_adjudications pa
+                   WHERE pa.challenger_claim_ref = l.claim_id
+                     AND pa.agent_id = l.agent_id
+                     AND pa.status = 'pending'
+               )",
+            &[],
+        )?;
+
+        let mut results = Vec::new();
+        for row in &orphan_rows {
+            let agent_id_str: String = row.get(0);
+            let challenger_str: String = row.get(1);
+            let subject: String = row.get(2);
+            let predicate: String = row.get(3);
+
+            let challenger_ref = uuid::Uuid::parse_str(&challenger_str)
+                .map(mempill_types::ClaimRef)
+                .map_err(|e| PostgresStoreError::Mapping(format!("challenger_claim_ref UUID: {e}")))?;
+
+            // Phase 2: find incumbent CommittedCheap claim on the same subject line.
+            // NOTE: schema column is `claim_id` (not `claim_ref`) in both tables.
+            let incumbent_rows = conn.query(
+                "SELECT l.claim_id
+                 FROM ledger_entries l
+                 JOIN claims c ON c.claim_id = l.claim_id AND c.agent_id = l.agent_id
+                 WHERE l.agent_id = $1
+                   AND c.subject = $2
+                   AND c.predicate = $3
+                   AND l.disposition = 'CommittedCheap'
+                   AND l.recorded_at = (
+                       SELECT MAX(l2.recorded_at) FROM ledger_entries l2
+                       WHERE l2.claim_id = l.claim_id AND l2.agent_id = l.agent_id
+                   )
+                 ORDER BY l.recorded_at DESC
+                 LIMIT 1",
+                &[&agent_id_str.as_str(), &subject.as_str(), &predicate.as_str()],
+            )?;
+
+            let incumbent_ref = incumbent_rows.first()
+                .map(|ir| {
+                    let ref_str: String = ir.get(0);
+                    uuid::Uuid::parse_str(&ref_str)
+                        .map(mempill_types::ClaimRef)
+                        .map_err(|e| PostgresStoreError::Mapping(format!("incumbent UUID: {e}")))
+                })
+                .transpose()?;
+
+            results.push(mempill_core::ports::pending_adjudication::OrphanedQueuedClaim {
+                agent_id: mempill_types::AgentId(agent_id_str),
+                challenger_claim_ref: challenger_ref,
+                incumbent_claim_ref: incumbent_ref,
+                subject,
+                predicate,
+            });
+        }
+
+        Ok(results)
     }
 }
 

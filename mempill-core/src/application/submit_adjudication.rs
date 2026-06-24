@@ -74,9 +74,58 @@ where
             .map_err(|e| MemError::PendingStore { source: e })?
             .ok_or(MemError::AdjudicationHandleNotFound { handle_id })?;
 
-        // Lazy expiry: treat expired handles as not-found (W6 will do full revert/sweep).
+        // ── Lazy expiry: if TTL has elapsed, revert challenger → Contested + ledger ──
+        // Do NOT apply the verdict on an expired handle. Revert atomically then return
+        // AdjudicationHandleNotFound so the caller knows the handle is no longer active.
         if let Some(expires_at) = row.expires_at {
             if expires_at <= now {
+                // Revert: write Contested ledger entry for the challenger, mark row expired.
+                let agent_id_exp: AgentId = row.agent_id.clone();
+                let challenger_ref_exp = row.challenger_claim_ref.clone();
+                let handle_id_exp = handle_id;
+
+                // Load ledger to verify challenger is still QueuedForAdjudication.
+                let ledger_check = self.persistence
+                    .load_ledger(&agent_id_exp, None, 10_000)
+                    .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+                let challenger_disp = latest_disposition_from_ledger(&ledger_check, &challenger_ref_exp);
+
+                if challenger_disp == Some(Disposition::QueuedForAdjudication) {
+                    // Write Contested ledger entry inside a transaction.
+                    let mut txn = self.persistence
+                        .begin_atomic(&agent_id_exp)
+                        .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+
+                    let expired_entry = mempill_types::LedgerEntry {
+                        entry_id: uuid::Uuid::new_v4(),
+                        agent_id: agent_id_exp.clone(),
+                        claim_ref: challenger_ref_exp.clone(),
+                        event_kind: LedgerEventKind::AdjudicationExpired,
+                        disposition: Disposition::Contested,
+                        rationale: Some(serde_json::json!({
+                            "event": "adjudication_ttl_expired_lazy",
+                            "handle_id": handle_id_exp.to_string(),
+                            "expired_at": expires_at.to_rfc3339(),
+                            "incumbent_claim_ref": row.incumbent_claim_ref.0.to_string(),
+                        })),
+                        recorded_at: tx_time.clone(),
+                    };
+
+                    match self.persistence.append_ledger_entry(&mut txn, &expired_entry) {
+                        Ok(()) => {
+                            if let Err(e) = self.persistence.commit(txn) {
+                                return Err(MemError::Persistence { source: Box::new(e) });
+                            }
+                            // Mark pending row expired outside txn (within write lock).
+                            let _ = self.pending_store.mark_expired_erased(handle_id_exp);
+                        }
+                        Err(e) => {
+                            let _ = self.persistence.rollback(txn);
+                            return Err(MemError::Persistence { source: Box::new(e) });
+                        }
+                    }
+                }
+
                 return Err(MemError::AdjudicationHandleNotFound { handle_id });
             }
         }
@@ -535,6 +584,19 @@ mod tests {
             }
             Ok(())
         }
+
+        fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), MockErr> {
+            for r in self.rows.lock().unwrap().iter_mut() {
+                if r.handle_id == handle_id {
+                    r.status = "expired".to_string();
+                }
+            }
+            Ok(())
+        }
+
+        fn list_queued_orphan_claims(&self) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, MockErr> {
+            Ok(vec![])
+        }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -649,6 +711,8 @@ mod tests {
                     fn list_pending(&self, a: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, MockErr> { self.0.list_pending(a) }
                     fn list_expired(&self, n: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, MockErr> { self.0.list_expired(n) }
                     fn mark_resolved(&self, h: uuid::Uuid) -> Result<(), MockErr> { self.0.mark_resolved(h) }
+                    fn mark_expired(&self, h: uuid::Uuid) -> Result<(), MockErr> { self.0.mark_expired(h) }
+                    fn list_queued_orphan_claims(&self) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, MockErr> { self.0.list_queued_orphan_claims() }
                 }
                 Delegate(Arc::clone(&pending))
             }));
