@@ -2,7 +2,8 @@
 
 **Temporally-correct AI-agent memory — append-only, bi-temporal, provenance-aware.**
 
-Status: 311 tests · Apache-2.0 · v0.3 (Rust + Python wheel + MCP adapter + PostgreSQL adapter)
+**0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 462 Rust + 65 Python tests, 0 warnings
+Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
 ---
 
@@ -55,17 +56,22 @@ Key properties:
 
 | Feature | Status | Notes |
 |---|---|---|
-| Rust core engine (8 deterministic components) | ✅ v0.1 | 290 Rust tests, 0 warnings |
-| SQLite persistence adapter (topology-a) | ✅ v0.1 | Embedded, file-per-agent, WAL + FULL sync |
-| Python PyO3 wheel (`mempill`) | ✅ v0.2 | maturin 1.14, PyO3 0.29, Python ≥ 3.11 |
-| MCP adapter (`mempill-mcp`) | ✅ v0.2 | FastMCP, 4 tools, stdio transport |
-| PostgreSQL adapter (topology-b) | ✅ v0.3 | sync postgres 0.19 + r2d2, PG 16 + 18 tested |
-| Cross-adapter conformance harness | ✅ v0.3 | SQLite and Postgres proven behaviorally identical |
+| Rust core engine (8 deterministic components, 12-state disposition model) | ✅ Shipped | Bi-temporal append-only claim store, deterministic adjudication gate |
+| SQLite persistence adapter (topology-a) | ✅ Shipped | Embedded, file-per-agent, WAL + FULL sync |
+| PostgreSQL adapter (topology-b) | ✅ Shipped | sync postgres 0.19 + r2d2; PG 16 + 18 tested; NoTls |
+| Cross-adapter conformance suite | ✅ Shipped | SQLite and PostgreSQL proven behaviorally identical |
+| Oracle resolution loop | ✅ Shipped | `submit_adjudication` (Affirm/Deny/Unknown) + engine-enforced TTL + orphan sweep; works on both adapters |
+| Valid-time succession | ✅ Shipped | Non-overlapping confident valid-time windows fold to the claim valid at the query instant |
+| Python PyO3 wheel (`mempill`) | ✅ Shipped | maturin 1.14, PyO3 0.29, Python ≥ 3.11; includes Python oracle bridge |
+| MCP adapter (`mempill-mcp`) | ✅ Shipped | FastMCP, 4 tools, stdio transport |
+| `mempill` facade crate | ✅ Shipped | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
 | Vector search / VectorPort | ⏳ Planned | Structural seam exists (NoOp); no vector retrieval yet |
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
-| PostgreSQL TLS | ⏳ v0.3.1 | Currently NoTls only (local/Docker) |
+| PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
 | Service tier (topology-c) | ⏳ Deferred | Multi-agent shared service; not in scope yet |
 | Published to crates.io / PyPI | ⏳ Planned | Not yet published; use path/git dependencies |
+
+The HITL reference oracle and console/LangGraph agent demos live in the separate `mempill-demo` repository.
 
 ---
 
@@ -117,16 +123,24 @@ The host supplies concrete implementations; the engine embeds none.
 
 ### Rust
 
-mempill is not yet published to crates.io. Add via path or git:
+mempill is not yet published to crates.io. Use the `mempill` facade crate via path or git:
 
 ```toml
 # Cargo.toml
 [dependencies]
+mempill = { path = "../mempill/mempill-facade" }           # SQLite (default)
+# or:
+mempill = { path = "../mempill/mempill-facade", features = ["postgres"] }
+```
+
+You can also depend on individual crates directly:
+
+```toml
 mempill-sqlite = { path = "../mempill/mempill-sqlite" }   # or git = "..."
 mempill-core   = { path = "../mempill/mempill-core" }
 ```
 
-For PostgreSQL topology-b:
+For PostgreSQL topology-b directly:
 
 ```toml
 mempill-postgres = { path = "../mempill/mempill-postgres" }
@@ -367,7 +381,7 @@ materialized as a single "current value" row.
   concurrency across multiple agents sharing one PostgreSQL database.
 - Schema managed by refinery migrations (V1 migration embedded at compile time).
 - Tested against PostgreSQL 16 and 18.4 via testcontainers.
-- Current limitation: NoTls only. Production TLS is planned for v0.3.1.
+- Current limitation: NoTls only. Production TLS is planned.
 - Choose PostgreSQL when: multi-agent deployment, shared database, production service.
 
 **Both adapters are proven behaviorally identical** by the shared `run_persistence_conformance`
@@ -422,12 +436,13 @@ adapters is a hard requirement.
 
 | Crate / package | Language | Role | Status |
 |---|---|---|---|
-| `mempill-types` | Rust | Domain types: `ProvenanceLabel`, `Disposition`, `Claim`, `LedgerEntry`, etc. | ✅ v0.1 |
-| `mempill-core` | Rust | All 8 engine components, port traits, use-cases, DTOs, `EngineHandle` | ✅ v0.1 |
-| `mempill-sqlite` | Rust | SQLite `PersistencePort` adapter; `DefaultEngine` alias + constructors | ✅ v0.1 |
-| `mempill-postgres` | Rust | PostgreSQL `PersistencePort` adapter; `PostgresEngine` alias | ✅ v0.3 |
-| `mempill-python` | Rust + Python | PyO3/maturin wheel (`mempill`); Python SDK with `Engine`, `Disposition`, `ProvenanceLabel` | ✅ v0.2 |
-| `mempill-mcp` | Python | FastMCP server; 4 tools; stdio transport; `MEMPILL_AGENT_ID` + `MEMPILL_DB_PATH` env contract | ✅ v0.2 |
+| `mempill-types` | Rust | Domain types: `ProvenanceLabel`, `Disposition`, `Claim`, `LedgerEntry`, etc. | ✅ Shipped |
+| `mempill-core` | Rust | All 8 engine components, port traits, use-cases, DTOs, `EngineHandle` | ✅ Shipped |
+| `mempill-sqlite` | Rust | SQLite `PersistencePort` adapter; `DefaultEngine` alias + constructors | ✅ Shipped |
+| `mempill-postgres` | Rust | PostgreSQL `PersistencePort` adapter; `PostgresEngine` alias | ✅ Shipped |
+| `mempill` (facade) | Rust | Thin re-export of core + adapters; `cargo add mempill` with `sqlite`/`postgres` features | ✅ Shipped |
+| `mempill-python` | Rust + Python | PyO3/maturin wheel (`mempill`); Python SDK with `Engine`, `Disposition`, `ProvenanceLabel` | ✅ Shipped |
+| `mempill-mcp` | Python | FastMCP server; 4 tools; stdio transport; `MEMPILL_AGENT_ID` + `MEMPILL_DB_PATH` env contract | ✅ Shipped |
 | `mempill-ts` | Rust | napi-rs TypeScript binding stub — **not yet implemented** | ⏳ Planned |
 
 ---

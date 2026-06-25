@@ -39,7 +39,7 @@ via `refinery::embed_migrations!("migrations")`. Applied automatically on `open_
 
 ## Current limitations
 
-- **NoTls only** — suitable for local/Docker development. Production TLS is planned for v0.3.1.
+- **NoTls only** — suitable for local/Docker development. Production TLS is planned.
 - Tested against PostgreSQL 16 (16.14) and PostgreSQL 18.4 via testcontainers.
 
 ## Integration tests
