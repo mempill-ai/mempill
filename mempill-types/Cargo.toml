@@ -3,7 +3,14 @@ name = "mempill-types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 readme = "README.md"
+description = "Shared domain types for the mempill bi-temporal AI-agent memory engine (ProvenanceLabel, Disposition, Claim, LedgerEntry, and more)"
+keywords = ["ai", "agent", "memory", "temporal", "llm"]
+categories = ["data-structures", "encoding"]
 
 [dependencies]
 chrono = { workspace = true }

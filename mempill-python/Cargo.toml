@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 readme = "README.md"
+publish = false
 
 [lib]
 name = "_mempill"
@@ -22,7 +23,7 @@ pythonize = "0.29"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "rt", "time", "macros"] }
 serde_json = "1"
 thiserror = "1"
-mempill-core = { path = "../mempill-core" }
-mempill-sqlite = { path = "../mempill-sqlite" }
-mempill-types = { path = "../mempill-types" }
+mempill-core   = { path = "../mempill-core",   version = "0.2.0" }
+mempill-sqlite = { path = "../mempill-sqlite", version = "0.2.0" }
+mempill-types  = { path = "../mempill-types",  version = "0.2.0" }
 uuid = { version = "1", features = ["v4"] }

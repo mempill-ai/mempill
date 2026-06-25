@@ -3,13 +3,20 @@ name = "mempill-sqlite"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 readme = "README.md"
+description = "SQLite persistence adapter for mempill — embedded, file-per-agent, WAL + FULL sync, zero external process required"
+keywords = ["ai", "agent", "memory", "sqlite", "temporal"]
+categories = ["database", "data-structures"]
 
 [dependencies]
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
-mempill-types = { path = "../mempill-types" }
-mempill-core = { path = "../mempill-core" }
+mempill-types = { path = "../mempill-types", version = "0.2.0" }
+mempill-core  = { path = "../mempill-core",  version = "0.2.0" }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -17,4 +24,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
-mempill-core = { path = "../mempill-core", features = ["test-support"] }
+mempill-core = { path = "../mempill-core", version = "0.2.0", features = ["test-support"] }

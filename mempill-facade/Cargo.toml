@@ -1,0 +1,26 @@
+[package]
+name = "mempill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Temporally-correct memory for AI agents — bi-temporal claim store with Contested-first conflict surfacing and oracle resolution (thin facade over mempill-core + adapters)"
+keywords = ["ai", "agent", "memory", "temporal", "llm"]
+categories = ["database", "data-structures"]
+
+[features]
+default = ["sqlite"]
+sqlite   = ["dep:mempill-sqlite"]
+postgres = ["dep:mempill-postgres"]
+
+[dependencies]
+mempill-core    = { path = "../mempill-core",    version = "0.2.0" }
+mempill-sqlite  = { path = "../mempill-sqlite",  version = "0.2.0", optional = true }
+mempill-postgres = { path = "../mempill-postgres", version = "0.2.0", optional = true }
+
+[package.metadata.docs.rs]
+all-features = true
