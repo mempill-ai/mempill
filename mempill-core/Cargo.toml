@@ -8,7 +8,7 @@ homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "Core engine (bi-temporal claim store, gateway, adjudication gate, oracle loop) for the mempill AI-agent memory system — all 8 deterministic components (C1–C8)"
+description = "Core engine for mempill — a bi-temporal, append-only claim store with a deterministic adjudication gate and oracle resolution for temporally-correct AI-agent memory"
 keywords = ["ai", "agent", "memory", "temporal", "llm"]
 categories = ["data-structures", "asynchronous"]
 
