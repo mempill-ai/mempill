@@ -23,6 +23,7 @@ use mempill_types::{
 };
 
 use crate::config::EngineConfig;
+use crate::engine::valid_time_helpers;
 
 /// Dispositions that make a claim non-live regardless of ValidityAssertions.
 /// Even without a Bound assertion, a claim with one of these dispositions
@@ -55,6 +56,10 @@ pub(crate) struct FoldResult {
     pub live_claims: Vec<ClaimWithStatus>,
     /// True when ≥ 2 live claims conflict on the same subject-line without resolution.
     pub has_conflict: bool,
+    /// True when valid-time instant-selection was applied: the live_claims set was narrowed
+    /// from a trusted succession to a single claim matching the query instant (TASK-11 §C).
+    /// When true, `has_conflict` is always false and `live_claims.len()` is 0 or 1.
+    pub succession_selected: bool,
 }
 
 /// A claim with its resolved live/bounded status at the fold's `as_of_tx_time`.
@@ -198,12 +203,46 @@ where
         .cloned()
         .collect();
 
-    // Step 4 — conflict detection (I7 Contested first-class).
+    // Step 4 — valid-time instant-selection for trusted successions (TASK-11 §C).
+    //
+    // If ALL live claims form a trusted succession (each has valid_time_confidence >= threshold,
+    // bounded start, and windows are pairwise non-overlapping), select the single claim whose
+    // half-open window [start, end) contains `as_of_tx_time`.
+    //
+    // Boundary semantics: start inclusive, end exclusive. Open end (None) = "until further notice".
+    // Gap (instant in no window) → empty live_claims → NoBelief.
+    //
+    // This fires BEFORE conflict detection (step 5) so that a true succession collapses
+    // to a single claim and never reaches has_conflict=true.
+    let (live_claims, succession_selected) = if live_claims.len() > 1 {
+        let live_claim_refs: Vec<&Claim> = live_claims.iter().map(|cs| &cs.claim).collect();
+        if valid_time_helpers::is_trusted_succession(&live_claim_refs, config.valid_time_confidence_threshold) {
+            // Select the single claim whose window contains as_of_tx_time.
+            let selected = valid_time_helpers::select_by_valid_time_instant(&live_claim_refs, as_of_tx_time);
+            // Extract the claim_ref before dropping live_claim_refs (which borrows live_claims).
+            let selected_ref = selected.map(|c| c.claim_ref().clone());
+            drop(live_claim_refs); // release borrow on live_claims
+            let narrowed: Vec<ClaimWithStatus> = match selected_ref {
+                Some(ref cref) => live_claims.into_iter()
+                    .filter(|cs| cs.claim.claim_ref() == cref)
+                    .collect(),
+                None => vec![], // gap → NoBelief
+            };
+            (narrowed, true)
+        } else {
+            (live_claims, false)
+        }
+    } else {
+        (live_claims, false)
+    };
+
+    // Step 5 — conflict detection (I7 Contested first-class).
     // Two live claims on the same subject-line with different values = conflict.
     // For Functional cardinality, any 2+ live claims = conflict.
     // For SetValued, conflict only when values are identical but a MutualExclusion edge exists
     // (edge-level conflict detection is deferred to the projection layer which has edge data).
     // Here we detect the structural conflict: 2+ live claims with the same cardinality = Functional.
+    // NOTE: if succession_selected=true, live_claims.len() is 0 or 1, so has_conflict=false always.
     let functional_live_count = live_claims
         .iter()
         .filter(|c| *c.claim.cardinality() == Cardinality::Functional)
@@ -219,7 +258,7 @@ where
         cs.is_live = live_claims.iter().any(|lc| lc.claim.claim_ref() == cs.claim.claim_ref());
     }
 
-    FoldResult { live_claims, has_conflict }
+    FoldResult { live_claims, has_conflict, succession_selected }
 }
 
 // ── Build a Belief from a ClaimWithStatus ────────────────────────────────────

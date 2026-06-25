@@ -26,6 +26,7 @@
 use mempill_types::{Belief, Cardinality, Claim};
 use crate::config::EngineConfig;
 use crate::engine::gate::{ConflictType, Proposal};
+use crate::engine::valid_time_helpers;
 
 /// Input to the reconciler for a single candidate claim.
 ///
@@ -41,6 +42,14 @@ use crate::engine::gate::{ConflictType, Proposal};
 ///
 /// `oracle_present` — whether the OraclePort has a registered listener (B11, A24).
 ///   Passed in from the engine wrapper; reconciler threads it into the Proposal for the gate.
+///
+/// `succession_threshold` — the `valid_time_confidence_threshold` from EngineConfig; used to
+///   determine whether the candidate + incumbent form a trusted temporal succession (TASK-11 §C).
+///
+/// `n_gt_1_live_incumbents` — true when the fold produced more than one live claim on this
+///   subject-line. Resolution #2: when N>1 live incumbents exist, succession check is SKIPPED
+///   (conservative: stay SameLineConflict). The single incumbent passed via `incumbent` is
+///   still the fold's FIRST live claim for backward-compat.
 #[derive(Debug)]
 pub(crate) struct ReconcilerInput<'a> {
     pub candidate: &'a Claim,
@@ -49,6 +58,10 @@ pub(crate) struct ReconcilerInput<'a> {
     pub measured_confidence: f32,
     pub cardinality_proposal: Cardinality,
     pub oracle_present: bool,
+    /// valid_time_confidence_threshold from EngineConfig for succession detection.
+    pub succession_threshold: f32,
+    /// True when fold returned N>1 live claims (succession check disabled per resolution #2).
+    pub n_gt_1_live_incumbents: bool,
 }
 
 /// Detect the conflict type between a candidate claim and the incumbent belief on the same
@@ -58,6 +71,8 @@ pub(crate) struct ReconcilerInput<'a> {
 /// 1. No incumbent → `NoConflict`.
 /// 2. Candidate's derived_from intersects superseded_claim_refs → `DependsOnSuperseded`.
 /// 3. Same (subject, predicate) as incumbent, different value → `SameLineConflict`.
+///    3a. If candidate + incumbent form a trusted temporal succession (non-overlapping windows,
+///        confidence >= threshold, N=1 live incumbent) → `Succession` instead.
 /// 4. Cross-predicate mutual exclusion (subject matches, predicate differs but facts are
 ///    mutually exclusive by declaration) → `CrossLineConflict`.
 ///    In v0.1: detected via the MutualExclusion edge kind; without edges we classify as
@@ -88,7 +103,9 @@ pub(crate) fn reconcile(input: ReconcilerInput<'_>, _config: &EngineConfig) -> P
 /// 1. No incumbent → NoConflict (first write).
 /// 2. derived_from intersects superseded_claim_refs → DependsOnSuperseded.
 /// 3. Same (subject, predicate) + same JSON value → NoConflict (idempotent re-statement).
-/// 4. Same (subject, predicate) + different value → SameLineConflict.
+/// 4. Same (subject, predicate) + different value:
+///    4a. Exactly ONE live incumbent + both windows trusted-non-overlapping → Succession.
+///    4b. Otherwise → SameLineConflict.
 /// 5. Different predicate (on same subject) with mutual exclusion → CrossLineConflict.
 /// 6. Different predicate without mutual exclusion → NoConflict.
 fn classify_conflict(input: &ReconcilerInput<'_>) -> ConflictType {
@@ -122,8 +139,29 @@ fn classify_conflict(input: &ReconcilerInput<'_>) -> ConflictType {
             // Step 3: identical value — idempotent re-statement, not a contradiction.
             ConflictType::NoConflict
         } else {
-            // Step 4: same line, different value → belief-overturning candidate.
-            ConflictType::SameLineConflict
+            // Step 4: same line, different value — check for trusted temporal succession.
+            //
+            // Resolution #2: only when there is exactly ONE live incumbent (the reconciler
+            // receives a single `incumbent: Option<&Belief>` from the fold's first live claim).
+            // If the fold produced N>1 live claims, the fold already set has_conflict=true
+            // and the gate/disposition is determined by the fold; the reconciler here sees
+            // only the FIRST live claim as incumbent. We conservatively skip the succession
+            // check when `n_live_incumbents > 1` (caller passes this as a flag).
+            let threshold = input.succession_threshold;
+            let cand_vt = input.candidate.valid_time();
+            let incumb_vt = &incumbent.valid_time;
+            let is_succession = !input.n_gt_1_live_incumbents
+                && valid_time_helpers::valid_time_is_trusted(cand_vt, threshold)
+                && valid_time_helpers::valid_time_is_trusted(incumb_vt, threshold)
+                && valid_time_helpers::valid_times_non_overlapping(cand_vt, incumb_vt);
+
+            if is_succession {
+                // Step 4a: clean temporal succession — NOT a conflict.
+                ConflictType::Succession
+            } else {
+                // Step 4b: same line, different value, no clean succession → overturning.
+                ConflictType::SameLineConflict
+            }
         }
     } else if cand_subject == incumb_subject && cand_predicate != incumb_predicate {
         // Step 5/6: different predicate on same subject.
@@ -236,6 +274,8 @@ mod tests {
             measured_confidence: 0.85,
             cardinality_proposal: Cardinality::Functional,
             oracle_present: oracle,
+            succession_threshold: 0.7,
+            n_gt_1_live_incumbents: false,
         }
     }
 
@@ -383,6 +423,8 @@ mod tests {
             measured_confidence: 0.73,
             cardinality_proposal: Cardinality::Functional,
             oracle_present: false,
+            succession_threshold: 0.7,
+            n_gt_1_live_incumbents: false,
         };
         let proposal = reconcile(inp, &cfg());
         assert!((proposal.measured_confidence - 0.73).abs() < f32::EPSILON,
@@ -407,6 +449,8 @@ mod tests {
             measured_confidence: 0.8,
             cardinality_proposal: Cardinality::SetValued,
             oracle_present: false,
+            succession_threshold: 0.7,
+            n_gt_1_live_incumbents: false,
         };
         let proposal = reconcile(inp, &cfg());
         assert_eq!(proposal.cardinality_proposal, Cardinality::SetValued);

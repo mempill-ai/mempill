@@ -158,6 +158,7 @@ where
             &self.config,
             &latest_disposition,
         );
+        let n_live_incumbents = fold_result.live_claims.len();
         let incumbent_belief = fold_result.live_claims.first().map(|cs| {
             truth_engine::claim_to_belief(cs)
         });
@@ -171,6 +172,8 @@ where
                 measured_confidence: req.confidence.value_confidence,
                 cardinality_proposal: req.cardinality.clone(),
                 oracle_present,
+                succession_threshold: self.config.valid_time_confidence_threshold,
+                n_gt_1_live_incumbents: n_live_incumbents > 1,
             },
             &self.config,
         );
