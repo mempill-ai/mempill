@@ -17,7 +17,7 @@ license = "Apache-2.0"
 repository = "https://github.com/mempill-ai/mempill"
 homepage = "https://github.com/mempill-ai/mempill"
 authors = ["The mempill authors"]
-rust-version = "1.82"
+rust-version = "1.88"
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
