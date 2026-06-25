@@ -1,18 +1,16 @@
-//! Per-agent_id async write lock (TECHNICAL_DESIGN.md §8, A22, DC-2, I9).
+//! Per-agent_id async write lock.
 //!
-//! INVARIANT (I9 + DC-2):
-//! "At most one writer holds write authority for a given agent_id at any time.
-//!  Two concurrent Tokio tasks MUST NOT hold write authority for the same agent_id."
+//! Enforces the single-writer-per-agent_id invariant at the async task layer:
+//! at most one Tokio task may hold write authority for a given agent_id at any time.
 //!
-//! Implementation notes (A22):
+//! Implementation:
 //! - Uses `tokio::sync::OwnedMutexGuard` obtained via `lock_owned()` — no unsafe.
 //! - `Arc<Mutex<()>>` per agent_id; map protected by `RwLock<HashMap<...>>`.
 //! - `clone()`-able: `EngineHandle` can be cloned and all clones share the same lock map.
 //!
-//! v0.1 scope: single-process embedded SQLite. The per-agent_id Tokio lock is
-//! defense-in-depth at the async task layer.
-//! v0.3 note: Postgres adapter adds `pg_try_advisory_lock(hashtext(agent_id))` as the
-//! cross-process enforcement layer. The in-process lock remains.
+//! For single-process embedded SQLite, this Tokio lock is the sole enforcement layer.
+//! The PostgreSQL adapter additionally uses `pg_try_advisory_lock(hashtext(agent_id))`
+//! for cross-process enforcement; the in-process lock remains in both cases.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,7 +41,7 @@ impl AgentWriteLockMap {
     /// task until the lock is released — tasks are never rejected, only serialized.
     ///
     /// Uses `lock_owned()` so the guard is `'static` — no lifetime coupling to the
-    /// map or any intermediate `Arc`. This is the A22-mandated safe implementation.
+    /// map or any intermediate `Arc`.
     pub async fn acquire(&self, agent_id: &AgentId) -> OwnedMutexGuard<()> {
         let lock = {
             let read = self.locks.read().await;
@@ -65,7 +63,7 @@ impl AgentWriteLockMap {
         };
 
         // `lock_owned()` returns an OwnedMutexGuard<()> tied to the Arc, not to
-        // any reference with a shorter lifetime — no unsafe required (A22).
+        // any reference with a shorter lifetime — no unsafe required.
         lock.lock_owned().await
     }
 }

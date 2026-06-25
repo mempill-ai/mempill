@@ -1,18 +1,18 @@
-//! `SqlitePersistenceStore` — impl of `PersistencePort` for mempill-sqlite (§4, §5, I1, I9).
+//! `SqlitePersistenceStore` — impl of `PersistencePort` for mempill-sqlite.
 //!
-//! # Append-only invariant (I1)
+//! # Append-only
 //!
 //! Every write method is an INSERT.  No UPDATE or DELETE paths exist in this file.
 //! Attempts to update or delete data must be rejected at the application layer.
 //!
-//! # Atomic commit unit (I9)
+//! # Atomic commit unit
 //!
-//! The store does NOT manage transaction lifecycle — the application use-case does (§4a).
+//! The store does NOT manage transaction lifecycle — the application use-case does.
 //! `begin_atomic` moves the connection into a `SqliteTxn`; `commit` and `rollback` return
 //! it.  This guarantees that {claim + validity assertion + ledger entry + edge} land in one
 //! SQLite transaction or not at all.
 //!
-//! # Single-writer (DC-2)
+//! # Single-writer per agent_id
 //!
 //! v0.1 is single-process embedded.  The `AgentWriteLockMap` in mempill-core coordinates
 //! per-agent_id writes at the async boundary.  The store is structurally read-safe because
@@ -467,7 +467,7 @@ impl PersistencePort for SqlitePersistenceStore {
     }
 
     /// Rollback the transaction and return the connection to the store.
-    /// On rollback all rows appended within the txn are discarded (I9).
+    /// On rollback all rows appended within the txn are discarded (all-or-nothing atomicity).
     fn rollback(&self, txn: SqliteTxn) -> Result<(), SqliteStoreError> {
         let conn = txn.rollback_and_return()?;
         let mut slot = self.conn.lock().expect("SqlitePersistenceStore: mutex poisoned");
@@ -482,7 +482,7 @@ impl PersistencePort for SqlitePersistenceStore {
     /// Column mapping (§5):
     /// - `claim_id` ← `claim.claim_ref().0` (UUID → TEXT)
     /// - `agent_id` ← `claim.agent_id().0`
-    /// - `provenance_label` ← `provenance_to_str(claim.provenance())` (NOT NULL, I2)
+    /// - `provenance_label` ← `provenance_to_str(claim.provenance())` (NOT NULL; bi-temporal provenance column)
     /// - `nearest_external_anchor_id` ← `ExternalAnchor.nearest_external_anchor` (nullable)
     /// - `derived_from` ← JSON array of ClaimRef UUIDs
     fn append_claim(
@@ -962,7 +962,7 @@ impl PersistencePort for SqlitePersistenceStore {
         Ok(edges)
     }
 
-    /// Load the set of ClaimRefs served as injected claims for this agent (C6, F3).
+    /// Load the set of ClaimRefs served as injected claims for this agent (used by the Amplification Guard).
     ///
     /// Scans `ledger_entries` for `event_kind = 'ServedAsInjected'` and returns
     /// the distinct set of claim IDs, ordered by recorded_at ASC.
@@ -1002,7 +1002,7 @@ impl PersistencePort for SqlitePersistenceStore {
         Ok(refs)
     }
 
-    /// Recursive CTE lineage traversal (DB_REQUIREMENTS §1, §5).
+    /// Recursive CTE lineage traversal.
     ///
     /// Traverses `DerivedFrom` edges upward (from `claim_ref` to its ancestors),
     /// returning all `ClaimEdge` rows in the lineage sub-graph, ordered by depth
@@ -1532,7 +1532,7 @@ mod tests {
         assert_eq!(count, 1, "claim row must exist after commit");
     }
 
-    /// Append a claim and verify all provenance columns are stored correctly (I2).
+    /// Append a claim and verify all provenance columns are stored correctly.
     #[test]
     fn write_round_trip_provenance_not_null() {
         let store = make_store();
@@ -1571,10 +1571,10 @@ mod tests {
         assert!(!tx_time.is_empty(), "tx_time must be non-NULL");
     }
 
-    // ── ATOMICITY (I9) ────────────────────────────────────────────────────────
+    // ── ATOMICITY ─────────────────────────────────────────────────────────────
 
     /// Begin a Txn, append {claim + validity assertion + ledger entry}, force rollback.
-    /// All three rows must be absent after rollback — all-or-nothing (I9).
+    /// All three rows must be absent after rollback — all-or-nothing atomicity.
     #[test]
     fn atomicity_rollback_leaves_zero_rows() {
         let store = make_store();

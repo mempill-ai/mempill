@@ -1,12 +1,14 @@
-//! ExtractorPort — stochastic proposer port (SDK_CONTRACT §7, I5, A16).
+//! ExtractorPort — stochastic proposer port.
 //!
-//! Host-implemented. `extract()` returns PROPOSALS only.
+//! Host-implemented. `extract()` returns proposals only.
 //! The deterministic core decides all dispositions — the extractor never commits.
 
 use mempill_types::ClaimProposal;
 
-/// Stochastic extractor port (SDK_CONTRACT §7, I5, A16). Host-implemented.
-/// `extract()` returns PROPOSALS. The deterministic core decides all dispositions.
+/// Stochastic extractor port. Host-implemented.
+///
+/// `extract()` returns proposals; the deterministic core (reconciler + adjudication gate)
+/// decides all dispositions. No stochastic output can commit directly.
 pub trait ExtractorPort: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 

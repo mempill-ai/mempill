@@ -1,10 +1,14 @@
-//! LedgerEntry: append-only audit record for every state transition (C8, SDK_CONTRACT §8).
+//! LedgerEntry: append-only audit record for every state transition.
+//!
+//! The audit ledger is maintained by the AuditLedger component. Every `ingest_claim`
+//! call produces at least one ledger entry. Entries are queryable by `agent_id`,
+//! `claim_ref`, and transaction-time range via `query_audit`.
 
 use crate::disposition::Disposition;
 use crate::identity::{AgentId, ClaimRef};
 use crate::time::TransactionTime;
 
-/// Immutable audit record appended on every disposition event (C8).
+/// Immutable audit record appended on every disposition event by the AuditLedger.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LedgerEntry {
     pub entry_id: uuid::Uuid,
@@ -12,7 +16,7 @@ pub struct LedgerEntry {
     pub claim_ref: ClaimRef,
     pub event_kind: LedgerEventKind,
     pub disposition: Disposition,
-    /// Rationale and measured estimators from C7 (for G1 replay audit).
+    /// Rationale and measured estimators from the adjudication gate (for replay audit).
     pub rationale: Option<serde_json::Value>,
     /// Engine-stamped.
     pub recorded_at: TransactionTime,
@@ -27,9 +31,9 @@ pub enum LedgerEventKind {
     AdjudicationResolved,
     RecallReEntryDetected,
     Quarantined,
-    /// A dependent claim was flagged PendingReview because its parent was superseded (A26).
+    /// A dependent claim was flagged PendingReview because its parent was superseded.
     DependentFlaggedPendingReview,
-    /// Claim was served as a query result — recorded so C6 can detect later recall re-entry (A23, F3).
+    /// Claim was served as a query result — recorded so the Amplification Guard can detect later recall re-entry.
     ServedAsInjected,
     /// Adjudication TTL elapsed — challenger reverted to Contested (W6 sweep / lazy expiry).
     AdjudicationExpired,

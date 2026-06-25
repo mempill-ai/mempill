@@ -1,4 +1,4 @@
-//! Shared persistence conformance harness (A43).
+//! Shared persistence conformance harness.
 //!
 //! `run_persistence_conformance` exercises every `PersistencePort` method
 //! and panics on any deviation from the expected contract.
@@ -238,7 +238,7 @@ where
     assert_eq!(edges[0].edge_id, edge.edge_id, "conformance[t2]: edge_id must match");
 }
 
-/// rollback leaves ZERO rows across all 4 tables (I9).
+/// rollback leaves ZERO rows across all 4 tables (atomicity guarantee).
 #[cfg(any(test, feature = "test-support"))]
 fn test_rollback_leaves_zero_rows<P>(store: &P)
 where

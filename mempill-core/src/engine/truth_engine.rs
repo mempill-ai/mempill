@@ -1,18 +1,18 @@
-//! C2 — Canonical Valid-Time Fold (TECHNICAL_DESIGN.md §9, §10 I8, A3, A11).
+//! TruthEngine — canonical valid-time fold.
 //!
 //! This module is PURE given its inputs — no I/O, no system clock.
-//! All time parameters must be injected by the caller.
+//! All time parameters are injected by the caller.
 //!
-//! ## Ordering-key rule (Section 9, B2, F4):
+//! ## Ordering-key rule:
 //! - If `valid_time_confidence >= config.valid_time_confidence_threshold`:
 //!     ordering key = valid_time_start (authoritative)
 //! - Else:
 //!     ordering key = transaction_time (fallback)
 //!
 //! ## Fold invariants:
-//! - I8: read-time-canonical — same stored claims → same belief, arrival-order independent.
-//! - I10: fixed-history monotonicity — belief is monotone over a fixed history.
-//! - I3: belief is derived, never stored — callers always re-fold at query time.
+//! - Read-time-canonical: same stored claims → same belief, arrival-order independent.
+//! - Fixed-history monotonicity: belief is monotone over a fixed history.
+//! - Belief is derived, never stored — callers always re-fold at query time.
 
 use std::collections::HashMap;
 
@@ -46,7 +46,7 @@ fn is_non_live_disposition(d: &Disposition) -> bool {
 /// any validity assertion, or reopened after bounding, under the canonical evaluation).
 /// They are ordered by the canonical ordering key (valid_time or tx_time, depending on confidence).
 ///
-/// `all_claims` = the full set of claims passed in (for history; I10 monotonicity audit).
+/// `all_claims` = the full set of claims passed in (retained for history; supports fixed-history monotonicity audit).
 ///
 /// `conflict` = true when two or more live claims have overlapping validity windows and
 /// conflicting values, signalling a Contested / Conflict state to projection.rs.
@@ -75,14 +75,15 @@ pub(crate) struct ClaimWithStatus {
 // ── Ordering key ──────────────────────────────────────────────────────────────
 
 /// Ordering key for the canonical fold.
-/// Implements I8: deterministic total order that is arrival-order independent.
+///
+/// Produces a deterministic total order that is arrival-order independent.
 ///
 /// When valid_time_confidence >= threshold → use valid_time_start (authoritative).
 /// When below threshold, or when valid_time_start is None → fall back to tx_time.
 ///
 /// The secondary tie-breaker is always tx_time (engine-stamped, unique in practice).
 /// The tertiary tie-breaker is the ClaimRef UUID to guarantee total order even with
-/// equal timestamps (I8 determinism requirement).
+/// equal timestamps.
 /// Returns `(primary_key, tx_time_fallback, uuid_tiebreaker)` for deterministic total order.
 fn ordering_key(claim: &Claim, config: &EngineConfig) -> (DateTime<Utc>, DateTime<Utc>, u128) {
     let primary = if claim.valid_time().valid_time_confidence >= config.valid_time_confidence_threshold {
@@ -98,7 +99,7 @@ fn ordering_key(claim: &Claim, config: &EngineConfig) -> (DateTime<Utc>, DateTim
 /// Evaluate whether a claim is live at `as_of_tx_time` given the full set of
 /// validity assertions for that claim.
 ///
-/// Rules (I1 — non-destructive; I10 — monotone):
+/// Rules (non-destructive: no deletes; fixed-history monotone: liveness is monotone for fixed history):
 ///   - A `Bound` assertion with `bound_at <= as_of_tx_time` closes the claim (not live).
 ///   - A subsequent `Reopen` with `reopen_at <= as_of_tx_time` re-opens it.
 ///   - Assertions are processed in chronological order of their `asserted_at` timestamp.
@@ -139,7 +140,7 @@ pub(crate) fn is_claim_live(
 
 // ── Canonical fold ────────────────────────────────────────────────────────────
 
-/// C2 canonical valid-time fold.
+/// Canonical valid-time fold.
 ///
 /// PURE: all inputs passed in; no I/O; no system clock calls.
 ///
@@ -264,7 +265,7 @@ where
 // ── Build a Belief from a ClaimWithStatus ────────────────────────────────────
 
 /// Convert a live `ClaimWithStatus` into a `Belief` value type.
-/// Currency decay is NOT computed here — that is projection.rs (C5) responsibility.
+/// Currency decay is NOT computed here — that is the Projection component's responsibility.
 /// The `last_refreshed_at` is set to the claim's transaction_time as the baseline;
 /// projection.rs will compute the actual decay state using `now`.
 pub(crate) fn claim_to_belief(cs: &ClaimWithStatus) -> Belief {
@@ -285,7 +286,7 @@ pub(crate) fn claim_to_belief(cs: &ClaimWithStatus) -> Belief {
 }
 
 /// Derive the `BeliefStatus` for a fold result.
-/// `has_pending_review` is passed in from the projection layer (A26).
+/// `has_pending_review` is passed in from the projection layer.
 pub(crate) fn fold_status(
     fold: &FoldResult,
     has_pending_review: bool,
@@ -528,7 +529,7 @@ mod tests {
         assert!(!result.has_conflict, "no conflict when only one live claim remains");
     }
 
-    /// Incumbent retained in history (I1 non-destruction) — not deleted, just not live.
+    /// Incumbent retained in history (non-destruction: writes are INSERT-only) — not deleted, just not live.
     #[test]
     fn supersession_fold_incumbent_retained_in_history() {
         let config = EngineConfig::default();

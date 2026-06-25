@@ -1,11 +1,14 @@
-//! Claim and associated value objects: the atomic committed assertion (SDK_CONTRACT §1.2).
-//! Claim is write-once (I1, I4) — private fields with constructor and getters only.
+//! Claim and associated value objects: the atomic committed assertion.
+//!
+//! A `Claim` is write-once — private fields with a constructor and read-only getters only.
+//! This enforces at compile time that claims are immutable after commitment (non-destruction
+//! invariant: writes are INSERT-only, provenance is immutable).
 
 use crate::identity::{AgentId, ClaimRef};
 use crate::provenance::{ExternalAnchor, ProvenanceLabel};
 use crate::time::{TransactionTime, ValidTime};
 
-/// The atomic asserted statement (SDK_CONTRACT §1.2).
+/// The atomic asserted statement: a (subject, predicate, value) triple.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Fact {
     pub subject: String,
@@ -13,9 +16,10 @@ pub struct Fact {
     pub value: serde_json::Value,
 }
 
-/// Cardinality proposal (SDK_CONTRACT §1.2, V3-3).
-/// `Unknown` is the default — routes to non-destructive branch + oracle surfacing.
-/// Classification is always a proposal (I5); the gate decides.
+/// Cardinality of the (subject, predicate) subject-line — always a caller proposal; the gate decides.
+///
+/// `Unknown` is the default and routes to the non-destructive branch. The engine treats the
+/// caller's cardinality hint as advisory: if evidence is insufficient, it surfaces to the oracle.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Cardinality {
     /// At most one value is valid at a time. Bounding a new value supersedes prior.
@@ -27,7 +31,7 @@ pub enum Cardinality {
     Unknown,
 }
 
-/// Two separate confidence scores (SDK_CONTRACT §1.4, B2).
+/// Two separate confidence scores: one for the value itself, one for the valid-time extraction.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Confidence {
     /// Confidence in the value itself (0.0–1.0).
@@ -36,7 +40,7 @@ pub struct Confidence {
     pub valid_time_confidence: f32,
 }
 
-/// Criticality class — distinct from currency (V3-7).
+/// Criticality class — reflects the importance of the claim, distinct from its freshness (currency).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Criticality {
     Low,
@@ -46,9 +50,12 @@ pub enum Criticality {
     Critical,
 }
 
-/// A committed claim — write-once, immutable after append (I1, I4).
-/// All fields set at injection time via `Claim::new`; no field may be mutated after commit.
-/// Fields are private to enforce the write-once invariant at compile time.
+/// A committed claim — write-once and immutable after it is appended to the store.
+///
+/// All fields are set at injection time via `Claim::new`; no field may be mutated after commit.
+/// Fields are private to enforce the write-once invariant at compile time:
+/// non-destruction (all writes are INSERT-only) and provenance immutability are both
+/// upheld by the absence of setters.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claim {
     claim_ref: ClaimRef,

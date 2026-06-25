@@ -1,4 +1,4 @@
-//! AuditUseCase — read-only ledger query (§4a, A28, C8).
+//! AuditUseCase — read-only ledger query.
 //!
 //! Delegates to `engine::audit_ledger::query_ledger`. No Txn opened (read path).
 
@@ -30,7 +30,7 @@ where
         Self { persistence }
     }
 
-    /// Read-only. Loads ledger entries via C8/audit_ledger. No Txn needed.
+    /// Read-only. Loads ledger entries via the audit ledger. No transaction needed.
     pub fn execute(&self, req: AuditQueryRequest) -> Result<AuditQueryResponse, MemError> {
         // Map from_tx_time DateTime<Utc> → TransactionTime (for the port).
         let from_tx_time = req.from_tx_time.map(TransactionTime);

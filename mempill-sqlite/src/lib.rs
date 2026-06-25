@@ -10,7 +10,7 @@
 //!   PRAGMAs (`journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`), run migrations.
 //! - [`migrations`] — deterministic, idempotent schema migration runner; embeds DDL via
 //!   `include_str!`.
-//! - [`txn`] — [`SqliteTxn`]: the concrete `Txn` handle scoped to one `agent_id` (I9).
+//! - [`txn`] — `SqliteTxn`: the concrete `Txn` handle scoped to one `agent_id`.
 //! - [`store`] — [`SqlitePersistenceStore`]: `impl PersistencePort` — full read + write path.
 //! - [`DefaultEngine`] — convenience type alias + constructors for the most common setup.
 //!
@@ -18,7 +18,7 @@
 //!
 //! ```sql
 //! PRAGMA journal_mode = WAL;     -- concurrent reads during writes
-//! PRAGMA synchronous  = FULL;    -- full-durability writes (DC-D, CONSTRAINTS.md §D)
+//! PRAGMA synchronous  = FULL;    -- full-durability writes (mandatory; WAL+NORMAL can lose writes on power loss)
 //! PRAGMA foreign_keys = ON;      -- enforce FK constraints defined in DDL
 //! ```
 //!
@@ -198,8 +198,8 @@ mod tests {
 
     /// E2E smoke test: ingest a claim then query it back.
     ///
-    /// This is the first real end-to-end proof: full write path (C1→C6→C3→C7 + I9 Txn)
-    /// followed by the full read path (C2→C5 projection). No mocks.
+    /// End-to-end: full write path (Gateway → AmplificationGuard → Reconciler → AdjudicationGate,
+    /// atomic transaction) followed by the full read path (TruthEngine fold → Projection). No mocks.
     #[tokio::test]
     async fn e2e_ingest_then_query_returns_belief() {
         let engine = open_default_in_memory().expect("in-memory engine must open");

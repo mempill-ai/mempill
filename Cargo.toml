@@ -6,13 +6,18 @@ members = [
     "mempill-postgres",
     "mempill-python",
     "mempill-ts",
+    "mempill-facade",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/mempill-ai/mempill"
+homepage = "https://github.com/mempill-ai/mempill"
+authors = ["The mempill authors"]
+rust-version = "1.82"
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -23,4 +28,5 @@ thiserror = "1"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
 futures = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
-mempill-types = { path = "mempill-types" }
+mempill-types = { path = "mempill-types", version = "0.2.0" }
+mempill-core  = { path = "mempill-core",  version = "0.2.0" }

@@ -3,11 +3,18 @@ name = "mempill-postgres"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 readme = "README.md"
+description = "PostgreSQL persistence adapter for mempill — shared-DB topology, r2d2 pool, per-agent advisory locking, OCC, refinery migrations (NoTls; TLS planned)"
+keywords = ["ai", "agent", "memory", "postgres", "temporal"]
+categories = ["database", "data-structures"]
 
 [dependencies]
-mempill-core  = { path = "../mempill-core" }
-mempill-types = { path = "../mempill-types" }
+mempill-core  = { path = "../mempill-core",  version = "0.2.0" }
+mempill-types = { path = "../mempill-types", version = "0.2.0" }
 postgres      = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4"] }
 r2d2          = "0.8"
 r2d2_postgres = "0.18"
@@ -19,5 +26,5 @@ thiserror     = { workspace = true }
 
 [dev-dependencies]
 testcontainers-modules = { version = "0.15", features = ["postgres", "blocking"] }
-mempill-core = { path = "../mempill-core", features = ["test-support"] }
+mempill-core = { path = "../mempill-core", version = "0.2.0", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "macros"] }

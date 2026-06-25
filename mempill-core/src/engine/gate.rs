@@ -1,8 +1,7 @@
-//! C7 — Adjudication Gate (TECHNICAL_DESIGN.md §6, A6, A24, A25).
+//! Adjudication Gate — the deterministic pure function at the stochastic/deterministic boundary.
 //!
-//! The deterministic pure function at the stochastic/deterministic boundary.
-//! INVARIANT (G1): same `Proposal` + same `EngineConfig` → byte-identical `GateDecision`.
-//! No system clock reads, no RNG, no I/O, no HashMap iteration-order dependence inside
+//! Replay-audit invariant: same `Proposal` + same `EngineConfig` → byte-identical `GateDecision`.
+//! No system clock reads, no RNG, no I/O, no `HashMap` iteration-order dependence inside
 //! `adjudicate()`. All timestamps enter via the `Proposal`; none are sampled here.
 
 use mempill_types::{Cardinality, Claim, Disposition, ProvenanceLabel};
@@ -11,26 +10,26 @@ use crate::config::EngineConfig;
 /// The LLM-emitted proposal. Crosses the stochastic/deterministic boundary.
 /// The gate consumes this; nothing downstream re-calls the LLM.
 ///
-/// `oracle_present` (A24): lives HERE in gate.rs — never in mempill-types.
-/// When false and evidence is fresh first-hand external, Contested fires immediately (B11).
+/// `oracle_present` lives here in the gate, never in `mempill-types`.
+/// When false and evidence is fresh first-hand external, `Contested` fires immediately.
 #[derive(Debug, Clone)]
 pub(crate) struct Proposal {
-    /// The candidate claim, already stamped by C1 (gateway.rs).
+    /// The candidate claim, already stamped by the ingestion gateway.
     pub candidate: Claim,
     /// None = no active belief on this subject-line (first write).
     pub incumbent: Option<mempill_types::Belief>,
     pub conflict_type: ConflictType,
-    /// C3-measured disposition confidence (stochastic input; recorded to ledger).
+    /// Reconciler-measured disposition confidence (stochastic input; recorded to ledger).
     pub measured_confidence: f32,
     pub cardinality_proposal: Cardinality,
-    /// Whether the OraclePort has a registered listener at decision time (B11, V3-5, A24).
+    /// Whether the `OraclePort` has a registered listener at decision time.
     /// Passed in from the engine wrapper so `adjudicate()` remains a pure function.
-    /// When false + fresh first-hand external contradiction: Contested fires immediately.
-    /// When true: route to QueuedForAdjudication (oracle receives AdjudicationRequest).
+    /// When false + fresh first-hand external contradiction: `Contested` fires immediately.
+    /// When true: route to `QueuedForAdjudication` (oracle receives `AdjudicationRequest`).
     pub oracle_present: bool,
 }
 
-/// Conflict classification emitted by C3 (reconciler) and consumed by C7 (gate).
+/// Conflict classification emitted by the Reconciler and consumed by the adjudication gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConflictType {
     /// New non-conflicting claim — no existing belief on this subject-line.
@@ -39,7 +38,7 @@ pub(crate) enum ConflictType {
     SameLineConflict,
     /// Mutual-exclusion or entailment across predicates.
     CrossLineConflict,
-    /// Parent was superseded; dependent needs review (V3-8).
+    /// Parent was superseded; dependent needs review.
     DependsOnSuperseded,
     /// Clean temporal succession: candidate and incumbent have NON-OVERLAPPING trusted
     /// valid-time windows. Routes to CheapPath / CommittedCheap (NOT Contested).
@@ -47,9 +46,9 @@ pub(crate) enum ConflictType {
     Succession,
 }
 
-/// Gate decision — deterministic function of Proposal + EngineConfig.
-/// PURE: same input → same GateDecision. The LLM is not re-called here.
-/// All inputs and the output are recorded to the ledger for G1 replay audit.
+/// Gate decision — deterministic function of `Proposal` + `EngineConfig`.
+/// PURE: same input → same `GateDecision`. The LLM is not re-called here.
+/// All inputs and the output are recorded to the ledger for replay audit.
 #[derive(Debug, Clone)]
 pub(crate) struct GateDecision {
     pub route: Route,
@@ -63,7 +62,7 @@ pub(crate) struct GateDecision {
 pub(crate) enum Route {
     /// Non-conflicting External(*) → CommittedCheap.
     CheapPath,
-    /// ModelDerived → CommittedInferred (down-weighted, V3-4).
+    /// ModelDerived → CommittedInferred (down-weighted; cannot overturn until anchored to first-hand external).
     InferredRoute,
     /// RecallReEntry → corroborate-by-identity; no new claim.
     RecallTainted,
@@ -73,18 +72,18 @@ pub(crate) enum Route {
     Quarantine,
 }
 
-/// Deterministic gate decision function (TECHNICAL_DESIGN.md §6).
+/// Deterministic adjudication gate function.
 ///
 /// PURE FUNCTION — no side effects, no I/O, no clock reads.
-/// Corroboration is a CONFIDENCE MODIFIER only — it adjusts confidence logged to rationale
-/// but does NOT by itself flip the route or disposition (F2, A6).
+/// Corroboration is a confidence modifier only — it adjusts confidence logged to rationale
+/// but does NOT by itself flip the route or disposition.
 ///
 /// Decision order (execute in this order; return on first match):
-/// 1. RecallReEntry  → RecallTainted / CommittedCheap
-/// 2. Temporal coherence check (B7, A25) → Quarantine if incoherent
-/// 3. ModelDerived   → InferredRoute / CommittedInferred
+/// 1. RecallReEntry    → RecallTainted / CommittedCheap
+/// 2. Temporal coherence check → Quarantine if incoherent
+/// 3. ModelDerived     → InferredRoute / CommittedInferred
 /// 4. No conflict or no incumbent → CheapPath / CommittedCheap
-/// 5. Heavy path with B11 oracle-absent branching
+/// 5. Heavy path with oracle-absent branching
 pub(crate) fn adjudicate(proposal: &Proposal, config: &EngineConfig) -> GateDecision {
     // Step 1: RecallReEntry — corroborate-by-identity; no new claim.
     if proposal.candidate.provenance().is_recall_reentry() {
@@ -188,17 +187,16 @@ pub(crate) fn adjudicate(proposal: &Proposal, config: &EngineConfig) -> GateDeci
     }
 }
 
-/// Temporal coherence check (B7, A25, F4).
+/// Temporal coherence check.
 ///
 /// Returns `true` iff the claim's valid_time window is incoherent AND
 /// `valid_time_confidence` is at or above the threshold (below threshold → treat
 /// as unknown; not incoherent, just uncertain).
 ///
-/// Two incoherence conditions (A25):
+/// Two incoherence conditions:
 /// 1. `valid_time_start > valid_time_end` — physically impossible window.
 /// 2. `valid_time_start > tx_time`        — a fact dated as valid AFTER it was learned.
-///    ("valid-start AFTER it was learned" — closes the case where an extractor assigns
-///     a future valid-start to a past fact.)
+///    (Closes the case where an extractor assigns a future valid-start to a past fact.)
 fn is_temporally_incoherent(claim: &Claim, config: &EngineConfig) -> bool {
     if claim.valid_time().valid_time_confidence < config.valid_time_confidence_threshold {
         return false; // low confidence → treat as unknown; not incoherent
@@ -1004,7 +1002,7 @@ mod adversarial {
 
     /// Attack: UserAsserted (also External(*)) + SameLineConflict + oracle absent.
     /// Both ExternalFirstHand AND UserAsserted are cheap-path eligible.
-    /// B11(a) must fire for UserAsserted too.
+    /// The oracle-absent contradiction path must fire for UserAsserted too.
     #[test]
     fn p3_user_asserted_same_line_oracle_absent_routes_to_contested() {
         let tx = tx_at(2026, 6, 1);
@@ -1025,7 +1023,7 @@ mod adversarial {
     }
 
     /// Attack: UserAsserted + CrossLineConflict + oracle absent.
-    /// B11(a) covers both SameLine and CrossLine per §6.
+    /// The oracle-absent contradiction path covers both SameLine and CrossLine conflicts.
     #[test]
     fn p3_user_asserted_cross_line_oracle_absent_routes_to_contested() {
         let tx = tx_at(2026, 6, 1);
@@ -1045,9 +1043,9 @@ mod adversarial {
     }
 
     /// Attack: DependsOnSuperseded conflict + fresh External + oracle ABSENT.
-    /// DependsOnSuperseded is NOT a "contradiction" in the B11(a) sense — it is a
-    /// "dependent needs review" case. The gate should route to QueuedForAdjudication,
-    /// NOT Contested. This verifies B11(a) does not over-fire.
+    /// DependsOnSuperseded is NOT a "contradiction" — it is a "dependent needs review" case.
+    /// The gate should route to QueuedForAdjudication, NOT Contested.
+    /// This verifies the oracle-absent contradiction path does not over-fire.
     #[test]
     fn p3_depends_on_superseded_oracle_absent_routes_to_queued_not_contested() {
         let tx = tx_at(2026, 6, 1);
@@ -1120,7 +1118,7 @@ mod adversarial {
 
     /// Attack: ModelDerived + SameLineConflict + oracle absent.
     /// ModelDerived is caught at Step 3, BEFORE Step 5 (heavy path).
-    /// B11 must NOT fire — ModelDerived routes to InferredRoute regardless.
+    /// ModelDerived routes to InferredRoute at Step 3, before the oracle-absent contradiction path.
     #[test]
     fn p3_model_derived_conflict_oracle_absent_routes_to_inferred_not_contested() {
         let claim = model_claim();

@@ -1,6 +1,6 @@
-//! `SqliteTxn` — the concrete transaction handle wrapping a rusqlite connection (I9, §4).
+//! `SqliteTxn` — the concrete transaction handle wrapping a rusqlite connection.
 //!
-//! # Design (A18 — explicit transaction control)
+//! # Design (explicit transaction control)
 //!
 //! rusqlite's `Transaction<'conn>` is lifetime-bound to `&mut Connection`, which conflicts
 //! with the `Txn: Send + 'static` bound required by the port trait (§4) and `spawn_blocking`.
@@ -15,7 +15,7 @@
 //! with an explicit `BEGIN`/`COMMIT`/`ROLLBACK` sequence rather than rusqlite's
 //! `Transaction` type.  This is the approach taken here.
 //!
-//! # DC-2 — single-writer per agent_id
+//! # Single-writer per agent_id
 //!
 //! v0.1 is single-process embedded. The `AgentWriteLockMap` in mempill-core coordinates
 //! writes per agent_id at the async boundary. The store itself assumes a single writer per
@@ -27,7 +27,7 @@ use rusqlite::Connection;
 
 use crate::SqliteStoreError;
 
-/// An open, uncommitted SQLite transaction scoped to one `agent_id` (I9, DC-2).
+/// An open, uncommitted SQLite transaction scoped to one `agent_id`.
 ///
 /// Created by `SqlitePersistenceStore::begin_atomic`; consumed by `commit` or `rollback`.
 /// Owns the `Connection` for the lifetime of the transaction — the store re-acquires it

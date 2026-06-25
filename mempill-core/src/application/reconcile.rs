@@ -1,7 +1,7 @@
-//! ReconcileUseCase — contradiction detection pass over a set of subject-lines (§4a, A28, I9).
+//! ReconcileUseCase — contradiction detection pass over a set of subject-lines.
 //!
-//! Orchestrates C3 (reconciler) + C7 (gate) + optional C4 (supersession) for each claim
-//! in the requested subject-lines. Owns its own Txn (I9).
+//! Orchestrates the Reconciler, AdjudicationGate, and optionally Supersession for each claim
+//! in the requested subject-lines within a single atomic transaction.
 
 use std::sync::Arc;
 

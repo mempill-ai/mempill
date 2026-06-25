@@ -1,24 +1,24 @@
-//! C6 — Write-Path Amplification Guard (TECHNICAL_DESIGN.md §7, I6, OP-1).
+//! Write-Path Amplification Guard.
 //!
 //! CONTAINMENT + SURFACING mechanism — NOT a correctness mechanism.
 //!
 //! Three responsibilities:
-//!   1. Detect recall re-entry by provenance tag (I4: ProvenanceLabel::RecallReEntry set by C1).
-//!   2. Corroborate-by-identity: return existing ClaimRef, emit NO new claim row.
+//!   1. Detect recall re-entry by provenance tag (`ProvenanceLabel::RecallReEntry`).
+//!   2. Corroborate-by-identity: return existing `ClaimRef`, emit NO new claim row.
 //!   3. Detect burst/loop signatures → Quarantine.
 //!
-//! ACID TEST — mem0 #4573 (808-copy amplification defence):
-//!   808 semantically-identical RecallReEntry re-entries of the same content MUST collapse
-//!   to ONE underlying claim. The check() function returns CorroborateByIdentity for all
-//!   808 candidates; the caller never inserts a new Claim row.
+//! Amplification defence:
+//!   N semantically-identical `RecallReEntry` re-entries of the same content MUST collapse
+//!   to ONE underlying claim. `check()` returns `CorroborateByIdentity` for all candidates;
+//!   the caller never inserts a new Claim row.
 //!
-//! OP-1 — Provenance laundering depth cap:
-//!   RecallReEntry candidates whose derivation_depth exceeds
-//!   config.derivation_depth_cap_for_overturning cannot overturn incumbent beliefs.
-//!   check() enforces this via the DepthCapExceeded verdict.
+//! Provenance laundering depth cap:
+//!   `RecallReEntry` candidates whose `derivation_depth` exceeds
+//!   `config.derivation_depth_cap_for_overturning` cannot overturn incumbent beliefs.
+//!   `check()` enforces this via the `DepthCapExceeded` verdict.
 //!
-//! PURE / DETERMINISTIC: no clock reads, no RNG, no I/O inside check().
-//! Given the same inputs and the same EngineConfig, check() returns byte-identical output.
+//! PURE / DETERMINISTIC: no clock reads, no RNG, no I/O inside `check()`.
+//! Given the same inputs and the same `EngineConfig`, `check()` returns byte-identical output.
 
 use std::sync::Arc;
 use mempill_types::{Claim, ClaimRef};
@@ -29,15 +29,15 @@ use crate::config::EngineConfig;
 /// Callers act on the verdict WITHOUT writing a new Claim row for any variant except Admit.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FirewallVerdict {
-    /// Claim passes the firewall — forward to reconciler (C3).
+    /// Claim passes the guard — forward to the reconciler.
     Admit,
     /// RecallReEntry detected: corroborate the existing claim by identity.
     /// The caller increments the existing claim's corroboration annotation (if provenance_independent)
-    /// but MUST NOT insert a new Claim row (I6 idempotency).
+    /// but MUST NOT insert a new Claim row (idempotent append: recall re-entry never duplicates).
     CorroborateByIdentity {
         /// The existing ClaimRef this candidate re-entails.
         existing_claim: ClaimRef,
-        /// Whether this corroboration counts as provenance-independent (V3-7).
+        /// Whether this corroboration counts as provenance-independent.
         /// Always `false` for RecallReEntry: same engine = NOT provenance-independent.
         provenance_independent: bool,
     },
@@ -46,7 +46,7 @@ pub(crate) enum FirewallVerdict {
     Quarantine {
         reason: String,
     },
-    /// OP-1: derivation depth exceeds the cap for overturning incumbents.
+    /// Derivation depth exceeds the configured cap for overturning incumbents.
     /// The candidate is admitted as ModelDerived-equivalent but cannot overturn.
     DepthCapExceeded {
         depth: u32,
@@ -54,10 +54,10 @@ pub(crate) enum FirewallVerdict {
     },
 }
 
-/// C6 amplification guard.
+/// Amplification Guard.
 ///
 /// Pure struct: holds only the config reference. All state (injected_claim_refs,
-/// burst_count) is passed in per-call so that check() remains a pure function (G1, I6).
+/// burst_count) is passed in per-call so that `check()` remains a pure function.
 pub(crate) struct AmplificationGuard {
     config: Arc<EngineConfig>,
 }
@@ -71,7 +71,7 @@ impl AmplificationGuard {
     /// Check a candidate claim against the amplification firewall.
     ///
     /// # Parameters
-    /// - `candidate` — fully-stamped claim from C1 (gateway.rs). Provenance is already set.
+    /// - `candidate` — fully-stamped claim from the ingestion gateway. Provenance is already set.
     /// - `injected_claim_refs` — ClaimRefs previously served to this session context
     ///   (loaded from ledger entries with kind = ServedAsInjected). May be empty if no prior
     ///   session or when ledger read is unavailable (firewall degrades gracefully to Admit).
@@ -81,9 +81,9 @@ impl AmplificationGuard {
     ///
     /// # Decision order (deterministic, execute in this order):
     /// 1. Burst gate — if burst_count_this_batch >= quarantine_burst_threshold → Quarantine.
-    /// 2. RecallReEntry provenance → CorroborateByIdentity (I6 idempotency).
-    /// 3. OP-1 depth cap — if derivation_depth > derivation_depth_cap_for_overturning → DepthCapExceeded.
-    /// 4. Otherwise → Admit (forward to C3 reconciler).
+    /// 2. RecallReEntry provenance → CorroborateByIdentity (idempotent append).
+    /// 3. Depth cap — if derivation_depth > derivation_depth_cap_for_overturning → DepthCapExceeded.
+    /// 4. Otherwise → Admit (forward to the reconciler).
     ///
     /// # Determinism guarantee
     /// PURE FUNCTION: same candidate + same injected_claim_refs + same burst_count + same config

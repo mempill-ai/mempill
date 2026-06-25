@@ -1,0 +1,188 @@
+//! # mempill
+//!
+//! Temporally-correct memory for AI agents.
+//!
+//! This crate is a thin facade that re-exports the public API of
+//! [`mempill-core`](https://docs.rs/mempill-core) and makes the persistence
+//! adapters available behind feature flags so a downstream user only needs:
+//!
+//! ```toml
+//! # Cargo.toml
+//! [dependencies]
+//! mempill = "0.2"                          # default features = ["sqlite"]
+//! # or:
+//! mempill = { version = "0.2", features = ["postgres"] }
+//! ```
+//!
+//! ## Quick start (SQLite, default)
+//!
+//! ```text
+//! // Cargo.toml
+//! // [dependencies]
+//! // mempill       = "0.2"
+//! // mempill-types = "0.2"   # provides AgentId, ProvenanceLabel, etc.
+//! // tokio         = { version = "1", features = ["rt-multi-thread", "macros"] }
+//! // serde_json    = "1"
+//!
+//! use mempill::{IngestClaimRequest, QueryMemoryRequest};
+//! use mempill_types::{AgentId, Cardinality, Confidence, Criticality, ExternalKind, ProvenanceLabel};
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let engine = mempill::open_default_in_memory()?;
+//!     let agent  = AgentId("my-agent".into());
+//!
+//!     let resp = engine.ingest_claim(IngestClaimRequest {
+//!         agent_id:    agent.clone(),
+//!         subject:     "user".into(),
+//!         predicate:   "city".into(),
+//!         value:       serde_json::json!("Berlin"),
+//!         provenance:  ProvenanceLabel::External(ExternalKind::UserAsserted),
+//!         cardinality: Cardinality::Functional,
+//!         valid_time:  None,
+//!         confidence:  Confidence { value_confidence: 0.95, valid_time_confidence: 0.0 },
+//!         criticality: Criticality::Medium,
+//!         derived_from: vec![],
+//!     }).await?;
+//!
+//!     println!("disposition: {:?}", resp.disposition);
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Feature flags
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `sqlite` | yes | Enables [`mempill_sqlite`] — embedded SQLite adapter (topology-a) |
+//! | `postgres` | no | Enables `mempill_postgres` — shared PostgreSQL adapter (topology-b) |
+//!
+//! Both features can be enabled simultaneously (e.g., for tests that verify both backends).
+//!
+//! ## Architecture
+//!
+//! The dependency direction is one-way:
+//!
+//! ```text
+//! mempill (this facade)
+//!   ├── mempill-core   (engine, port traits, use-cases)
+//!   ├── mempill-sqlite (feature = "sqlite")
+//!   └── mempill-postgres (feature = "postgres")
+//! ```
+//!
+//! The engine core has zero dependency on either adapter crate.
+
+// ── Core re-exports ───────────────────────────────────────────────────────────
+
+/// Re-exports of the complete mempill-core public API.
+pub use mempill_core::{
+    // EngineHandle — sole async entry point
+    EngineHandle,
+    ErasedPendingStore,
+    ErasedPendingStoreAdapter,
+    // Configuration
+    EngineConfig,
+    // Error types
+    MemError,
+    WriteResult,
+    BeliefResult,
+    // Port traits
+    PersistencePort,
+    OraclePort,
+    ExtractorPort,
+    EmbeddingPort,
+    VectorPort,
+    PendingAdjudicationPort,
+    PendingAdjudicationRow,
+    Txn,
+    // NoOp stubs for tests / simple setups
+    NoOpOracle,
+    NoOpVector,
+    // Use-case request/response DTOs
+    IngestClaimRequest,
+    IngestClaimResponse,
+    QueryMemoryRequest,
+    QueryMemoryResponse,
+    ReconcileRequest,
+    ReconcileResponse,
+    AuditQueryRequest,
+    AuditQueryResponse,
+    // Use-case traits
+    IngestClaimUseCase,
+    QueryMemoryUseCase,
+    ReconcileUseCase,
+    AuditUseCase,
+};
+
+// ── Adapter re-exports (behind feature flags) ─────────────────────────────────
+
+/// SQLite persistence adapter (`feature = "sqlite"`).
+///
+/// Use [`sqlite::open_default_in_memory`] or [`sqlite::open_default`] to open an engine.
+#[cfg(feature = "sqlite")]
+pub mod sqlite {
+    pub use mempill_sqlite::{
+        DefaultEngine,
+        OracleEngine,
+        SqlitePersistenceStore,
+        SqlitePendingStore,
+        SqliteStoreError,
+        OraclePort,
+        open_default,
+        open_default_in_memory,
+        open_with_oracle,
+        open_with_oracle_in_memory,
+    };
+}
+
+/// PostgreSQL persistence adapter (`feature = "postgres"`).
+///
+/// Use [`postgres::open_postgres`] to open an engine connected to PostgreSQL.
+/// Note: NoTls only in v0.2 — TLS is planned for v0.3.1.
+#[cfg(feature = "postgres")]
+pub mod postgres {
+    pub use mempill_postgres::{
+        PostgresEngine,
+        PostgresPersistenceStore,
+        PostgresPendingStore,
+        PostgresTxn,
+        PostgresStoreError,
+        open_postgres,
+        open_postgres_with_oracle,
+    };
+}
+
+// ── Convenience top-level functions ──────────────────────────────────────────
+
+/// Open an in-memory [`sqlite::DefaultEngine`].
+///
+/// Convenience shortcut for `mempill::sqlite::open_default_in_memory()`.
+/// Requires the `sqlite` feature (enabled by default).
+///
+/// # Errors
+/// Returns [`sqlite::SqliteStoreError`] if the connection cannot be opened.
+///
+/// # Example
+///
+/// ```rust
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let engine = mempill::open_default_in_memory()?;
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "sqlite")]
+pub fn open_default_in_memory() -> Result<sqlite::DefaultEngine, sqlite::SqliteStoreError> {
+    mempill_sqlite::open_default_in_memory()
+}
+
+/// Open a file-backed [`sqlite::DefaultEngine`] at the given path.
+///
+/// Convenience shortcut for `mempill::sqlite::open_default(path)`.
+/// Requires the `sqlite` feature (enabled by default).
+///
+/// # Errors
+/// Returns [`sqlite::SqliteStoreError`] if the connection cannot be opened or migrations fail.
+#[cfg(feature = "sqlite")]
+pub fn open_default(path: &str) -> Result<sqlite::DefaultEngine, sqlite::SqliteStoreError> {
+    mempill_sqlite::open_default(path)
+}

@@ -1,15 +1,15 @@
 //! EmbeddingPort and VectorPort — fuzzy candidate coverage and vector persistence seam.
 //!
-//! EmbeddingPort (F8, A10): BYO-embedding port for fuzzy candidate lookup.
-//! Engine functional in structural-only mode when this port is absent.
+//! `EmbeddingPort`: bring-your-own-embedding port for fuzzy candidate lookup.
+//! The engine is fully functional in structural-only mode when this port is absent.
 //!
-//! VectorPort is a compile-time seam; both SQLite and Postgres adapters stub it as NoOp;
-//! implementation deferred beyond v0.3.
+//! `VectorPort` is a compile-time seam; both SQLite and Postgres adapters stub it as `NoOp`;
+//! implementation is deferred beyond v0.3.
 
 use mempill_types::{AgentId, ClaimRef, SubjectLineRef};
 
-/// BYO-embedding port for fuzzy candidate coverage (secondary tier, F8, A10).
-/// Engine functional in structural-only mode when this port is absent.
+/// Bring-your-own-embedding port for fuzzy candidate coverage (secondary tier).
+/// The engine is fully functional in structural-only mode when this port is absent.
 pub trait EmbeddingPort: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
@@ -23,7 +23,7 @@ pub trait EmbeddingPort: Send + Sync + 'static {
     ) -> Result<Vec<SubjectLineRef>, Self::Error>;
 }
 
-/// Vector persistence seam — SEPARATE from PersistencePort (DB_REQUIREMENTS.md §3, A10).
+/// Vector persistence seam — kept separate from `PersistencePort` for model-swap safety.
 ///
 /// # Status — UNIMPLEMENTED SEAM
 ///
@@ -34,7 +34,7 @@ pub trait VectorPort: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Store embedding for a claim.
-    /// `embedding_model_id` is required for model-swap safety (CONSTRAINTS.md §D, A10).
+    /// `embedding_model_id` is required for model-swap safety (allows detecting stale embeddings after a model change).
     fn store_embedding(
         &self,
         agent_id: &AgentId,

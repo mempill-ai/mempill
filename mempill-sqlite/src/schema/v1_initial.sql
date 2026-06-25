@@ -1,8 +1,8 @@
 -- mempill-sqlite/src/schema/v1_initial.sql
 -- Append-only schema. No UPDATE or DELETE on claims, validity_assertions, ledger_entries,
 -- or claim_edges. Violations are schema-enforced and tested (I1, DC-2).
--- PRAGMA journal_mode=WAL set at connection open (not DDL) — applied in connection.rs (W5).
--- PRAGMA synchronous=FULL set at connection open (DC-D, CONSTRAINTS.md §D) — applied in connection.rs (W5).
+-- PRAGMA journal_mode=WAL set at connection open (not DDL) — applied in connection.rs.
+-- PRAGMA synchronous=FULL set at connection open (mandatory; WAL+NORMAL can lose writes on power loss) — applied in connection.rs.
 
 -- ── CLAIMS ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS claims (
@@ -24,20 +24,20 @@ CREATE TABLE IF NOT EXISTS claims (
     valid_time_end      TEXT,               -- ISO-8601 UTC; NULL = open / unknown
     valid_time_confidence REAL  NOT NULL DEFAULT 0.0,
 
-    -- Confidence (two separate scores, SDK_CONTRACT §1.4)
+    -- Confidence (two separate scores: value_confidence and valid_time_confidence)
     value_confidence    REAL    NOT NULL DEFAULT 0.5,
 
-    -- Criticality (V3-7): distinct from currency; surfaced at read
+    -- Criticality: distinct from currency; surfaced at read
     criticality         TEXT    NOT NULL DEFAULT 'Medium',  -- 'Low'|'Medium'|'High'|'Critical'
 
     -- Lineage (JSON array of ClaimRef UUIDs; secondary to claim_edges table)
     derived_from        TEXT    NOT NULL DEFAULT '[]',  -- JSON array
 
-    -- Reserved for future snapshot/compaction (TECH_STACK.md §5 risk #2)
+    -- Reserved for future snapshot/compaction
     metadata            TEXT,               -- JSON; NULL in v0.1
     snapshot_schema_version INTEGER,        -- NULL in v0.1
 
-    -- For vector index model-swap safety (CONSTRAINTS.md §D, A10)
+    -- For vector index model-swap safety (identifies stale embeddings after a model change)
     embedding_model_id  TEXT,               -- NULL until vector is enabled
 
     PRIMARY KEY (claim_id)

@@ -13,8 +13,8 @@
 //! # Single-writer invariant
 //!
 //! Writes to this table occur after the main claim transaction commits (not inside it),
-//! within the per-agent write lock already held by EngineHandle. This preserves I9 for the
-//! claim data and keeps the pending-adjudication insert simple and non-transactional.
+//! within the per-agent write lock already held by EngineHandle. This preserves claim-data
+//! atomicity and keeps the pending-adjudication insert simple and non-transactional.
 
 use chrono::{DateTime, Utc};
 use mempill_types::{AgentId, AdjudicationRequest, ClaimRef};

@@ -1,7 +1,7 @@
-//! MemError — top-level error type for the mempill engine (TECHNICAL_DESIGN.md §11).
+//! MemError — top-level error type for the mempill engine.
 //!
 //! Every invariant violation surfaces as a typed variant — never silently swallowed.
-//! Uses `thiserror` for ergonomic Display + Error implementations.
+//! Uses `thiserror` for ergonomic `Display` + `Error` implementations.
 
 use thiserror::Error;
 use mempill_types::{AgentId, ClaimRef};
@@ -11,10 +11,10 @@ use mempill_types::{AgentId, ClaimRef};
 #[derive(Debug, Error)]
 pub enum MemError {
     // ── STRUCTURAL WRITE REJECTIONS (Disposition::Rejected) ──────────────────
-    #[error("Missing or untyped provenance on write (DC-1, I4): claim cannot be committed")]
+    #[error("Missing or untyped provenance on write: claim cannot be committed without a provenance label")]
     MissingProvenance,
 
-    #[error("Caller does not hold write authority for agent_id {agent_id:?} (DC-2, I9)")]
+    #[error("Caller does not hold write authority for agent_id {agent_id:?}")]
     WriteAuthorityViolation { agent_id: AgentId },
 
     #[error("Malformed fact: {reason}")]
@@ -27,7 +27,7 @@ pub enum MemError {
     ClaimNotFound { claim_ref: ClaimRef },
 
     // ── CONCURRENCY ───────────────────────────────────────────────────────────
-    #[error("Write lock for agent_id {agent_id:?} is already held (single-writer violation, DC-2)")]
+    #[error("Write lock for agent_id {agent_id:?} is already held (single-writer-per-agent-id violation)")]
     WriteLockContention { agent_id: AgentId },
 
     // ── ASYNC / SPAWN_BLOCKING BRIDGE ─────────────────────────────────────────
@@ -36,17 +36,17 @@ pub enum MemError {
     SpawnBlocking { reason: String },
 
     // ── INVARIANT VIOLATIONS (bugs — should never occur in correct impl) ──────
-    #[error("I9 atomic commit unit violated: partial write detected for agent_id {agent_id:?}")]
+    #[error("Atomic commit unit violated: partial write detected for agent_id {agent_id:?}")]
     AtomicCommitViolation { agent_id: AgentId },
 
     #[error(
-        "I10 monotonicity violated: belief changed between reads without an intervening write \
+        "Fixed-history monotonicity violated: belief changed between reads without an intervening write \
          for agent_id {agent_id:?}"
     )]
     MonotonicityViolation { agent_id: AgentId },
 
     #[error(
-        "I3 violated: materialized belief cache disagrees with canonical fold \
+        "Belief cache inconsistency: materialized belief cache disagrees with canonical fold \
          (cache must be subordinate)"
     )]
     BeliefCacheInconsistency,
@@ -84,7 +84,7 @@ pub enum MemError {
     AdjudicationHandleNotFound { handle_id: uuid::Uuid },
 
     // ── CONFIGURATION ─────────────────────────────────────────────────────────
-    #[error("OP-3 calibration parameter invalid: {param} = {value}: {reason}")]
+    #[error("Engine calibration parameter invalid: {param} = {value}: {reason}")]
     ConfigurationError {
         param: String,
         value: String,

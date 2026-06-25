@@ -1,18 +1,18 @@
-//! C4 — Invalidation / Supersession (TECHNICAL_DESIGN.md §9, A26, I9).
+//! Invalidation / Supersession.
 //!
-//! This module appends the atomic commit unit that closes an incumbent claim's
-//! valid-time window and cascades a PendingReview flag to every dependent claim.
+//! Appends the atomic commit unit that closes an incumbent claim's valid-time window
+//! and cascades a `PendingReview` flag to every dependent claim.
 //!
-//! INVARIANTS enforced here:
-//!   I1  — non-destruction: only `append_*` calls; no delete/update.
-//!   I9  — atomic commit unit: caller owns the Txn; this module appends within it.
-//!   I10 — fixed-history monotonicity: supersession is a legitimate append.
-//!   A26 — supersession.rs owns the DependsOn cascade inside the same Txn.
+//! Invariants enforced:
+//!   - Non-destruction: only `append_*` calls; no DELETE or UPDATE.
+//!   - Atomic commit unit: caller owns the `Txn`; this module appends within it.
+//!   - Fixed-history monotonicity: supersession is a legitimate append; history is preserved.
+//!   - Supersession owns the `DependsOn` cascade inside the same transaction.
 //!
-//! ## Ownership of Txn (I9, Section 10)
-//! The APPLICATION LAYER opens the Txn via `PersistencePort::begin_atomic()` and
-//! calls `commit()` / `rollback()` as the only exit paths.  `supersession.rs`
-//! receives a `&mut Txn` that is already open and appends within it.  It does NOT
+//! ## Transaction ownership
+//! The application layer opens the `Txn` via `PersistencePort::begin_atomic()` and
+//! calls `commit()` / `rollback()` as the only exit paths. This module
+//! receives a `&mut Txn` that is already open and appends within it. It does NOT
 //! call `begin_atomic`, `commit`, or `rollback`.
 
 use std::collections::HashSet;
@@ -24,7 +24,7 @@ use mempill_types::{
 
 use crate::ports::persistence::PersistencePort;
 
-/// Parameters describing a belief-overturn that C7 (gate) has approved.
+/// Parameters describing a belief-overturn that the adjudication gate has approved.
 ///
 /// `superseded_ref`  — the incumbent claim whose valid-time is being closed.
 /// `overturning_ref` — the new claim that triggered the overturn (already appended
@@ -35,7 +35,7 @@ use crate::ports::persistence::PersistencePort;
 ///                     to preserve determinism (G1).
 /// `recorded_at`     — the TransactionTime to stamp on all new ledger entries
 ///                     (engine-stamped by the caller).
-/// `agent_id`        — the owning agent; must match the Txn scope (DC-2, I9).
+/// `agent_id`        — the owning agent; must match the Txn scope (single-writer-per-agent_id).
 #[derive(Debug, Clone)]
 pub(crate) struct SupersessionRequest {
     pub agent_id: AgentId,
@@ -46,23 +46,23 @@ pub(crate) struct SupersessionRequest {
     pub recorded_at: TransactionTime,
 }
 
-/// Execute the supersession atomic append sequence (C4, A26, I9).
+/// Execute the supersession atomic append sequence.
 ///
 /// Performs, in order, within the ALREADY-OPEN `txn`:
 ///   1. Append `AssertionKind::Bound` `ValidityAssertion` closing the incumbent.
 ///   2. Append a `LedgerEventKind::ValidityAsserted` ledger entry for the incumbent.
 ///   3. For each edge in `preloaded_edges` where `edge.kind == EdgeKind::DependsOn && edge.to_claim == superseded_ref`,
-///      append a `DependentFlaggedPendingReview` ledger entry for `edge.from_claim` (A26).
+///      append a `DependentFlaggedPendingReview` ledger entry for `edge.from_claim`.
 ///
 /// `preloaded_edges` MUST be loaded by the caller BEFORE calling `begin_atomic()` to avoid
-/// reads inside an open transaction (DEFECT-1 fix — no reads allowed inside the Txn window).
+/// reads inside an open transaction.
 ///
 /// Returns the total number of `DependentFlaggedPendingReview` entries appended (useful for
 /// callers and tests).
 ///
 /// # Errors
-/// Any persistence error propagates immediately.  The caller is responsible for rolling back
-/// the Txn on error (application layer pattern — Section 10 I9 row).
+/// Any persistence error propagates immediately. The caller is responsible for rolling back
+/// the `Txn` on error (atomic commit unit: all writes succeed or none do).
 pub(crate) fn execute<P: PersistencePort>(
     port: &P,
     txn: &mut P::Transaction,
@@ -570,7 +570,7 @@ mod tests {
     // ── Test: non-destruction I1 — only appends, no deletes/updates ──────────
 
     /// The PersistencePort mock has NO delete or update methods — this is a compile-time
-    /// guarantee enforced by the trait definition (I1).  At runtime we verify the
+    /// guarantee enforced by the trait definition (no delete/update methods exist).  At runtime we verify the
     /// number and types of calls are purely additive.
     #[test]
     fn non_destruction_i1_only_appends_no_deletes() {
@@ -703,7 +703,7 @@ mod tests {
     /// (D depends on B/C, not on A).  Cascade count must be exactly 2.
     ///
     /// This tests that cascade does NOT transitively walk the graph.
-    /// A26 specifies only DIRECT dependents of the superseded claim are flagged.
+    /// Only DIRECT dependents of the superseded claim are flagged (no transitive walk).
     #[test]
     fn cascade_a26_diamond_direct_dependents_only_no_transitive_walk() {
         let agent = make_agent();
@@ -775,7 +775,7 @@ mod tests {
     /// dependent claim D to the superseded claim P (e.g., created by a bug or
     /// duplicate insert).
     ///
-    /// SPEC (A26): idempotent flagging is the sane expectation — D should be
+    /// Idempotent flagging is the expected behaviour — D should be
     /// flagged AT MOST ONCE per supersession event.  Two duplicate edges must
     /// not produce two PendingReview entries for D.
     ///
@@ -862,7 +862,7 @@ mod tests {
 
     /// DERIVED-FROM does not cascade: a DerivedFrom edge pointing AT the superseded
     /// claim (from_claim DerivedFrom superseded_ref) must NOT generate a PendingReview.
-    /// A26 specifies only DependsOn edges trigger the cascade.
+    /// Only DependsOn edges trigger the cascade, not DerivedFrom edges.
     #[test]
     fn cascade_a26_derived_from_inbound_does_not_cascade() {
         let agent = make_agent();
@@ -1033,7 +1033,7 @@ mod tests {
     ///   5 = DependentFlaggedPendingReview for dep3  ← fail here
     ///
     /// After rollback: ZERO committed (the partial tail must not be committed).
-    /// This tests that I9 atomicity holds for the LAST write, not just mid-point.
+    /// This tests that atomicity holds for the LAST write, not just mid-point.
     #[test]
     fn atomicity_i9_fail_on_last_cascade_write_zero_committed() {
         let agent = make_agent();
@@ -1149,9 +1149,9 @@ mod tests {
             "I1 / A26: the superseded claim itself must not appear as a dependent in cascade entries");
     }
 
-    // ── ADVERSARIAL: MONOTONICITY (I10) ──────────────────────────────────────
+    // ── ADVERSARIAL: MONOTONICITY ─────────────────────────────────────────────
 
-    /// MONOTONICITY (I10): supersession must be recorded as a NEW Bound assertion
+    /// Monotonicity: supersession must be recorded as a NEW Bound assertion
     /// (an append), never as a mutation of the incumbent claim row.
     /// We verify: after execute(), the ValidityAssertion in committed state has a
     /// fresh assertion_ref (uuid::Uuid), its own recorded_at, and the incumbent's

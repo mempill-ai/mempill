@@ -1,13 +1,13 @@
-//! C8 — Provenance and Audit Ledger reads (TECHNICAL_DESIGN.md §1, §10 I1/I3, G1).
+//! AuditLedger — immutable ledger reads for provenance and audit queries.
 //!
-//! READ-ONLY: this module only calls PersistencePort read methods.
-//! No mutations. No Txn opened here (read path does not need I9 atomicity).
+//! READ-ONLY: this module only calls `PersistencePort` read methods.
+//! No mutations. No `Txn` opened here (the read path does not require atomic units).
 //!
 //! Provides ordered ledger retrieval for:
-//!   - A specific claim (by ClaimRef)
-//!   - All claims for an agent (full ledger)
+//!   - A specific claim (by `ClaimRef`)
+//!   - All claims for an agent (full agent ledger)
 //!
-//! The ledger is the G1 replay-audit basis: every decision recorded here is deterministic
+//! The ledger is the replay-audit basis: every decision recorded here is deterministic
 //! and replayable (same inputs → same outcomes).
 
 use mempill_types::{AgentId, ClaimRef, LedgerEntry, TransactionTime};
@@ -16,7 +16,7 @@ use crate::ports::persistence::PersistencePort;
 
 // ── Audit query types ─────────────────────────────────────────────────────────
 
-/// Request parameters for a ledger audit query (C8).
+/// Request parameters for a ledger audit query.
 #[derive(Debug, Clone)]
 pub(crate) struct AuditQuery {
     pub agent_id: AgentId,
@@ -31,20 +31,20 @@ pub(crate) struct AuditQuery {
 /// Response from a ledger audit query.
 #[derive(Debug, Clone)]
 pub(crate) struct AuditResult {
-    /// Ledger entries ordered by `recorded_at` ASC (chronological for replay, G1).
+    /// Ledger entries ordered by `recorded_at` ASC (chronological order for replay).
     pub entries: Vec<LedgerEntry>,
 }
 
 // ── Audit read functions ──────────────────────────────────────────────────────
 
-/// C8 — retrieve the ordered audit ledger for an agent (or a specific claim).
+/// Retrieve the ordered audit ledger for an agent (or a specific claim).
 ///
 /// Delegates to `PersistencePort::load_ledger` (full agent ledger) and optionally
 /// filters to a specific `claim_ref`.
 ///
 /// ## Ordering
 /// The persistence layer returns entries ordered by `recorded_at DESC` (newest first).
-/// This function reverses to chronological (ASC) order for G1 replay correctness.
+/// This function reverses to chronological (ASC) order for replay correctness.
 ///
 /// ## No side-effects
 /// This is a pure read. No Txn opened. No ledger entry appended.
@@ -69,10 +69,10 @@ pub(crate) fn query_ledger<P: PersistencePort>(
     Ok(AuditResult { entries })
 }
 
-/// C8 — retrieve all edges for a claim (provenance lineage audit).
+/// Retrieve all edges for a claim (provenance lineage audit).
 ///
-/// Uses `PersistencePort::load_lineage` which performs the recursive CTE traversal
-/// (DB_REQUIREMENTS.md §1) to return the full DerivedFrom ancestry.
+/// Uses `PersistencePort::load_lineage` which performs a recursive CTE traversal
+/// to return the full `DerivedFrom` ancestry.
 pub(crate) fn query_lineage<P: PersistencePort>(
     port: &P,
     agent_id: &AgentId,
@@ -302,7 +302,7 @@ mod tests {
 
     /// This test verifies that query_ledger does not call append_* methods on the port.
     /// The MockPort panics (unimplemented!) on any append call — if the test passes,
-    /// no appends were made (I1, I3 compliance for the read path).
+    /// no appends were made (the read path must not mutate state).
     #[test]
     fn query_ledger_makes_no_append_calls_read_only() {
         let agent = agent();

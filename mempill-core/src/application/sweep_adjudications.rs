@@ -5,16 +5,16 @@
 //! 1. **Expired pending rows** (`revert_expired_row`): a pending row whose `expires_at <= now`.
 //!    Writes a Contested ledger entry for the challenger, marks the pending row expired.
 //!    The incumbent is ALREADY live (CommittedCheap), so no incumbent ledger entry is needed.
-//!    After the revert, `query_memory` will surface Contested[both] because the challenger
+//!    After the revert, `query_memory` will surface `Contested[both]` because the challenger
 //!    has a Contested disposition and the incumbent has CommittedCheap.
 //!
 //! 2. **Orphaned QueuedForAdjudication claims** (`revert_orphan`): claims with
 //!    `QueuedForAdjudication` disposition that have NO matching `pending_adjudications` row.
 //!    These arise from a crash in the window between main-txn commit and pending-row insert
 //!    (see W3 NOTE in ingest_claim.rs). Recovery writes a Contested ledger entry so the
-//!    claim is treated as Contested[both] from that point forward.
+//!    claim is treated as `Contested[both]` from that point forward.
 //!
-//! # Lock invariant (I9)
+//! # Lock invariant
 //!
 //! This use-case is SYNC — called from `spawn_blocking`. Locks are acquired by the
 //! `EngineHandle::sweep_expired_adjudications` caller BEFORE dispatch.
