@@ -19,13 +19,14 @@
 //! ```text
 //! // Cargo.toml
 //! // [dependencies]
-//! // mempill       = "0.2"
-//! // mempill-types = "0.2"   # provides AgentId, ProvenanceLabel, etc.
-//! // tokio         = { version = "1", features = ["rt-multi-thread", "macros"] }
-//! // serde_json    = "1"
+//! // mempill = "0.2"
+//! // tokio   = { version = "1", features = ["rt-multi-thread", "macros"] }
+//! // serde_json = "1"
 //!
-//! use mempill::{IngestClaimRequest, QueryMemoryRequest};
-//! use mempill_types::{AgentId, Cardinality, Confidence, Criticality, ExternalKind, ProvenanceLabel};
+//! use mempill::{
+//!     IngestClaimRequest, QueryMemoryRequest,
+//!     AgentId, Cardinality, Confidence, Criticality, ExternalKind, ProvenanceLabel,
+//! };
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -71,6 +72,58 @@
 //! ```
 //!
 //! The engine core has zero dependency on either adapter crate.
+
+// ── Domain-type re-exports (mempill-types) ───────────────────────────────────
+//
+// Re-export the complete set of domain types a consumer needs so they can write
+// `use mempill::AgentId` without adding `mempill-types` to their own Cargo.toml.
+
+pub use mempill_types::{
+    // Identity
+    AgentId,
+    ClaimRef,
+    SubjectLineRef,
+    // Provenance
+    ProvenanceLabel,
+    ExternalKind,
+    ExternalAnchor,
+    // Claim value objects
+    Cardinality,
+    Confidence,
+    Criticality,
+    Fact,
+    Claim,
+    // Disposition (12-state model)
+    Disposition,
+    WriteOutcome,
+    // Belief projection (read-time)
+    Belief,
+    BeliefProjection,
+    BeliefStatus,
+    CurrencySignal,
+    CurrencyState,
+    StalenessFlag,
+    Marker,
+    // Time
+    TransactionTime,
+    ValidTime,
+    // Ledger
+    LedgerEntry,
+    LedgerEventKind,
+    // Validity
+    ValidityAssertion,
+    AssertionKind,
+    // Graph edges
+    ClaimEdge,
+    EdgeKind,
+    // Oracle adjudication
+    ClaimProposal,
+    AdjudicationRequest,
+    AdjudicationResponse,
+    AdjudicationVerdict,
+    AdjudicationOutcome,
+    OverturnReason,
+};
 
 // ── Core re-exports ───────────────────────────────────────────────────────────
 
