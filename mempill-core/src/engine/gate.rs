@@ -41,6 +41,10 @@ pub(crate) enum ConflictType {
     CrossLineConflict,
     /// Parent was superseded; dependent needs review (V3-8).
     DependsOnSuperseded,
+    /// Clean temporal succession: candidate and incumbent have NON-OVERLAPPING trusted
+    /// valid-time windows. Routes to CheapPath / CommittedCheap (NOT Contested).
+    /// Audit/G1 visible: the succession is recorded in rationale.
+    Succession,
 }
 
 /// Gate decision — deterministic function of Proposal + EngineConfig.
@@ -123,6 +127,21 @@ pub(crate) fn adjudicate(proposal: &Proposal, config: &EngineConfig) -> GateDeci
             route: Route::CheapPath,
             disposition: Disposition::CommittedCheap,
             rationale: serde_json::json!({ "route": "cheap_path" }),
+        };
+    }
+
+    // Step 4b: Trusted temporal succession — non-overlapping windows, confident timestamps.
+    // NOT a belief-overturning conflict; the candidate simply occupies a later valid-time window.
+    // Routes to CheapPath / CommittedCheap — NOT Contested, NOT QueuedForAdjudication.
+    // Audit-visible: succession logged in rationale (G1).
+    if proposal.conflict_type == ConflictType::Succession {
+        return GateDecision {
+            route: Route::CheapPath,
+            disposition: Disposition::CommittedCheap,
+            rationale: serde_json::json!({
+                "route": "succession_cheap_path",
+                "reason": "trusted_temporal_succession",
+            }),
         };
     }
 
@@ -1082,6 +1101,7 @@ mod adversarial {
             ConflictType::SameLineConflict,
             ConflictType::CrossLineConflict,
             ConflictType::DependsOnSuperseded,
+            ConflictType::Succession,
         ] {
             let claim = ext_claim(vt.clone(), tx.clone());
             let proposal = Proposal {
@@ -1232,6 +1252,7 @@ mod adversarial {
             ConflictType::SameLineConflict,
             ConflictType::CrossLineConflict,
             ConflictType::DependsOnSuperseded,
+            ConflictType::Succession,
         ];
 
         for conflict_type in &all_conflict_types {

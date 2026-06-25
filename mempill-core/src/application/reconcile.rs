@@ -96,6 +96,7 @@ where
                 &latest_disposition,
             );
 
+            let n_live = fold.live_claims.len();
             let incumbent = fold.live_claims.first().map(|cs| truth_engine::claim_to_belief(cs));
 
             let mut per_claim = Vec::new();
@@ -109,6 +110,8 @@ where
                         measured_confidence: candidate.confidence().value_confidence,
                         cardinality_proposal: candidate.cardinality().clone(),
                         oracle_present,
+                        succession_threshold: self.config.valid_time_confidence_threshold,
+                        n_gt_1_live_incumbents: n_live > 1,
                     },
                     &self.config,
                 );
