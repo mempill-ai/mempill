@@ -1,17 +1,16 @@
-//! C1 — Ingestion / Write Gateway (TECHNICAL_DESIGN.md §9, I2, I4, DC-1).
+//! Ingestion / Write Gateway.
 //!
 //! Responsibilities:
-//! - Enforce provenance present (MissingProvenance error if absent, I4, DC-1).
-//! - Stamp TransactionTime (engine-assigned; host cannot supply this as truth, I2).
-//! - Assign ClaimRef (UUID, immutable once minted, I4).
-//! - Stamp ProvenanceLabel immutably (I4): preserve caller-supplied label; RecallReEntry
-//!   is set externally by C6 (firewall.rs) BEFORE calling gateway in the full write path —
-//!   gateway preserves it without re-deriving.
-//! - Enforce ModelDerived default: if `provenance` is `None`, return MissingProvenance;
-//!   callers must supply a label explicitly (DTO validation layer handles the default assignment).
+//! - Enforce provenance present (returns `MissingProvenance` error if absent).
+//! - Stamp `TransactionTime` (engine-assigned; the host cannot override this).
+//! - Assign `ClaimRef` (UUID, immutable once minted).
+//! - Preserve the caller-supplied `ProvenanceLabel` immutably; `RecallReEntry`
+//!   is set by the Amplification Guard before the gateway is called in the full write path.
+//! - If `provenance` is `None`, return `MissingProvenance`; callers must supply a label
+//!   explicitly (the DTO validation layer handles the default assignment).
 //!
-//! Gateway does NOT make adjudication decisions — that is C7 (gate.rs).
-//! Gateway does NOT persist — that is the application layer + PersistencePort.
+//! The gateway does NOT make adjudication decisions — that is the adjudication gate.
+//! The gateway does NOT persist — that is the application layer + `PersistencePort`.
 
 use mempill_types::{
     AgentId, Cardinality, Claim, ClaimRef, Confidence, Criticality, ExternalAnchor,
@@ -21,18 +20,18 @@ use crate::error::MemError;
 
 /// Input to the ingestion gateway — raw caller-supplied data before stamping.
 ///
-/// `provenance` is `Option` to force explicit validation at the engine boundary (DC-1, I4).
+/// `provenance` is `Option` to force explicit validation at the engine boundary.
 /// The DTO layer supplies the caller's intended label; `None` means the caller failed to
-/// provide one, which is a hard error.
+/// provide one, which is a hard error (`MissingProvenance`).
 #[derive(Debug, Clone)]
 pub(crate) struct IngestInput {
     pub agent_id: AgentId,
     pub fact: Fact,
     pub cardinality: Cardinality,
-    /// Required. Must be `Some`; gateway returns `MemError::MissingProvenance` if `None`.
+    /// Required. Must be `Some`; the gateway returns `MemError::MissingProvenance` if `None`.
     pub provenance: Option<ProvenanceLabel>,
     pub external_anchor: ExternalAnchor,
-    /// Host-supplied valid-time (fallible, I2). `None` = unknown valid-time.
+    /// Host-supplied valid-time (caller-supplied, fallible). `None` = unknown valid-time.
     pub valid_time: Option<ValidTime>,
     pub confidence: Confidence,
     pub criticality: Criticality,
@@ -40,25 +39,25 @@ pub(crate) struct IngestInput {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Output of the ingestion gateway — a fully-stamped, immutable Claim ready for C6/C7.
+/// Output of the ingestion gateway — a fully-stamped, immutable Claim ready for the write pipeline.
 #[derive(Debug, Clone)]
 pub(crate) struct StampedClaim {
     pub claim: Claim,
 }
 
-/// Ingest a caller-supplied input, enforcing all C1 gateway invariants.
+/// Ingest a caller-supplied input, enforcing all gateway invariants.
 ///
 /// # Parameters
 /// - `input`   — caller-supplied claim data (provenance required).
-/// - `tx_time` — engine-assigned transaction time (I2). Caller cannot override.
+/// - `tx_time` — engine-assigned transaction time. Caller cannot override this.
 ///
 /// # Errors
 /// - `MemError::MissingProvenance` — `input.provenance` was `None`.
 ///
 /// # Invariants enforced
-/// - Provenance is required (I4, DC-1): `None` → `MissingProvenance`.
-/// - `TransactionTime` is engine-stamped via `tx_time` parameter (I2).
-/// - `ClaimRef` is newly minted (immutable identity, I4).
+/// - Provenance is required: `None` → `MissingProvenance`.
+/// - `TransactionTime` is engine-stamped via the `tx_time` parameter (host cannot override).
+/// - `ClaimRef` is freshly minted and immutable after construction.
 /// - Provenance is preserved immutably after construction via `Claim::new()`.
 pub(crate) fn stamp(input: IngestInput, tx_time: TransactionTime) -> Result<StampedClaim, MemError> {
     // I4 / DC-1: provenance is required.
@@ -96,8 +95,8 @@ pub(crate) fn stamp(input: IngestInput, tx_time: TransactionTime) -> Result<Stam
 
 /// Classify the provenance type for routing decisions downstream.
 ///
-/// Used by the write path to determine whether to route to C6 firewall (RecallReEntry),
-/// or directly to C7 gate (External, ModelDerived).
+/// Used by the write path to determine whether to route through the Amplification Guard (RecallReEntry)
+/// or directly to the adjudication gate (External, ModelDerived).
 ///
 /// Note: `ProvenanceLabel` is `#[non_exhaustive]`; the wildcard arm handles any future variants.
 pub(crate) fn classify_provenance(provenance: &ProvenanceLabel) -> ProvenanceClass {
@@ -199,7 +198,7 @@ mod tests {
             tx.clone(),
         ).unwrap();
         assert_eq!(*result.claim.transaction_time(), tx,
-            "gateway must stamp the engine-supplied tx_time (I2)");
+            "gateway must stamp the engine-supplied tx_time");
     }
 
     // ── CLAIM_REF ASSIGNED ───────────────────────────────────────────────────────

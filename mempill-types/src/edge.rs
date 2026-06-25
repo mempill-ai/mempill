@@ -17,12 +17,12 @@ pub struct ClaimEdge {
 /// The semantic relationship carried by a ClaimEdge.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeKind {
-    /// `from_claim` was derived from `to_claim` (lineage, OP-1 depth tracking).
+    /// `from_claim` was derived from `to_claim` (lineage tracking for provenance depth).
     DerivedFrom,
     /// `to_claim` supersedes `from_claim`.
     Supersedes,
-    /// `from_claim` depends on `to_claim` — parent supersession flags `from_claim`
-    /// PendingReview (V3-8, A26).
+    /// `from_claim` depends on `to_claim` — when `to_claim` is superseded, `from_claim`
+    /// is flagged `PendingReview`.
     DependsOn,
     /// Mutual exclusion between from and to (at most one valid at a time,
     /// regardless of cardinality).

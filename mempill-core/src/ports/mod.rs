@@ -1,4 +1,4 @@
-//! Port traits — the hexagonal seams of mempill-core (A4, A15, A16, A18).
+//! Port traits — the hexagonal seams of mempill-core.
 //!
 //! All port traits are SYNCHRONOUS (no async fn) per F1 decision.
 //! Async lives only at the EngineHandle boundary (W7) via spawn_blocking.

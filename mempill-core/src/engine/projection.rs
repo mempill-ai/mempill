@@ -1,9 +1,9 @@
-//! C5 — Currency-Aware Belief Projection (TECHNICAL_DESIGN.md §9, I11, V3-5, V3-6, A26).
+//! Currency-Aware Belief Projection.
 //!
 //! Builds a [`BeliefProjection`] from a [`FoldResult`] by applying:
-//!   - Currency decay (I11): based on `(now - last_refreshed_at)` vs EngineConfig thresholds.
-//!   - Contested surfacing (I7): when fold has unresolved conflict + external contradiction.
-//!   - PendingReview markers (A26): by inspecting `DependentFlaggedPendingReview` ledger entries.
+//!   - Currency decay: based on `(now - last_refreshed_at)` vs `EngineConfig` thresholds.
+//!   - Contested surfacing: when the fold has an unresolved conflict + external contradiction.
+//!   - PendingReview markers: by inspecting `DependentFlaggedPendingReview` ledger entries.
 //!
 //! CONTRACT: "now" MUST be injected as a parameter — DO NOT read the system clock here.
 
@@ -18,7 +18,7 @@ use crate::engine::truth_engine::{claim_to_belief, fold_staleness, FoldResult};
 
 // ── Currency decay ────────────────────────────────────────────────────────────
 
-/// Compute the `CurrencyState` for a claim given `now` and the EngineConfig thresholds (I11).
+/// Compute the `CurrencyState` for a claim given `now` and the `EngineConfig` thresholds.
 ///
 /// `last_refreshed_at` = the claim's last provenance-independent restatement (v0.1: tx_time).
 /// Decision:
@@ -58,7 +58,7 @@ pub(crate) fn build_currency_signal(
 }
 
 /// Compute the `StalenessFlag` for a projection given the primary belief's currency.
-/// A claim that is `Decayed` and has no valid-time confirmation is considered stale (I11).
+/// A claim that is `Decayed` and has no valid-time confirmation is considered stale.
 pub(crate) fn compute_staleness(
     primary: Option<&Belief>,
     fold: &FoldResult,
@@ -80,7 +80,7 @@ pub(crate) fn compute_staleness(
             },
             CurrencyState::AgingUnconfirmed => StalenessFlag {
                 is_stale: false,
-                reason: Some("aging unconfirmed: asserted long ago, unrefreshed (I11)".into()),
+                reason: Some("aging unconfirmed: asserted long ago, not yet reconfirmed".into()),
             },
             CurrencyState::Fresh => fold_staleness(fold),
         }
@@ -94,7 +94,7 @@ pub(crate) fn compute_staleness(
 /// Returns the set of claim refs that have a `DependentFlaggedPendingReview` ledger entry.
 ///
 /// Projection.rs calls this with the ledger entries for the subject-line's claims to
-/// surface the `PendingReview` marker (A26).
+/// surface the `PendingReview` marker.
 pub(crate) fn pending_review_refs(ledger_entries: &[LedgerEntry]) -> Vec<ClaimRef> {
     ledger_entries
         .iter()
@@ -122,12 +122,12 @@ pub(crate) fn build_markers(
 ) -> Vec<Marker> {
     let mut markers = Vec::new();
 
-    // Contested (I7): explicit unresolved external contradiction.
+    // Contested: explicit unresolved external contradiction.
     if contested || fold.has_conflict {
         markers.push(Marker::Contested);
     }
 
-    // PendingReview (A26): any live claim with DependentFlaggedPendingReview ledger entry.
+    // PendingReview: any live claim with DependentFlaggedPendingReview ledger entry.
     let any_pending = fold.live_claims.iter().any(|cs| {
         is_pending_review(cs.claim.claim_ref(), pending_review_claim_refs)
     });
@@ -143,8 +143,8 @@ pub(crate) fn build_markers(
         markers.push(Marker::RecallTainted);
     }
 
-    // LowDerivationAnchor: any live claim whose derivation_depth exceeds the currency-boost cap (OP-1).
-    // Claims above the cap cannot receive currency boosts — surface to the caller for awareness.
+    // LowDerivationAnchor: any live claim whose derivation_depth exceeds the currency-boost cap.
+    // Claims above the cap cannot receive currency boosts — surfaced to the caller for awareness.
     let any_low_anchor = fold.live_claims.iter().any(|cs| {
         cs.claim.external_anchor().derivation_depth > config.derivation_depth_cap_for_currency_boost
     });
@@ -157,17 +157,17 @@ pub(crate) fn build_markers(
 
 // ── Main projection entry point ───────────────────────────────────────────────
 
-/// C5 — Build a `BeliefProjection` from a `FoldResult`.
+/// Build a `BeliefProjection` from a `FoldResult`.
 ///
 /// Parameters (all injected — no system clock calls):
 /// - `fold`: output of `truth_engine::fold(...)`.
-/// - `ledger_entries`: all ledger entries for the subject-line's claims (for A26 PendingReview).
+/// - `ledger_entries`: all ledger entries for the subject-line's claims (for PendingReview detection).
 /// - `now`: the current wall-clock instant (injected by the caller — NEVER read system clock here).
-/// - `config`: EngineConfig for decay thresholds.
-/// - `contested`: true if C7 gate previously set Disposition::Contested for a live claim.
+/// - `config`: `EngineConfig` for decay thresholds.
+/// - `contested`: true if the adjudication gate previously set `Disposition::Contested` for a live claim.
 ///
 /// CONTRACT: "now" must be injected. Passing two different `now` values to the same fold
-/// result will yield different `CurrencyState` values — this is correct and expected (I11).
+/// result will yield different `CurrencyState` values — this is correct and expected (currency decays).
 pub(crate) fn project(
     fold: &FoldResult,
     ledger_entries: &[LedgerEntry],

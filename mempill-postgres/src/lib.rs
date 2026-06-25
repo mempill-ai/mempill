@@ -1,6 +1,6 @@
 //! # mempill-postgres
 //!
-//! PostgreSQL-backed `PersistencePort` adapter for mempill (topology-b, A38).
+//! PostgreSQL-backed `PersistencePort` adapter for mempill.
 //!
 //! ## Usage
 //!
@@ -21,13 +21,13 @@
 //! One backend per deployment: downstream consumers depend on EITHER `mempill-sqlite`
 //! OR `mempill-postgres`, never both.
 //!
-//! ## Concurrency model (A39–A42)
+//! ## Concurrency model
 //!
 //! - r2d2 pool (max 20 connections) enables concurrent cross-agent transactions.
-//! - `pg_advisory_xact_lock(hashtext(agent_id)::bigint)` serializes same-agent writes (A40).
-//! - `UNIQUE(agent_id, stream_seq)` on `ledger_entries` provides OCC belt-and-suspenders (A41).
+//! - `pg_advisory_xact_lock(hashtext(agent_id)::bigint)` serializes same-agent writes at the DB level.
+//! - `UNIQUE(agent_id, stream_seq)` on `ledger_entries` provides OCC belt-and-suspenders against duplicate sequence numbers.
 //! - `requires_global_write_serialization()` returns `false` — EngineHandle skips the
-//!   global write lock, enabling true Postgres concurrency across agents (A42).
+//!   global write lock, enabling true Postgres concurrency across agents.
 
 // Embed migrations at compile time; no live DB needed to compile.
 refinery::embed_migrations!("migrations");

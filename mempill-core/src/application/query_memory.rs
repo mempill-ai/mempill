@@ -1,7 +1,7 @@
-//! QueryMemoryUseCase — application layer read path (§4a, A28).
+//! QueryMemoryUseCase — application layer read path.
 //!
-//! Read-only: no Txn opened, no writes. Delegates to C2 (truth_engine::fold)
-//! then C5 (projection::project). "now" is injected by the EngineHandle boundary.
+//! Read-only: no Txn opened, no writes. Delegates to TruthEngine (fold)
+//! then Projection (project). `now` is injected by the EngineHandle boundary.
 
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ where
         Self { persistence, vector, config }
     }
 
-    /// Read path: no Txn (read-only). C2 truth_engine → C5 projection → DTO.
+    /// Read path: no Txn (read-only). TruthEngine fold → Projection → DTO.
     ///
     /// `now` is injected by the EngineHandle (DETERMINISM — no clock reads here).
     pub fn execute_with_time(

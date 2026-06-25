@@ -1,7 +1,7 @@
-//! IngestClaimUseCase — application layer write path (§4a, A28, I9).
+//! IngestClaimUseCase — application layer write path.
 //!
-//! Orchestrates C1 → C6 → C3 → C7 → (optional C4) with a single atomic Txn.
-//! The use-case OWNS the transaction boundary (I9): begin_atomic → appends → commit.
+//! Orchestrates Gateway → AmplificationGuard → Reconciler → AdjudicationGate → (optional Supersession)
+//! within a single atomic transaction: begin_atomic → appends → commit.
 //! On any error: rollback is called and Err(MemError) is returned.
 //!
 //! "now" is injected by the EngineHandle caller (DETERMINISM convention).
@@ -46,7 +46,7 @@ use super::dto::{IngestClaimRequest, IngestClaimResponse};
 
 /// Use-case: ingest a new claim from any binding.
 /// Generic over persistence and oracle ports; zero-cost dispatch; testable with mocks.
-/// Oracle is optional: when None, oracle-absent → Contested path fires for heavy-path ops (B11).
+/// Oracle is optional: when None, the oracle-absent branch fires for heavy-path contradiction resolution.
 /// The pending store is type-erased via `ErasedPendingStore` to keep the use-case free of a
 /// third type parameter while still being injectable in tests.
 pub struct IngestClaimUseCase<P, O>

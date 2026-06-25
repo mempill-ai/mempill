@@ -19,7 +19,7 @@ pub struct IngestClaimRequest {
     pub value: serde_json::Value,
     /// Required; no default imposed here — gateway enforces ModelDerived default for model output.
     pub provenance: ProvenanceLabel,
-    /// Caller proposal; gated by C7.
+    /// Caller-supplied cardinality hint; the adjudication gate may override or contest it.
     pub cardinality: Cardinality,
     /// None = unknown; fallback to tx_time ordering.
     pub valid_time: Option<ValidTime>,
@@ -50,7 +50,7 @@ pub struct QueryMemoryRequest {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueryMemoryResponse {
-    /// Canonical fold result; never stored (I3).
+    /// Canonical fold result; computed at read time, never persisted.
     pub belief: BeliefProjection,
 }
 

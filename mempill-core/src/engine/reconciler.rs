@@ -1,26 +1,25 @@
-//! C3 — Contradiction Detector / Reconciler (TECHNICAL_DESIGN.md §9, I5, I7).
+//! Contradiction Detector / Reconciler.
 //!
-//! STOCHASTIC PROPOSER — this module classifies contradictions and builds gate Proposals.
-//! It NEVER commits. All disposition decisions are made by C7 (gate.rs::adjudicate()).
+//! Classifies contradictions and builds gate Proposals.
+//! Never commits — all disposition decisions are made by the adjudication gate.
 //!
 //! # Separation of concerns
-//! - Reconciler PROPOSES: determines ConflictType and assembles a Proposal for the gate.
-//! - Gate ADJUDICATES: receives the Proposal and applies the deterministic routing logic.
+//! - Reconciler PROPOSES: determines `ConflictType` and assembles a `Proposal` for the gate.
+//! - Gate ADJUDICATES: receives the `Proposal` and applies the deterministic routing logic.
 //!
-//! # ConflictType classification (reuses types from gate.rs — no redefinition)
-//! - `NoConflict`            — no existing belief on this subject-line (first write).
-//! - `SameLineConflict`      — same (subject, predicate), different value.
-//! - `CrossLineConflict`     — mutual exclusion or entailment violation across predicates.
-//! - `DependsOnSuperseded`   — candidate's derived_from lineage includes a superseded claim.
+//! # ConflictType classification
+//! - `NoConflict`          — no existing belief on this subject-line (first write).
+//! - `SameLineConflict`    — same (subject, predicate), different value.
+//! - `CrossLineConflict`   — mutual exclusion or entailment violation across predicates.
+//! - `DependsOnSuperseded` — candidate's derived_from lineage includes a superseded claim.
 //!
-//! # Determinism note
-//! The reconciler's ConflictType classification given fixed inputs is deterministic.
+//! # Determinism
+//! The `ConflictType` classification is deterministic given fixed inputs.
 //! The `measured_confidence` field may be populated by a stochastic LLM call at a higher
-//! layer; this module accepts it as an input parameter and records it unchanged.
+//! layer; this module accepts it as a parameter and records it unchanged.
 //!
-//! G1 compliance: given the same StampedClaim + same incumbent + same config, the
-//! Proposal produced is byte-identical (same ConflictType, same cardinality_proposal,
-//! same oracle_present value fed in). The only stochastic input is measured_confidence,
+//! Replay-audit compliance: given the same `StampedClaim` + same incumbent + same config, the
+//! `Proposal` produced is byte-identical. The only stochastic input is `measured_confidence`,
 //! which is passed in, not sampled here.
 
 use mempill_types::{Belief, Cardinality, Claim};
@@ -35,13 +34,13 @@ use crate::engine::valid_time_helpers;
 ///
 /// `superseded_claim_refs` — set of ClaimRefs that are currently in Superseded/Invalidated
 ///   disposition. The reconciler checks whether the candidate's derived_from lineage intersects
-///   this set to detect `DependsOnSuperseded` (V3-8).
+///   this set to detect `DependsOnSuperseded`.
 ///
-/// `measured_confidence` — confidence score from the stochastic extractor (C3-recorded to ledger).
-///   Populated at a higher layer; reconciler records it into the Proposal without re-sampling.
+/// `measured_confidence` — confidence score from the stochastic extractor, recorded to the ledger.
+///   Populated at a higher layer; the reconciler records it into the Proposal without re-sampling.
 ///
-/// `oracle_present` — whether the OraclePort has a registered listener (B11, A24).
-///   Passed in from the engine wrapper; reconciler threads it into the Proposal for the gate.
+/// `oracle_present` — whether the `OraclePort` has a registered listener.
+///   Passed in from the engine wrapper; the reconciler threads it into the Proposal for the gate.
 ///
 /// `succession_threshold` — the `valid_time_confidence_threshold` from EngineConfig; used to
 ///   determine whether the candidate + incumbent form a trusted temporal succession (TASK-11 §C).

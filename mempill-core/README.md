@@ -1,6 +1,6 @@
 # mempill-core
 
-The deterministic engine core for mempill — port traits, all 8 engine components (C1–C8),
+The deterministic engine core for mempill — port traits, all 8 engine components,
 use-cases, DTOs, and the async `EngineHandle` entry point.
 
 See the [root README](../README.md) for the full architecture, quick start, and invariants.
@@ -10,11 +10,11 @@ See the [root README](../README.md) for the full architecture, quick start, and 
 ```
 mempill-core/src/
   ports/           — PersistencePort, OraclePort, ExtractorPort, EmbeddingPort, VectorPort traits
-  engine/          — C1 gateway, C2 truth_engine, C3 reconciler, C4 supersession,
-                     C5 projection, C6 firewall, C7 gate, C8 audit_ledger
+  engine/          — Gateway, TruthEngine, Reconciler, Supersession,
+                     Projection, AmplificationGuard, AdjudicationGate, AuditLedger
   application/     — use-cases (IngestClaim, QueryMemory, Reconcile, Audit) + public DTOs
   engine_handle.rs — EngineHandle<P,O,V>: async entry point, spawn_blocking bridge
-  config.rs        — EngineConfig (OP-3 tuning parameters)
+  config.rs        — EngineConfig (tunable engine parameters)
   error.rs         — MemError enum (thiserror)
   noop.rs          — NoOpOracle, NoOpVector (do-nothing stubs)
   concurrency/     — AgentWriteLockMap (per-agent_id write lock)

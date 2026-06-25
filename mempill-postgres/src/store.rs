@@ -1,10 +1,10 @@
-//! `PostgresPersistenceStore` — impl of `PersistencePort` for mempill-postgres (§2, A38).
+//! `PostgresPersistenceStore` — impl of `PersistencePort` for mempill-postgres.
 //!
-//! # Append-only invariant (I1)
+//! # Append-only
 //!
 //! Every write method is an INSERT. No UPDATE or DELETE paths exist in this file.
 //!
-//! # Atomic commit unit (I9)
+//! # Atomic commit unit
 //!
 //! `begin_atomic` acquires a pooled connection and opens a `BEGIN` transaction.
 //! `commit`/`rollback` close the transaction; the connection returns to the r2d2 pool.
@@ -17,7 +17,7 @@
 //! This confines the JSONB divergence to the INSERT SQL; all row mapping code is identical
 //! to the SQLite path.
 //!
-//! # stream_seq (A41)
+//! # stream_seq (monotone per-agent sequence number)
 //!
 //! `append_ledger_entry` assigns `stream_seq` via:
 //! `SELECT COALESCE(MAX(stream_seq), 0) + 1 FROM ledger_entries WHERE agent_id = $1`
@@ -388,7 +388,7 @@ impl PersistencePort for PostgresPersistenceStore {
     /// Open an explicit `BEGIN` transaction scoped to `agent_id`.
     ///
     /// Acquires a connection from the r2d2 pool, issues `BEGIN`, then acquires the
-    /// per-agent_id advisory lock: `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)` (A40).
+    /// per-agent_id advisory lock: `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`.
     fn begin_atomic(&self, agent_id: &AgentId) -> Result<PostgresTxn, PostgresStoreError> {
         let conn = self.pool.get()?;
         PostgresTxn::begin(agent_id.clone(), conn)
@@ -531,7 +531,7 @@ impl PersistencePort for PostgresPersistenceStore {
     ///
     /// `stream_seq` is assigned via:
     /// `SELECT COALESCE(MAX(stream_seq), 0) + 1 FROM ledger_entries WHERE agent_id = $1`
-    /// within the same transaction, under the advisory lock (A41).
+    /// within the same transaction, under the per-agent advisory lock.
     ///
     /// INVARIANT: this MAX+1 assignment is safe ONLY under `pg_advisory_xact_lock`.
     /// If the advisory lock is ever removed, replace with a Postgres SEQUENCE object.
@@ -824,7 +824,7 @@ impl PersistencePort for PostgresPersistenceStore {
         rows.iter().map(row_to_edge).collect()
     }
 
-    /// Load the set of ClaimRefs served as injected claims for this agent (C6, F3).
+    /// Load the set of ClaimRefs served as injected claims for this agent (used by the Amplification Guard).
     fn load_injected_claims(
         &self,
         agent_id: &AgentId,
@@ -850,7 +850,7 @@ impl PersistencePort for PostgresPersistenceStore {
             .collect()
     }
 
-    /// Recursive CTE lineage traversal — identical SQL to SQLite (DB_REQUIREMENTS §1).
+    /// Recursive CTE lineage traversal — identical SQL to the SQLite adapter.
     ///
     /// Traverses `DerivedFrom` edges upward from `claim_ref`, returning all `ClaimEdge`
     /// rows in the lineage sub-graph ordered by depth ASC, then created_at ASC within depth.
@@ -926,7 +926,7 @@ impl PersistencePort for PostgresPersistenceStore {
             .collect()
     }
 
-    /// Postgres uses pool + per-agent advisory lock — no global write lock needed (A42).
+    /// Postgres uses a pool + per-agent advisory lock — no global write lock is needed.
     fn requires_global_write_serialization(&self) -> bool {
         false
     }

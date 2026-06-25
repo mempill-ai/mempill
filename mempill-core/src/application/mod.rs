@@ -1,4 +1,4 @@
-//! Application layer — public use-cases and DTOs (§4a, A27, A28, A29).
+//! Application layer — public use-cases and DTOs.
 //!
 //! All items here are `pub` — this is the stable public API surface consumed by bindings.
 //! Engine internals in `engine/` remain `pub(crate)`.

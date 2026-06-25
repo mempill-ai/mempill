@@ -26,8 +26,7 @@ conflict rather than silently resolving it. Every claim is written once and neve
 supersession is recorded as a new bounded assertion that links back to the original. The
 engine maintains two time axes: **transaction-time** (engine-stamped, reliable) and
 **valid-time** (caller-supplied, fallible, confidence-tagged). Belief is never stored — it
-is recomputed at read time from the full claim history via a deterministic canonical fold
-(invariant I3/I8).
+is recomputed at read time from the full claim history via a deterministic canonical fold.
 
 Key properties:
 
@@ -35,7 +34,8 @@ Key properties:
   assigned at injection time and immutable thereafter: `External` (first-hand, cheap-path
   eligible), `RecallReEntry` (engine output re-entering the write path — caught by the
   Amplification Guard to prevent belief amplification loops), or `ModelDerived`
-  (model-emitted, committed down-weighted). The type system enforces exhaustiveness.
+  (model-emitted, committed down-weighted, cannot overturn existing claims until anchored
+  to first-hand external). The type system enforces exhaustiveness.
 
 - **Contested is first-class.** When contradicting claims arrive and no oracle is present to
   adjudicate, the engine surfaces `Contested` rather than picking a winner. The 12-state
@@ -43,7 +43,7 @@ Key properties:
 
 - **Deterministic core, stochastic-behind-a-gate.** The engine embeds no AI model. Extractor
   and oracle ports are pluggable traits; the host supplies implementations. Stochastic
-  proposals never commit without passing the deterministic adjudication gate (C7).
+  proposals never commit without passing the deterministic adjudication gate.
 
 - **Single-writer-per-agent\_id** is a hard structural guarantee enforced by per-agent locks
   (SQLite) or advisory locking (PostgreSQL). Two concurrent processes MUST NOT hold write
@@ -55,7 +55,7 @@ Key properties:
 
 | Feature | Status | Notes |
 |---|---|---|
-| Rust core engine (all 8 components C1–C8) | ✅ v0.1 | 290 Rust tests, 0 warnings |
+| Rust core engine (8 deterministic components) | ✅ v0.1 | 290 Rust tests, 0 warnings |
 | SQLite persistence adapter (topology-a) | ✅ v0.1 | Embedded, file-per-agent, WAL + FULL sync |
 | Python PyO3 wheel (`mempill`) | ✅ v0.2 | maturin 1.14, PyO3 0.29, Python ≥ 3.11 |
 | MCP adapter (`mempill-mcp`) | ✅ v0.2 | FastMCP, 4 tools, stdio transport |
@@ -96,16 +96,16 @@ Key properties:
 
 The eight engine components:
 
-| ID | Component | Role |
-|---|---|---|
-| C1 | Gateway | Entry validation, provenance enforcement, ModelDerived default |
-| C2 | TruthEngine | Deterministic canonical valid-time fold (I8); never stores belief |
-| C3 | Reconciler | Contradiction classifier; reuses gate ConflictType/Proposal |
-| C4 | Supersession | Bound-assertion writer; non-destructive (I1); cascades PendingReview |
-| C5 | Projection | Currency decay (I11), Contested (I7), PendingReview surfacing |
-| C6 | Firewall / AmplificationGuard | RecallReEntry loop detection; burst quarantine; OP-1 depth cap |
-| C7 | AdjudicationGate | Deterministic cheap/heavy-path split; oracle-absent → Contested |
-| C8 | AuditLedger | Immutable ledger of all disposition outcomes; queryable by tx_time |
+| Component | Role |
+|---|---|
+| Gateway | Entry validation, provenance enforcement, ModelDerived default |
+| TruthEngine | Deterministic canonical valid-time fold; never stores belief |
+| Reconciler | Contradiction classifier; produces conflict-type proposals for the gate |
+| Supersession | Bound-assertion writer; non-destructive; cascades PendingReview to dependents |
+| Projection | Currency decay, Contested surfacing, PendingReview marker assembly |
+| Amplification Guard | RecallReEntry loop detection; burst quarantine; derivation-depth cap |
+| AdjudicationGate | Deterministic cheap/heavy-path split; oracle-absent → Contested |
+| AuditLedger | Immutable ledger of all disposition outcomes; queryable by tx_time |
 
 Port traits defined in `mempill-core/src/ports/`:
 `PersistencePort`, `OraclePort`, `ExtractorPort`, `EmbeddingPort`, `VectorPort`.
@@ -290,13 +290,13 @@ ProvenanceLabel::ModelDerived                             — model-emitted / in
 ```
 
 `External(*)` is the only channel eligible for the cheap (non-conflicting commit) path.
-`RecallReEntry` is caught by the Amplification Guard (C6) and corroborates by identity —
+`RecallReEntry` is caught by the Amplification Guard and corroborates by identity —
 it never becomes ground truth, preventing the belief-amplification loop where the engine
 reads its own output, re-ingests it as fresh evidence, and inflates confidence.
 `ModelDerived` is committed down-weighted and cannot overturn existing claims until anchored
 to a first-hand external claim.
 
-Provenance is assigned at injection time and immutable (invariant I4).
+Provenance is assigned at injection time and immutable (set once; no operation rewrites it).
 
 ### The 12 dispositions
 
@@ -329,21 +329,21 @@ Every write returns one of twelve dispositions:
 Belief is derived from the full claim + assertion history at read time (I3). Nothing is
 materialized as a single "current value" row.
 
-### Key invariants (plain language)
+### Key invariants
 
-- **I1 Non-destruction** — writes are INSERT-only. Supersession never deletes.
-- **I2 Bi-temporal by trust** — transaction-time is engine-stamped and reliable; valid-time
+- **Non-destruction** — writes are INSERT-only. Supersession never deletes.
+- **Bi-temporal by trust** — transaction-time is engine-stamped and reliable; valid-time
   is caller-supplied, fallible, and confidence-tagged.
-- **I3 Belief derived, never stored** — recomputed via canonical fold at read time.
-- **I4 Provenance immutable** — set at write time; no operation rewrites it.
-- **I5 Stochastic proposes, never commits** — engine embeds no model; ExtractorPort returns
-  proposals only; proposals pass through the deterministic gate (C7) before commit.
-- **I6 Idempotent append** — recall re-entry corroborates existing claim; never duplicates.
-- **I7 Contested first-class** — unresolved conflicts surfaced explicitly; never silently picked.
-- **I8 Read-time canonical** — canonical valid-time fold is the authoritative definition of belief.
-- **I9 Atomic commit unit** — {claim + bounding assertion + ledger entry} commits as one unit.
-- **I10 Fixed-history monotonicity** — belief is monotone over fixed history.
-- **I11 Currency decay** — claims decay with age; no DELETE; only explicit negative assertion
+- **Belief derived, never stored** — recomputed via canonical fold at read time.
+- **Provenance immutable** — set at write time; no operation rewrites it.
+- **Stochastic proposes, never commits** — the engine embeds no model; `ExtractorPort` returns
+  proposals only; proposals pass through the deterministic adjudication gate before commit.
+- **Idempotent append** — recall re-entry corroborates the existing claim; never duplicates.
+- **Contested first-class** — unresolved conflicts are surfaced explicitly; never silently picked.
+- **Read-time canonical** — the canonical valid-time fold is the authoritative definition of belief.
+- **Atomic commit unit** — {claim + bounding assertion + ledger entry} commits as one indivisible unit.
+- **Fixed-history monotonicity** — belief is monotone over a fixed history.
+- **Currency decay** — claims decay with age; no DELETE; only an explicit negative assertion
   yields `Invalidated`.
 
 ---
@@ -423,7 +423,7 @@ adapters is a hard requirement.
 | Crate / package | Language | Role | Status |
 |---|---|---|---|
 | `mempill-types` | Rust | Domain types: `ProvenanceLabel`, `Disposition`, `Claim`, `LedgerEntry`, etc. | ✅ v0.1 |
-| `mempill-core` | Rust | Engine components C1–C8, port traits, use-cases, DTOs, `EngineHandle` | ✅ v0.1 |
+| `mempill-core` | Rust | All 8 engine components, port traits, use-cases, DTOs, `EngineHandle` | ✅ v0.1 |
 | `mempill-sqlite` | Rust | SQLite `PersistencePort` adapter; `DefaultEngine` alias + constructors | ✅ v0.1 |
 | `mempill-postgres` | Rust | PostgreSQL `PersistencePort` adapter; `PostgresEngine` alias | ✅ v0.3 |
 | `mempill-python` | Rust + Python | PyO3/maturin wheel (`mempill`); Python SDK with `Engine`, `Disposition`, `ProvenanceLabel` | ✅ v0.2 |

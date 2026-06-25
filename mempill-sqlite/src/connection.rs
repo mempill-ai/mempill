@@ -3,11 +3,11 @@
 //! Every connection — whether backed by a file or opened in-memory — MUST have the
 //! mandatory PRAGMAs applied **before** migrations run or any write is served.
 //!
-//! # PRAGMA contract (CONSTRAINTS.md §D, DC-D, Section 5 DDL)
+//! # PRAGMA contract
 //!
 //! ```sql
 //! PRAGMA journal_mode = WAL;      -- WAL for concurrent reads during writes
-//! PRAGMA synchronous  = FULL;     -- full-durability write path (DC-D)
+//! PRAGMA synchronous  = FULL;     -- full-durability write path (WAL+NORMAL can lose writes on power loss)
 //! PRAGMA foreign_keys = ON;       -- enforce FK constraints from v1_initial.sql
 //! ```
 //!
@@ -25,7 +25,7 @@ use crate::migrations;
 /// Open a **file-backed** SQLite connection at `path`, apply mandatory PRAGMAs, then run
 /// any pending migrations.
 ///
-/// This is the production path for per-agent_id databases (DC-2: one file per agent).
+/// This is the production path for per-agent_id databases (one file per agent).
 pub fn open(path: &str) -> Result<Connection, crate::SqliteStoreError> {
     let conn = Connection::open(path)?;
     apply_pragmas(&conn)?;

@@ -11,24 +11,18 @@
 //!   - [`ports::ExtractorPort`]   — Stochastic proposer port (returns proposals, never commits).
 //!   - [`ports::EmbeddingPort`]   — BYO-embedding port for fuzzy candidate coverage.
 //!   - [`ports::VectorPort`]      — v0.1 compile-time seam (unimplemented; v0.2 sqlite-vec).
-//! - `config`  — [`EngineConfig`] struct with all OP-3 tuning parameters.
+//! - `config`  — [`EngineConfig`] struct with all tunable engine parameters.
 //! - `error`   — [`MemError`] enum (thiserror), [`WriteResult`], [`BeliefResult`] aliases.
 //! - `noop`    — [`noop::NoOpOracle`], [`noop::NoOpVector`] — do-nothing stubs for tests.
 //! - `application/` — use-cases (IngestClaim, QueryMemory, Reconcile, Audit) + public DTOs.
 //! - `engine_handle` — [`EngineHandle`] async public entry point; bridges async callers to sync core.
 //!
-//! ## Wave Scope
-//!
-//! W7 adds the application layer:
-//! - `application/` (A27–A29) — use-cases, DTOs, DTO↔domain mapping.
-//! - `engine_handle` — async EngineHandle wrapping use-cases via `spawn_blocking`.
-//!
-//! ## Sync Core Convention (F1, A20)
+//! ## Sync Core Convention
 //!
 //! All port traits and engine domain functions are synchronous. Async lives ONLY at the
 //! `EngineHandle` boundary via `tokio::task::spawn_blocking`. The concurrency module
 //! uses `tokio::sync` primitives (Mutex/RwLock) because the lock map is acquired by async
-//! Tokio tasks — this is the lock layer, not the domain layer (A22).
+//! Tokio tasks — this is the lock layer, not the domain layer.
 
 pub mod application;
 pub mod config;

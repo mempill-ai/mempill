@@ -55,7 +55,7 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `sqlite` | yes | Enables [`mempill_sqlite`] — embedded SQLite adapter (topology-a) |
-//! | `postgres` | no | Enables [`mempill_postgres`] — shared PostgreSQL adapter (topology-b) |
+//! | `postgres` | no | Enables `mempill_postgres` — shared PostgreSQL adapter (topology-b) |
 //!
 //! Both features can be enabled simultaneously (e.g., for tests that verify both backends).
 //!

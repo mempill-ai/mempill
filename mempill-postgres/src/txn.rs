@@ -1,6 +1,6 @@
-//! `PostgresTxn` — the concrete transaction handle wrapping a pooled Postgres connection (I9, §3).
+//! `PostgresTxn` — the concrete transaction handle wrapping a pooled Postgres connection.
 //!
-//! # Design (A39 — own the pooled connection, manual BEGIN/COMMIT/ROLLBACK)
+//! # Design (own the pooled connection, manual BEGIN/COMMIT/ROLLBACK)
 //!
 //! `postgres::Client::transaction()` returns `Transaction<'_>` that borrows `&mut Client`.
 //! This conflicts with `Txn: Send + 'static`. Resolution (identical to `SqliteTxn`): own the
@@ -9,7 +9,7 @@
 //! `PooledConnection<PostgresConnectionManager<NoTls>>` is `Send` (r2d2 guarantees).
 //! `PostgresTxn` is therefore `Send + 'static` without any `unsafe`.
 //!
-//! # Advisory lock (A40)
+//! # Per-agent_id advisory lock
 //!
 //! After `BEGIN`, the first statement is:
 //! ```sql
@@ -32,7 +32,7 @@ use mempill_types::identity::AgentId;
 
 use crate::connection::PostgresStoreError;
 
-/// An open, uncommitted Postgres transaction scoped to one `agent_id` (I9, DC-2).
+/// An open, uncommitted Postgres transaction scoped to one `agent_id`.
 ///
 /// Created by `PostgresPersistenceStore::begin_atomic`; consumed by `commit` or `rollback`.
 /// Owns the pooled connection for the duration of the transaction.
@@ -51,7 +51,7 @@ pub struct PostgresTxn {
 impl PostgresTxn {
     /// Begin a new transaction. Called exclusively from `PostgresPersistenceStore::begin_atomic`.
     ///
-    /// Issues `BEGIN` then acquires the per-agent_id advisory lock (A40).
+    /// Issues `BEGIN` then acquires the per-agent_id advisory lock.
     pub(crate) fn begin(
         agent_id: AgentId,
         mut conn: PooledConnection<PostgresConnectionManager<NoTls>>,

@@ -6,7 +6,7 @@
 //! ## Trusted-succession predicate
 //!
 //! A set of claims forms a "trusted succession" iff ALL of the following hold:
-//! 1. Every claim has `valid_time_confidence >= threshold` (§E — I2 fallback).
+//! 1. Every claim has `valid_time_confidence >= threshold` (claims with low confidence fall back to transaction-time ordering).
 //! 2. Every claim has a bounded `start` (not None).
 //! 3. The end may be None (= "until further notice"), but if present it must not
 //!    cause overlap with any adjacent window.

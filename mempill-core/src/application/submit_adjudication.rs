@@ -1,10 +1,10 @@
-//! SubmitAdjudicationUseCase — atomic verdict apply (TASK-9 W4, ORACLE_DESIGN §C.4, I9).
+//! SubmitAdjudicationUseCase — atomic oracle verdict apply.
 //!
 //! This is the RESOLUTION path: an oracle verdict arrives asynchronously and this use-case
 //! applies the transition atomically. All reads happen BEFORE begin_atomic; all writes
 //! happen inside a single begin_atomic/commit unit.
 //!
-//! # Disposition transitions per ORACLE_DESIGN C.4
+//! # Disposition transitions
 //!
 //! | Verdict | Challenger | Incumbent | Ledger entries |
 //! |---------|-----------|-----------|----------------|
@@ -12,17 +12,17 @@
 //! | Deny    | → Superseded (ValidityAssertion Bound + ledger) | stays committed (no change) | 1 |
 //! | Unknown | → Contested (ledger abstain entry) | → Contested (ledger abstain entry) | 2 (one per claim) |
 //!
-//! # Lock invariant (I9)
+//! # Lock invariant
 //!
-//! This use-case is SYNC — it runs inside spawn_blocking. The EngineHandle (W5) acquires
-//! store_write_lock then per-agent write lock BEFORE spawn_blocking, exactly mirroring ingest.
+//! This use-case is SYNC — it runs inside spawn_blocking. The EngineHandle acquires
+//! the store write lock then per-agent write lock BEFORE spawn_blocking, exactly mirroring ingest.
 //! This use-case must NOT acquire locks itself.
 //!
 //! # Transaction discipline
 //!
 //! Steps 1 and 3 (reads) execute BEFORE begin_atomic. Steps 4–6 (writes) execute inside
 //! one begin_atomic/commit unit. On any error inside the unit: rollback is called and Err
-//! is returned (I9 — no partial writes).
+//! is returned — no partial writes.
 
 use std::sync::Arc;
 

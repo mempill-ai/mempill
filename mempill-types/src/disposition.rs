@@ -1,7 +1,10 @@
-//! Disposition: the 12-state outcome model (SDK_CONTRACT §9, B3a/B3b).
+//! Disposition: the 12-state outcome model returned on every write.
 
-/// The 12-state disposition model (SDK_CONTRACT §9, B3a/B3b).
-/// Returned synchronously on every write; may transition asynchronously for heavy-path ops.
+/// The 12-state disposition model.
+///
+/// Returned synchronously on every write. For heavy-path (belief-overturning) operations,
+/// the engine returns `QueuedForAdjudication` immediately; the final state arrives
+/// asynchronously via the oracle callback.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Disposition {
     /// New non-conflicting first-hand external fact; committed Active at low currency.
@@ -30,9 +33,9 @@ pub enum Disposition {
     Rejected,
 }
 
-/// The synchronous write outcome returned from the engine (SDK_CONTRACT §9, TECHNICAL_DESIGN §11).
+/// The synchronous write outcome returned from the engine.
 ///
-/// For heavy-path ops, `disposition = QueuedForAdjudication`;
+/// For heavy-path (belief-overturning) operations, `disposition = QueuedForAdjudication`;
 /// the final state arrives asynchronously via the oracle callback.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WriteOutcome {

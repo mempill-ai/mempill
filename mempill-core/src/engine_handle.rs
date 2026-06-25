@@ -1,4 +1,4 @@
-//! EngineHandle — sole public async entry point for mempill (§4a, A20, A22, F1).
+//! EngineHandle — the sole public async entry point for mempill.
 //!
 //! Owns `Arc<impl Port>` references plus the per-agent_id write lock map.
 //! Every public method:

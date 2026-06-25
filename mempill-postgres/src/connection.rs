@@ -38,7 +38,7 @@ pub enum PostgresStoreError {
     Mapping(String),
 }
 
-/// The PostgreSQL-backed `PersistencePort` implementation (topology-b, A38, A39).
+/// The PostgreSQL-backed `PersistencePort` implementation.
 ///
 /// Construct via [`PostgresPersistenceStore::new`].
 /// Clone-friendly: the inner `r2d2::Pool` is `Arc`-wrapped by r2d2.

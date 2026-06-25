@@ -1,6 +1,6 @@
-//! Temporal types: bi-temporal model support (I2, A25).
+//! Temporal types: bi-temporal model support.
 
-/// Machine-stamped, monotone, reliable (I2). Engine-assigned; host cannot supply this as truth.
+/// Transaction-time stamp: machine-assigned, monotone, reliable. Engine-assigned; host cannot supply this as truth.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct TransactionTime(pub chrono::DateTime<chrono::Utc>);
@@ -12,8 +12,8 @@ impl TransactionTime {
     }
 }
 
-/// Valid-time interval — fallible, host-extracted (I2, F4).
-/// When start/end are None, ordering falls back to TransactionTime.
+/// Valid-time interval — fallible and host-extracted (confidence-tagged).
+/// When start/end are None, belief ordering falls back to TransactionTime.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ValidTime {
     pub start: Option<chrono::DateTime<chrono::Utc>>,
@@ -29,7 +29,7 @@ impl ValidTime {
     }
 
     /// Returns true iff the interval is temporally incoherent: start > end,
-    /// or start > tx_time (A25 — valid-time boundary must predate or equal when it was learned).
+    /// or start > tx_time (valid-time boundary must predate or equal the time it was learned).
     pub fn is_temporally_incoherent(&self, tx_time: &TransactionTime) -> bool {
         if let (Some(s), Some(e)) = (self.start, self.end) {
             if s > e {

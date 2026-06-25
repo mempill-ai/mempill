@@ -1,5 +1,7 @@
-//! Belief projection: derived, read-time types (SDK_CONTRACT §4.2, I3).
-//! BeliefProjection is never stored; recomputed on every query_belief call.
+//! Belief projection: derived, read-time types.
+//!
+//! `BeliefProjection` is never stored; it is recomputed on every `query_memory` call
+//! by performing a canonical valid-time fold over the full claim and assertion history.
 
 use crate::claim::{Confidence, Criticality, Fact};
 use crate::identity::ClaimRef;
@@ -9,8 +11,10 @@ use crate::time::{TransactionTime, ValidTime};
 // Re-use Cardinality from claim — it's defined there per the design.
 // belief.rs needs Fact, etc., so we import the types from the parent modules.
 
-/// The read-time canonical projection (SDK_CONTRACT §4.2).
-/// Derived, never stored (I3). Recomputed on every query_belief call.
+/// The read-time canonical belief projection.
+///
+/// Derived, never stored. Recomputed on every `query_memory` call by the TruthEngine
+/// performing a canonical valid-time fold. No pre-computed "current value" row exists.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BeliefProjection {
     pub status: BeliefStatus,
@@ -28,11 +32,11 @@ pub struct BeliefProjection {
 pub enum BeliefStatus {
     /// Single live truth.
     Resolved,
-    /// External contradiction, oracle absent (V3-5).
+    /// External contradiction, oracle absent — conflict surfaces explicitly rather than being resolved silently.
     Contested,
     /// Multiple mutually-exclusive active beliefs.
     Conflict,
-    /// Value known, valid-time window unknown (F4).
+    /// Value known, but the valid-time window is unknown (caller did not supply valid-time).
     TimingUncertain,
     /// Subject-line exists but no currently-valid claim.
     NoBelief,
@@ -57,8 +61,11 @@ pub enum CurrencyState {
     Decayed,
 }
 
-/// Derived, decaying signal (I11, V3-6, V3-7).
-/// Refreshes only on provenance-independent restatement.
+/// Currency signal — derived and decaying, refreshed only on provenance-independent restatement.
+///
+/// Currency is not stored; it is computed at read time from `(now - last_refreshed_at)`
+/// relative to the configured aging thresholds. Claims that are not reconfirmed by an
+/// independent source decay over time toward `AgingUnconfirmed` then `Decayed`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CurrencySignal {
     /// When this claim's currency was last refreshed (by a provenance-independent restatement).
@@ -80,11 +87,11 @@ pub enum Marker {
     Contested,
     PendingConflict,
     PendingReview,
-    /// Set member beyond currency decay threshold (V3-6).
+    /// Set member that has exceeded the currency decay threshold (aging signal).
     AgedSetMember,
     /// Claim origin includes RecallReEntry provenance.
     RecallTainted,
-    /// derivation_depth > cap for currency boost (OP-1).
+    /// Derivation depth exceeds the configured cap for currency boosts.
     LowDerivationAnchor,
 }
 

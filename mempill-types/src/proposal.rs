@@ -1,5 +1,8 @@
 //! Proposal types: stochastic proposer output and adjudication request/response.
-//! These types cross the stochastic/deterministic boundary (SDK_CONTRACT §7, I5).
+//!
+//! These types cross the stochastic/deterministic boundary. Proposals from extractors
+//! and oracles are always advisory — the deterministic engine core decides all
+//! dispositions and no stochastic output can commit directly.
 
 use crate::belief::Belief;
 use crate::claim::{Cardinality, Confidence, Criticality};
@@ -9,8 +12,11 @@ use crate::time::ValidTime;
 use crate::claim::Fact;
 use crate::claim::Claim;
 
-/// Stochastic proposer output (SDK_CONTRACT §7, I5). Never a commit.
-/// The engine receives proposals and decides all dispositions deterministically.
+/// Stochastic proposer output — never a commit.
+///
+/// The engine receives proposals from `ExtractorPort` and decides all dispositions
+/// deterministically. Proposals carry no authority to commit; they flow through the
+/// reconciler and adjudication gate before any write is made.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClaimProposal {
     pub fact: Fact,
@@ -22,7 +28,7 @@ pub struct ClaimProposal {
     pub suggested_provenance: Option<ProvenanceLabel>,
 }
 
-/// Adjudication request sent to the OraclePort (SDK_CONTRACT §5, C7).
+/// Adjudication request sent to the `OraclePort` by the adjudication gate.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AdjudicationRequest {
     pub subject_line: SubjectLineRef,

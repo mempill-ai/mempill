@@ -3,9 +3,9 @@
 //! Applies versioned DDL to a rusqlite [`Connection`] in a deterministic, idempotent manner.
 //! Schema version is tracked via SQLite's built-in `user_version` PRAGMA.
 //!
-//! # Intended PRAGMA environment (applied at connection open in W5 — connection.rs)
+//! # Intended PRAGMA environment (applied at connection open in connection.rs)
 //! - `PRAGMA journal_mode=WAL;`  — write-ahead log for concurrent reads during writes
-//! - `PRAGMA synchronous=FULL;`  — full durability (DC-D, CONSTRAINTS.md §D)
+//! - `PRAGMA synchronous=FULL;`  — full durability (mandatory; WAL+NORMAL can lose writes on power loss)
 //! - `PRAGMA foreign_keys=ON;`   — enforce FK constraints defined in DDL
 
 use rusqlite::{Connection, Result};
@@ -34,7 +34,7 @@ pub enum MigrationError {
 ///
 /// Idempotent: calling this function on a fully-migrated database is a no-op.
 /// Each migration step runs inside its own transaction so a partial failure leaves the
-/// database at a consistent version boundary (I9 — atomic commit unit).
+/// database at a consistent version boundary (each migration step is fully atomic).
 ///
 /// Connection lifecycle and PRAGMA initialisation (`journal_mode=WAL`, `synchronous=FULL`,
 /// `foreign_keys=ON`) are the caller's responsibility (implemented in `connection.rs`, W5).

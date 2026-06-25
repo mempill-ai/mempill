@@ -1,21 +1,21 @@
-//! PersistencePort — INSERT-only, agent_id-first port (SDK_CONTRACT §6, I1, A4).
+//! PersistencePort — INSERT-only, agent_id-first persistence abstraction.
 //!
 //! All methods take `agent_id` as the primary parameter (not a filter).
-//! MUST enforce: single-writer per agent_id; append-only; atomic commit unit.
+//! Must enforce: single-writer per agent_id; append-only; atomic commit unit.
 
 use mempill_types::{
     AgentId, Claim, ClaimEdge, ClaimRef, LedgerEntry, TransactionTime, ValidityAssertion,
 };
 
-/// An opaque transaction handle scoped to exactly one agent_id (I9, DC-2).
-/// No cross-agent transaction is possible.
+/// An opaque transaction handle scoped to exactly one agent_id.
+/// No cross-agent transaction is possible (atomic commit unit is per-agent_id).
 pub trait Txn: Send + 'static {
     fn agent_id(&self) -> &AgentId;
 }
 
-/// The persistence port — INSERT-only, agent_id-first (SDK_CONTRACT §6, I1, A4).
-/// All methods take agent_id as primary parameter (not a filter).
-/// MUST enforce: single-writer per agent_id; append-only; atomic commit unit.
+/// The persistence port — INSERT-only, agent_id-first.
+/// All methods take `agent_id` as the primary parameter (not a filter).
+/// Must enforce: single-writer per agent_id; append-only; atomic commit unit.
 pub trait PersistencePort: Send + Sync + 'static {
     type Transaction: Txn;
     type Error: std::error::Error + Send + Sync + 'static;
@@ -84,13 +84,13 @@ pub trait PersistencePort: Send + Sync + 'static {
         claim_ref: &ClaimRef,
     ) -> Result<Vec<ClaimEdge>, Self::Error>;
 
-    /// Load the set of claims this agent served in session context (for C6 entailment check, F3).
+    /// Load the set of claims this agent served as injected context in the current session (for Amplification Guard entailment check).
     fn load_injected_claims(
         &self,
         agent_id: &AgentId,
     ) -> Result<Vec<ClaimRef>, Self::Error>;
 
-    /// Recursive CTE lineage traversal (DB_REQUIREMENTS.md §1).
+    /// Recursive CTE lineage traversal — returns the full `DerivedFrom` ancestry for a claim.
     fn load_lineage(
         &self,
         agent_id: &AgentId,

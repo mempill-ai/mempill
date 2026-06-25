@@ -1,24 +1,30 @@
-//! Provenance types: structural invariant on every write (SDK_CONTRACT §2, I4, DC-1).
+//! Provenance types: the typed, immutable channel assigned to every write.
+//!
+//! Provenance is set at injection time and never rewritten. It determines routing
+//! through the adjudication gate and whether a claim is eligible for the cheap
+//! (non-conflicting) commit path.
 
-/// The structural invariant of the write surface (SDK_CONTRACT §2, I4, DC-1).
-/// Required, typed field on every write. Assigned at injection time. Immutable.
-/// Model-emitted content defaults to `ModelDerived` — callers cannot override this default
-/// by supplying a more prestigious label; the gateway enforces the default (see C1 gateway.rs).
+/// The provenance channel assigned to every write — required, typed, and immutable.
+///
+/// Provenance is set at injection time and cannot be changed after the claim is committed.
+/// It determines how the engine routes the claim through the adjudication gate.
+/// Model-emitted content must use `ModelDerived` — the ingestion gateway enforces this
+/// and callers cannot override it by supplying a more prestigious label.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "kind")]
 #[non_exhaustive]
 pub enum ProvenanceLabel {
     /// First-hand external evidence — the ONLY cheap-path-eligible channel.
     External(ExternalKind),
-    /// Content the engine itself previously served, re-entering the write path (X2 loop).
-    /// Caught by C6 (firewall.rs). Corroborates by identity; never becomes ground truth.
+    /// Content the engine itself previously served, re-entering the write path.
+    /// Caught by the Amplification Guard (firewall). Corroborates by identity; never becomes ground truth.
     RecallReEntry,
     /// Model-emitted / inferred content. The mandatory default for model output.
     /// Committed down-weighted (Inferred disposition); ineligible to overturn until anchored.
     ModelDerived,
 }
 
-/// Sub-channel for External provenance (SDK_CONTRACT §2.1).
+/// Sub-channel for External provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ExternalKind {
     /// A first-hand human assertion (user as oracle).
@@ -40,9 +46,10 @@ impl ProvenanceLabel {
     }
 }
 
-/// Distance from the nearest first-hand external anchor (SDK_CONTRACT §2.2, OP-1).
-/// Derivation depth 0 = the claim IS a first-hand external claim.
-/// Chains with depth > OP-3.derivation_depth_cap are ineligible for currency boosts/overturning.
+/// Distance from the nearest first-hand external anchor in the provenance lineage.
+/// Derivation depth 0 = the claim is itself a first-hand external claim.
+/// Claims with a depth exceeding the configured cap are ineligible for currency boosts or
+/// overturning an incumbent belief.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExternalAnchor {
     /// ClaimRef of the nearest first-hand external claim in the lineage, if known.

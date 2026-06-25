@@ -1,13 +1,16 @@
-//! OraclePort — pull-based, non-blocking adjudication port (SDK_CONTRACT §5, DC-4, A15).
+//! OraclePort — pull-based, non-blocking adjudication port.
 //!
-//! Host-implemented. Engine NEVER blocks waiting for a verdict.
-//! Absence of oracle → Contested, never silent incumbent-wins (V3-5).
+//! Host-implemented. The engine NEVER blocks waiting for a verdict.
+//! Absence of oracle → `Contested`, never silent incumbent-wins.
+//! The oracle delivers responses asynchronously via `EngineHandle::submit_adjudication`.
 
 use mempill_types::{AgentId, AdjudicationRequest};
 
-/// The oracle port — pull-based, non-blocking (SDK_CONTRACT §5, DC-4, A15).
-/// Host-implemented. Engine NEVER blocks waiting for a verdict.
-/// Absence of oracle → Contested, never silent incumbent-wins (V3-5).
+/// The oracle port — pull-based, non-blocking.
+///
+/// Host-implemented. The engine NEVER blocks waiting for a verdict.
+/// When no oracle is registered, conflicting claims surface as `Contested`
+/// rather than silently picking the incumbent.
 pub trait OraclePort: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
     /// An opaque handle for correlating the async response back to the engine.
