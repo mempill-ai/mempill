@@ -2,6 +2,8 @@
 
 Temporally-correct memory for AI agents — bi-temporal claim store with Contested-first conflict surfacing and oracle resolution.
 
+📖 **Documentation: <https://mempill.netlify.app>**
+
 This crate is a thin facade over [`mempill-core`](../mempill-core) and the persistence adapters.
 
 ## Usage

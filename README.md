@@ -5,6 +5,8 @@
 **0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 462 Rust + 65 Python tests, 0 warnings
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
+📖 **Documentation: <https://mempill.netlify.app>** · [GitHub](https://github.com/mempill-ai/mempill)
+
 ---
 
 ## The problem
