@@ -2,7 +2,7 @@
 
 **Temporally-correct AI-agent memory — append-only, bi-temporal, provenance-aware.**
 
-**0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 462 Rust + 65 Python tests, 0 warnings
+**0.2.0** · Apache-2.0 · MSRV 1.88 · 462 Rust + 65 Python tests, 0 warnings · [crates.io](https://crates.io/crates/mempill) · [docs.rs](https://docs.rs/mempill)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
 ---
@@ -69,7 +69,7 @@ Key properties:
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
 | Service tier (topology-c) | ⏳ Deferred | Multi-agent shared service; not in scope yet |
-| Published to crates.io / PyPI | ⏳ Planned | Not yet published; use path/git dependencies |
+| Published to crates.io / PyPI | ✅ Shipped | on crates.io + PyPI (`cargo add mempill` / `pip install mempill`) |
 
 The HITL reference oracle and console/LangGraph agent demos live in the separate `mempill-demo` repository.
 
@@ -123,35 +123,45 @@ The host supplies concrete implementations; the engine embeds none.
 
 ### Rust
 
-mempill is not yet published to crates.io. Use the `mempill` facade crate via path or git:
+```sh
+cargo add mempill                          # SQLite backend (default)
+cargo add mempill --features postgres      # PostgreSQL backend
+```
+
+Or in `Cargo.toml` directly:
 
 ```toml
-# Cargo.toml
 [dependencies]
-mempill = { path = "../mempill/mempill-facade" }           # SQLite (default)
+mempill = "0.2"                            # SQLite (default)
 # or:
-mempill = { path = "../mempill/mempill-facade", features = ["postgres"] }
+mempill = { version = "0.2", features = ["postgres"] }
 ```
 
-You can also depend on individual crates directly:
+Individual crates are also published (`mempill-core`, `mempill-types`, `mempill-sqlite`, `mempill-postgres`):
 
 ```toml
-mempill-sqlite = { path = "../mempill/mempill-sqlite" }   # or git = "..."
-mempill-core   = { path = "../mempill/mempill-core" }
+mempill-core     = "0.2"
+mempill-sqlite   = "0.2"
+mempill-postgres = "0.2"
 ```
 
-For PostgreSQL topology-b directly:
+**Build from source** (optional — path dependencies, for development against a local checkout):
 
 ```toml
-mempill-postgres = { path = "../mempill/mempill-postgres" }
+mempill = { path = "../mempill/mempill-facade" }
 ```
 
 ### Python wheel
 
-Requires Python ≥ 3.11 and a Rust toolchain.
+```sh
+pip install mempill
+```
+
+Requires Python ≥ 3.11. The wheel is published on [PyPI](https://pypi.org/project/mempill/).
+
+**Build from source** (optional — requires a Rust toolchain):
 
 ```sh
-# Build and install the wheel into your environment
 cd mempill-python
 pip install maturin
 maturin develop --release    # or: maturin build --release && pip install target/wheels/*.whl
@@ -160,10 +170,10 @@ maturin develop --release    # or: maturin build --release && pip install target
 ### MCP adapter
 
 ```sh
-# Install the wheel first (see above), then:
-cd mempill-mcp
-pip install .
+pip install mempill-mcp
 ```
+
+Published on [PyPI](https://pypi.org/project/mempill-mcp/).
 
 Run the MCP server:
 
