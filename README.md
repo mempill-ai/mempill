@@ -2,10 +2,13 @@
 
 **Temporally-correct AI-agent memory — append-only, bi-temporal, provenance-aware.**
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+
+**[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
+
 **0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 462 Rust + 65 Python tests, 0 warnings
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
-📖 **Documentation: <https://mempill.netlify.app>** · [GitHub](https://github.com/mempill-ai/mempill)
 
 ---
 
