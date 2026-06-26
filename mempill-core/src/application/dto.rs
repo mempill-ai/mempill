@@ -14,7 +14,12 @@ use mempill_types::{
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IngestClaimRequest {
     pub agent_id: AgentId,
+    /// Opaque key — the entity the claim is about (e.g. `"acme:ceo"`). mempill does
+    /// **not** perform entity resolution; you must use the same `subject` on write and
+    /// read. Adopt a canonical key convention and apply it consistently across both paths.
     pub subject: String,
+    /// Opaque key — the property being asserted (e.g. `"held_by"`). Like [`Self::subject`],
+    /// it is matched verbatim; the engine cannot reconcile differently-keyed facts for you.
     pub predicate: String,
     pub value: serde_json::Value,
     /// Required; no default imposed here — gateway enforces ModelDerived default for model output.
