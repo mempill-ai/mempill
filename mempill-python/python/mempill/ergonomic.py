@@ -76,24 +76,29 @@ class RememberOptions:
     """Optional overrides for remember(). All fields have safe defaults.
 
     Args:
-        valid_from:  Lenient date string — YYYY / YYYY-MM / YYYY-MM-DD / RFC3339.
-                     None means open / unknown start (valid_time_confidence = 0.0).
-        valid_until: Lenient date string. None means open-ended.
-        confidence:  Value confidence [0.0, 1.0]. Also used as valid_time_confidence
-                     when dates are provided (eliminates the duplicate-field quirk).
-                     Defaults to 1.0 (user-stated facts are user-stated truth).
-        cardinality: "Functional" | "SetValued" | "Unknown". Defaults to "Functional".
-        provenance:  Wire-shape provenance dict. Defaults to External/UserAsserted.
-                     Power users may pass ProvenanceLabel.model_derived() etc.
-        criticality: "Low" | "Medium" | "High" | "Critical". Defaults to "Medium".
+        valid_from:   Lenient date string — YYYY / YYYY-MM / YYYY-MM-DD / RFC3339.
+                      None means open / unknown start (valid_time_confidence = 0.0).
+        valid_until:  Lenient date string. None means open-ended.
+        confidence:   Value confidence [0.0, 1.0]. Also used as valid_time_confidence
+                      when dates are provided (eliminates the duplicate-field quirk).
+                      Defaults to 1.0 (user-stated facts are user-stated truth).
+        cardinality:  "Functional" | "SetValued" | "Unknown". Defaults to "Functional".
+        provenance:   Wire-shape provenance dict. Defaults to External/UserAsserted.
+                      Power users may pass ProvenanceLabel.model_derived() etc.
+        criticality:  "Low" | "Medium" | "High" | "Critical". Defaults to "Medium".
+        derived_from: List of upstream claim_ref UUID strings that this fact was
+                      derived from. Forwarded verbatim into the ingest request's
+                      ``derived_from`` field. Defaults to empty list.
+                      Used to express lineage for RecallReEntry / model-derived chains.
     """
 
-    valid_from:  Optional[str] = None
-    valid_until: Optional[str] = None
-    confidence:  float         = 1.0
-    cardinality: str           = "Functional"
-    provenance:  Optional[dict] = None   # None → External/UserAsserted at call time
-    criticality: str           = "Medium"
+    valid_from:   Optional[str]   = None
+    valid_until:  Optional[str]   = None
+    confidence:   float           = 1.0
+    cardinality:  str             = "Functional"
+    provenance:   Optional[dict]  = None   # None → External/UserAsserted at call time
+    criticality:  str             = "Medium"
+    derived_from: list[str]       = field(default_factory=list)
 
 
 @dataclass
@@ -112,6 +117,34 @@ class RememberReceipt:
 
 
 @dataclass
+class BeliefDetail:
+    """Rich detail for a single belief (primary or candidate).
+
+    Available via ``RecallResult.primary`` (resolved belief) and
+    ``ContestCandidate.detail`` (each contested candidate).
+
+    Attributes:
+        claim_ref:           UUID string of the backing claim.
+        value:               The asserted value.
+        valid_from:          RFC3339 start of the valid-time window, or None if open/unknown.
+        valid_until:         RFC3339 end of the valid-time window, or None if open-ended.
+        value_confidence:    Value confidence (0.0–1.0).
+        provenance:          Human-readable label, e.g. "External/UserAsserted",
+                             "RecallReEntry", "ModelDerived".
+        corroboration_count: Number of independent corroborating sources recorded by
+                             the engine (confidence annotation only; not a gate).
+    """
+
+    claim_ref:           str
+    value:               Any
+    valid_from:          Optional[str]
+    valid_until:         Optional[str]
+    value_confidence:    float
+    provenance:          str
+    corroboration_count: int
+
+
+@dataclass
 class ContestCandidate:
     """One candidate in a Contested/Conflict belief.
 
@@ -119,11 +152,18 @@ class ContestCandidate:
         value:     The candidate value.
         claim_ref: UUID string of the backing claim.
         valid_from: RFC3339 start of the claim's valid time, or None if open.
+        detail:    Full ``BeliefDetail`` for this candidate — same fields as
+                   the primary belief detail, enabling view construction without
+                   navigating the deep belief path.
     """
 
     value:      Any
     claim_ref:  str
     valid_from: Optional[str]
+    detail:     BeliefDetail = field(default_factory=lambda: BeliefDetail(
+        claim_ref="", value=None, valid_from=None, valid_until=None,
+        value_confidence=0.0, provenance="", corroboration_count=0,
+    ))
 
 
 @dataclass
@@ -138,13 +178,17 @@ class RecallResult:
                     to inspect conflicting options.
         currency:   Currency signal string ("Fresh", "Stale", etc.).
         is_stale:   True when the engine signals the belief may be outdated.
+        primary:    Full ``BeliefDetail`` for the resolved primary belief.
+                    None when status is NoBelief. For Contested/Conflict, read
+                    ``candidates[n].detail`` instead — primary is not set.
     """
 
     value:      Optional[Any]
     status:     str
-    candidates: list[ContestCandidate] = field(default_factory=list)
-    currency:   str                    = "Fresh"
-    is_stale:   bool                   = False
+    candidates: list[ContestCandidate]  = field(default_factory=list)
+    currency:   str                     = "Fresh"
+    is_stale:   bool                    = False
+    primary:    Optional[BeliefDetail]  = None
 
     def as_str(self) -> Optional[str]:
         """Return value as a string, or None.
@@ -165,6 +209,33 @@ class RecallResult:
     def is_empty(self) -> bool:
         """True when the engine has no live claim for this subject+predicate."""
         return self.status == "NoBelief"
+
+
+# ── Internal helpers ─────────────────────────────────────────────────────────
+
+def _provenance_label_str(prov: Any) -> str:
+    """Convert a raw provenance dict or string to a human-readable label.
+
+    Matches the Rust ergonomic surface:
+      External/UserAsserted, External/ExternalFirstHand, RecallReEntry, ModelDerived.
+    """
+    if isinstance(prov, dict):
+        t = prov.get("type", "")
+        k = prov.get("kind", "")
+        if t == "External":
+            if k == "UserAsserted":
+                return "External/UserAsserted"
+            if k == "ExternalFirstHand":
+                return "External/ExternalFirstHand"
+            return f"External/{k}" if k else "External"
+        if t == "RecallReEntry":
+            return "RecallReEntry"
+        if t == "ModelDerived":
+            return "ModelDerived"
+        return t or str(prov)
+    if isinstance(prov, str):
+        return prov
+    return str(prov) if prov is not None else ""
 
 
 # ── Tier-1 functions ──────────────────────────────────────────────────────────
@@ -230,7 +301,7 @@ def remember(
             "valid_time_confidence": vtc,
         },
         "criticality": opts.criticality,
-        "derived_from": [],
+        "derived_from": list(opts.derived_from),
     }
 
     resp = engine.ingest_claim(request)
@@ -279,11 +350,11 @@ def recall(
     # Contested: primary is None, both candidates live in alternatives.
     # TimingUncertain / NoBelief: primary is also None.
     # We treat all no-primary cases as value=None — but status distinguishes them.
-    primary = belief.get("primary")
+    primary_raw = belief.get("primary")
 
-    if primary is not None:
-        resolved_value = (primary.get("fact") or {}).get("value")
-        currency_signal = primary.get("currency_signal") or {}
+    if primary_raw is not None:
+        resolved_value = (primary_raw.get("fact") or {}).get("value")
+        currency_signal = primary_raw.get("currency_signal") or {}
         # The engine uses "state" as the key inside currency_signal.
         currency_str: str = currency_signal.get("state", currency_signal.get("currency", "Fresh"))
         staleness_block = belief.get("staleness") or {}
@@ -295,19 +366,68 @@ def recall(
         staleness_block = belief.get("staleness") or {}
         is_stale = staleness_block.get("is_stale", False)
 
+    # ── Helper: build a BeliefDetail from a raw belief dict ──────────────────
+    def _make_detail(b: dict) -> BeliefDetail:
+        fact = b.get("fact") or {}
+        vt = b.get("valid_time") or {}
+        conf = b.get("confidence") or {}
+        csig = b.get("currency_signal") or {}
+        prov_raw = b.get("provenance")
+        return BeliefDetail(
+            claim_ref=b.get("claim_ref", ""),
+            value=fact.get("value"),
+            valid_from=vt.get("start"),
+            valid_until=vt.get("end"),
+            value_confidence=float(conf.get("value_confidence", 0.0)),
+            provenance=_provenance_label_str(prov_raw),
+            corroboration_count=int(csig.get("corroboration_count", 0)),
+        )
+
+    # Build primary BeliefDetail when we have a concrete primary and status is not Contested.
+    if primary_raw is not None and status not in ("Contested", "Conflict"):
+        primary_detail: Optional[BeliefDetail] = _make_detail(primary_raw)
+    else:
+        primary_detail = None
+
     # Map alternatives → ContestCandidate list (populated for Contested/Conflict).
+    # For Contested: the engine places both competing beliefs in alternatives[].
+    # For Contested: we also pull the primary belief (if any) into candidates
+    # so the full set is visible — matching the Rust ergonomic behaviour.
     candidates: list[ContestCandidate] = []
-    for alt in (belief.get("alternatives") or []):
-        if alt is None:
-            continue
-        alt_value = (alt.get("fact") or {}).get("value")
-        alt_ref   = alt.get("claim_ref", "")
-        alt_vt    = (alt.get("valid_time") or {}).get("start")
+    raw_contest_beliefs = []
+    if status in ("Contested", "Conflict"):
+        if primary_raw is not None:
+            raw_contest_beliefs.append(primary_raw)
+        raw_contest_beliefs.extend(b for b in (belief.get("alternatives") or []) if b is not None)
+    else:
+        raw_contest_beliefs = []
+
+    for b in raw_contest_beliefs:
+        b_value = (b.get("fact") or {}).get("value")
+        b_ref   = b.get("claim_ref", "")
+        b_vt    = (b.get("valid_time") or {}).get("start")
         candidates.append(ContestCandidate(
-            value=alt_value,
-            claim_ref=alt_ref,
-            valid_from=alt_vt,
+            value=b_value,
+            claim_ref=b_ref,
+            valid_from=b_vt,
+            detail=_make_detail(b),
         ))
+
+    # For non-contested beliefs, alternatives are not contest candidates but we
+    # still need to handle the original non-contested alternative path.
+    if not candidates and status not in ("Contested", "Conflict"):
+        for alt in (belief.get("alternatives") or []):
+            if alt is None:
+                continue
+            alt_value = (alt.get("fact") or {}).get("value")
+            alt_ref   = alt.get("claim_ref", "")
+            alt_vt    = (alt.get("valid_time") or {}).get("start")
+            candidates.append(ContestCandidate(
+                value=alt_value,
+                claim_ref=alt_ref,
+                valid_from=alt_vt,
+                detail=_make_detail(alt),
+            ))
 
     return RecallResult(
         value=resolved_value,
@@ -315,6 +435,7 @@ def recall(
         candidates=candidates,
         currency=currency_str,
         is_stale=is_stale,
+        primary=primary_detail,
     )
 
 
@@ -322,6 +443,7 @@ __all__ = [
     "UnparsableDateError",
     "RememberOptions",
     "RememberReceipt",
+    "BeliefDetail",
     "ContestCandidate",
     "RecallResult",
     "remember",

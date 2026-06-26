@@ -90,6 +90,7 @@ pub use ergonomic::{
     RememberReceipt,
     RecallResult,
     ContestCandidate,
+    BeliefDetail,
     // Error
     MempillDxError,
     // Seam traits (for advanced users who write generic code over the engine)
