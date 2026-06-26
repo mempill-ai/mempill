@@ -70,6 +70,7 @@ Key properties:
 | Python PyO3 wheel (`mempill`) | ✅ Shipped | maturin 1.14, PyO3 0.29, Python ≥ 3.11; includes Python oracle bridge |
 | MCP adapter (`mempill-mcp`) | ✅ Shipped | FastMCP, 4 tools, stdio transport |
 | `mempill` facade crate | ✅ Shipped | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
+| Bi-temporal history + valid-time as-of query | ⏳ Planned (v0.3) | Reads return only the *current* belief — no per-subject-line history (`query_history`), and `as_of_tx_time` is transaction-time only; valid-time as-of (`valid_at`) is planned |
 | Vector search / VectorPort | ⏳ Planned | Structural seam exists (NoOp); no vector retrieval yet |
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
