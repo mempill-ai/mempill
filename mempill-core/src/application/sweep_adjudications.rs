@@ -1,4 +1,4 @@
-//! SweepAdjudicationsUseCase — TTL expiry + orphan recovery (TASK-9 W6).
+//! SweepAdjudicationsUseCase — TTL expiry and orphan recovery.
 //!
 //! This use-case handles two distinct reversion scenarios atomically:
 //!
@@ -11,7 +11,7 @@
 //! 2. **Orphaned QueuedForAdjudication claims** (`revert_orphan`): claims with
 //!    `QueuedForAdjudication` disposition that have NO matching `pending_adjudications` row.
 //!    These arise from a crash in the window between main-txn commit and pending-row insert
-//!    (see W3 NOTE in ingest_claim.rs). Recovery writes a Contested ledger entry so the
+//!    (see the post-commit orphan window note in ingest_claim.rs). Recovery writes a Contested ledger entry so the
 //!    claim is treated as `Contested[both]` from that point forward.
 //!
 //! # Lock invariant
@@ -43,7 +43,7 @@ use crate::{
     },
 };
 
-/// Sync use-case for the W6 sweep.
+/// Sync use-case: sweeps expired adjudication rows and recovers orphaned claims.
 pub struct SweepAdjudicationsUseCase<P>
 where
     P: PersistencePort + Send + Sync + 'static,
@@ -76,7 +76,7 @@ where
         let handle_id = row.handle_id;
 
         // ── Pre-check: verify challenger is still QueuedForAdjudication ──────────
-        // Load ledger BEFORE begin_atomic (DEFECT-1 pattern).
+        // Load ledger BEFORE begin_atomic to avoid reads inside an open transaction.
         let ledger = self.persistence
             .load_ledger(&agent_id, None, 10_000)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;

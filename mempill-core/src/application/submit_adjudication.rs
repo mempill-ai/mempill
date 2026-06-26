@@ -57,7 +57,7 @@ where
         Self { persistence, pending_store }
     }
 
-    /// Execute the verdict-apply algorithm (W4 spec).
+    /// Execute the verdict-apply algorithm.
     ///
     /// `now` is engine-stamped at the async boundary and passed in (DETERMINISM).
     pub fn execute(
@@ -68,7 +68,7 @@ where
     ) -> Result<AdjudicationOutcome, MemError> {
         let tx_time = TransactionTime(now);
 
-        // ── Step 1: Look up the pending row in the DB (DB-authoritative, Amendment 1) ──
+        // ── Step 1: Look up the pending row in the DB (DB-authoritative) ──
         let row = self.pending_store
             .get_pending_erased(handle_id)
             .map_err(|e| MemError::PendingStore { source: e })?
@@ -152,7 +152,7 @@ where
             return Err(MemError::AdjudicationHandleNotFound { handle_id });
         }
 
-        // Pre-load edges for supersession BEFORE begin_atomic (DEFECT-1 fix pattern).
+        // Pre-load edges for supersession BEFORE begin_atomic to avoid reads inside an open transaction.
         // For Affirm: need to bound the incumbent → load its edges.
         // For Deny: need to bound the challenger → load its edges.
         let incumbent_edges = self.persistence

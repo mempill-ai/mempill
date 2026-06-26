@@ -101,7 +101,7 @@ pub type OracleEngine<O> = mempill_core::EngineHandle<
 /// Open a **file-backed** SQLite engine wired with a real oracle.
 ///
 /// The pending-adjudication store is constructed from the same SQLite connection,
-/// enabling full W4–W5 oracle resolution. `open_default` / `DefaultEngine` remain unchanged.
+/// enabling full oracle resolution. `open_default` / `DefaultEngine` remain unchanged.
 ///
 /// # Errors
 /// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.

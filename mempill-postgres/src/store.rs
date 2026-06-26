@@ -934,7 +934,7 @@ impl PersistencePort for PostgresPersistenceStore {
 
 // ── PostgresPendingStore ──────────────────────────────────────────────────────
 
-/// PostgreSQL-backed `PendingAdjudicationPort` implementation (W3, Amendment 1).
+/// PostgreSQL-backed `PendingAdjudicationPort` implementation.
 ///
 /// Uses the same r2d2 pool as `PostgresPersistenceStore`. Each method borrows a pooled
 /// connection for the duration of a single non-transactional statement (auto-commit).

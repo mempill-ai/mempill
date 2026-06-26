@@ -7,7 +7,7 @@
 //! "now" is injected by the EngineHandle caller (DETERMINISM convention).
 //! The lock is acquired at the EngineHandle boundary before spawn_blocking.
 //!
-//! # Pending-adjudication persistence (W3, Amendment 1)
+//! # Pending-adjudication persistence
 //!
 //! When the gate routes to QueuedForAdjudication and an oracle IS present, the use-case
 //! persists a `pending_adjudications` row AFTER the main claim txn commits (not inside it).
@@ -56,7 +56,7 @@ where
 {
     persistence: Arc<P>,
     oracle: Option<Arc<O>>,
-    /// Type-erased pending-adjudication store (W3). `None` when no oracle queue is configured.
+    /// Type-erased pending-adjudication store. `None` when no oracle queue is configured.
     pending_store: Option<Arc<dyn ErasedPendingStore>>,
     config: EngineConfig,
 }
@@ -137,12 +137,12 @@ where
             .load_subject_line(&req.agent_id, &req.subject, &req.predicate)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
-        // Load ledger for disposition-based filtering (DEFECT-2 fix).
+        // Load ledger for disposition-based filtering (excludes non-live dispositions from fold).
         let ledger_for_fold = self.persistence
             .load_ledger(&req.agent_id, None, 10_000)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
-        // Build LATEST disposition per claim from the ledger (for DEFECT-2 fold filter).
+        // Build LATEST disposition per claim from the ledger (for the disposition-based fold filter).
         let latest_disposition = build_latest_disposition_map(&ledger_for_fold);
 
         // Fold the incumbent claims to get the live canonical belief.
@@ -181,11 +181,10 @@ where
         // ── Step 4: C7 gate — adjudicate ─────────────────────────────────────────
         let decision = gate::adjudicate(&proposal, &self.config);
 
-        // ── Step 4.5: Edge pre-load (DEFECT-1 fix — historical note) ────────────────
+        // ── Step 4.5: Edge pre-load (historical note) ─────────────────────────────
         // Previously, DependsOn edges were pre-loaded here for the HeavyPath supersession call
-        // inside the transaction. Since ingest-time supersession on HeavyPath was the root cause
-        // of the Contested-surfacing bug (TASK-9-W4-W5-FIX), that supersession call is removed.
-        // No edges need to be pre-loaded at ingest time; all supersession now happens only at
+        // inside the transaction. Ingest-time supersession on HeavyPath was removed because it
+        // caused the Contested-surfacing bug; all supersession now happens only at
         // submit_adjudication (Affirm verdict). An empty vec is kept so the append_within_txn
         // signature is unchanged (forward-compatible if a future deterministic-supersede path
         // is added to the gate).
@@ -220,7 +219,7 @@ where
             }
         };
 
-        // ── Step 6: Persist pending-adjudication row (W3, Amendment 1) ──────────
+        // ── Step 6: Persist pending-adjudication row ─────────────────────────────
         // Called AFTER the main claim txn commits. The per-agent write lock (held by
         // EngineHandle) ensures no race between commit and this insert.
         //
@@ -259,7 +258,7 @@ where
                 match oracle.request_adjudication(&req.agent_id, adj_request.clone()) {
                     Ok(handle) => {
                         let handle_id = O::handle_to_uuid(&handle);
-                        // Compute expires_at from the configured TTL (W6).
+                        // Compute expires_at from the configured TTL.
                         // Per-request TTL override is deferred to a future wave; config
                         // default is the v1 mechanism (default_adjudication_ttl field).
                         let expires_at = self.config.default_adjudication_ttl
@@ -281,9 +280,9 @@ where
                         // above (disposition=QueuedForAdjudication). If the process crashes between
                         // that commit and this insert_pending_erased call, a QueuedForAdjudication
                         // claim will exist with NO corresponding pending_adjudications row. Such
-                        // orphans cannot be resolved by W4. The W6 sweep MUST detect them by
+                        // orphans cannot be resolved via verdict-apply. The sweep use-case MUST detect them by
                         // scanning QueuedForAdjudication claims lacking a pending row and reverting
-                        // them to Contested. This is a tracked risk deferred to W6.
+                        // them to Contested.
                         pending_store.insert_pending_erased(&pending_row)
                             .map_err(|e| MemError::PendingStore { source: e })?;
                     }
@@ -308,7 +307,7 @@ where
     /// All persistence writes inside the open Txn.
     ///
     /// `preloaded_edges` is kept for signature stability but is currently always empty —
-    /// ingest-time supersession was removed (TASK-9-W4-W5-FIX) so no edges are needed here.
+    /// ingest-time supersession was removed so no edges are needed here.
     /// If a future deterministic-supersede path is added to the gate, this parameter carries it.
     fn append_within_txn(
         &self,
@@ -370,10 +369,10 @@ where
         // The fix: do NOT call supersession::execute at ingest time for HeavyPath.
         // The incumbent remains CommittedCheap (live) until the oracle resolves.
         //
-        // preloaded_edges retain their DEFECT-1 fix value: loaded before begin_atomic to
-        // avoid reads inside the open txn. They are unused here now but kept in scope for
-        // the pattern integrity if a future deterministic-supersede path is added.
-        let _ = preloaded_edges; // DEFECT-1 preload preserved; HeavyPath never supersedes at ingest
+        // preloaded_edges are loaded before begin_atomic to avoid reads inside the open txn.
+        // They are unused here now but kept in scope for pattern integrity if a future
+        // deterministic-supersede path is added to the gate.
+        let _ = preloaded_edges; // preload preserved; HeavyPath never supersedes at ingest
 
         // Populate contested_with when the disposition signals a conflict (Contested or
         // QueuedForAdjudication). The incumbent's claim_ref is passed in from the caller
@@ -401,7 +400,7 @@ where
 
 /// Build a map of ClaimRef → latest Disposition from a ledger slice.
 /// "Latest" = the entry with the maximum `recorded_at`. Used by fold to exclude
-/// non-live dispositions (DEFECT-2 fix).
+/// non-live dispositions (excludes Quarantined, Superseded, Invalidated, Rejected from the live set).
 pub(crate) fn build_latest_disposition_map(
     ledger: &[mempill_types::LedgerEntry],
 ) -> std::collections::HashMap<mempill_types::ClaimRef, Disposition> {
@@ -766,7 +765,7 @@ mod tests {
         assert_eq!(resp.disposition, Disposition::CommittedCheap);
     }
 
-    // ── Test: W3 — QueuedForAdjudication persists exactly one pending row ─────
+    // ── Test: QueuedForAdjudication persists exactly one pending row ─────────────
 
     /// When oracle IS present and a conflicting claim produces QueuedForAdjudication,
     /// exactly one pending_adjudications row must be inserted with the correct fields.
@@ -886,7 +885,7 @@ mod tests {
         assert_eq!(row.incumbent_claim_ref, incumbent_claim.claim_ref().clone(),
             "incumbent_claim_ref must be the pre-existing incumbent");
         assert_eq!(row.status, "pending");
-        assert!(row.expires_at.is_none(), "expires_at must be NULL for W3");
+        assert!(row.expires_at.is_none(), "expires_at must be NULL when no TTL is configured");
     }
 
     // ── Test: B11a — oracle absent → Contested, NO pending row ───────────────

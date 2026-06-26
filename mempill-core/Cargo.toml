@@ -12,6 +12,9 @@ description = "Core engine for mempill — a bi-temporal, append-only claim stor
 keywords = ["ai", "agent", "memory", "temporal", "llm"]
 categories = ["data-structures", "asynchronous"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 test-support = []
 

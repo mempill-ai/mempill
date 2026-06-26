@@ -8,7 +8,7 @@
 //! - `gate`         — adjudication gate (pure deterministic function)
 //!
 //! Dead-code lints are suppressed here: items are `pub(crate)` and will be consumed
-//! by application/ and EngineHandle in W4–W7. The lints fire now only because no
+//! by application/ and EngineHandle. The lints fire now only because no
 //! callers exist outside tests yet.
 #![allow(dead_code)]
 

@@ -2,8 +2,8 @@
 //!
 //! These stubs satisfy their respective trait bounds with do-nothing / empty behavior.
 //! They are provided for:
-//!   - v0.1 testing without a real oracle or vector store (W8 acid tests).
-//!   - The future `DefaultEngine` type alias (W7) which will wire NoOpOracle + NoOpVector
+//!   - v0.1 testing without a real oracle or vector store.
+//!   - The `DefaultEngine` type alias which wires NoOpOracle + NoOpVector
 //!     as the defaults for host-optional ports.
 //!
 //! DO NOT use these stubs in production. They are clearly doc-commented as test/default stubs.
@@ -38,7 +38,7 @@ impl std::error::Error for NoOpError {}
 ///   conflicting claims route to `QueuedForAdjudication` rather than `Contested`.
 ///   No verdict ever arrives, leaving them in `QueuedForAdjudication` indefinitely.
 /// - Suitable for unit tests that don't care about oracle resolution and for the
-///   `DefaultEngine` alias in W7.
+///   `DefaultEngine` alias.
 #[derive(Debug, Clone)]
 pub struct NoOpOracle;
 
@@ -226,7 +226,7 @@ mod tests {
         assert_vector_bounds::<NoOpVector>();
     }
 
-    /// W3 coverage: NoOpOracle::handle_to_uuid returns a non-nil UUID for the unit handle.
+    /// NoOpOracle::handle_to_uuid returns a non-nil UUID for the unit handle.
     /// Two calls must return distinct UUIDs (because each call generates a fresh UUID v4).
     #[test]
     fn noop_oracle_handle_to_uuid_returns_non_nil_uuid() {

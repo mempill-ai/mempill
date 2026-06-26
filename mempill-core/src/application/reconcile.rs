@@ -56,11 +56,11 @@ where
         let mut outcomes = Vec::new();
         let mut oracle_escalations = 0u32;
 
-        // ── DEFECT-1 FIX: Collect ALL reads BEFORE begin_atomic ──────────────────
+        // ── Collect ALL reads BEFORE begin_atomic ────────────────────────────────
         // All subject-line claims, validity assertions, ledger, and edges for any
         // supersession candidate must be loaded HERE — outside the transaction window.
 
-        // Load ledger for disposition filtering (DEFECT-2 fix).
+        // Load ledger for disposition filtering (excludes non-live dispositions from fold).
         let all_ledger = self.persistence
             .load_ledger(&req.agent_id, None, 10_000)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
@@ -117,7 +117,7 @@ where
                 );
                 let decision = gate::adjudicate(&proposal, &self.config);
 
-                // Pre-load edges for supersession if this will be a HeavyPath (DEFECT-1 fix).
+                // Pre-load edges for supersession if this will be a HeavyPath (reads must precede begin_atomic).
                 let preloaded_edges = if matches!(decision.route, Route::HeavyPath) {
                     if let Some(ref inc) = incumbent {
                         if inc.claim_ref != *candidate.claim_ref() {
@@ -166,7 +166,7 @@ where
                         .append_ledger_entry(&mut txn, &entry)
                         .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
-                    // C4 supersession if heavy path — uses preloaded_edges (DEFECT-1 fix).
+                    // C4 supersession if heavy path — uses preloaded_edges (loaded before begin_atomic).
                     if matches!(decision.route, Route::HeavyPath) {
                         if let Some(ref inc) = incumbent {
                             if inc.claim_ref != *claim_ref {

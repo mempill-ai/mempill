@@ -68,7 +68,7 @@ impl PostgresTxn {
     ///
     /// `Option<PooledConnection<M>>::as_deref_mut()` yields `Option<&mut postgres::Client>`
     /// via `DerefMut` on `PooledConnection` (r2d2_postgres 0.18 implements `DerefMut<Target = postgres::Client>`).
-    /// This is the W0-T2 verification point: confirmed to compile.
+    /// Confirmed to compile with r2d2_postgres 0.18.
     pub(crate) fn client(&mut self) -> &mut postgres::Client {
         self.conn
             .as_deref_mut()

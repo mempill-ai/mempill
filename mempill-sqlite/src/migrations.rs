@@ -20,7 +20,7 @@ const V1_INITIAL_SQL: &str = include_str!("schema/v1_initial.sql");
 /// Embedded index definitions (§5).
 const INDEXES_SQL: &str = include_str!("schema/indexes.sql");
 
-/// Embedded DDL — oracle adjudication queue (TASK-9, oracle loop).
+/// Embedded DDL — oracle adjudication queue (pending_adjudications table).
 const V2_PENDING_ADJUDICATIONS_SQL: &str = include_str!("schema/v2_pending_adjudications.sql");
 
 /// Migration error wrapper.
@@ -37,7 +37,7 @@ pub enum MigrationError {
 /// database at a consistent version boundary (each migration step is fully atomic).
 ///
 /// Connection lifecycle and PRAGMA initialisation (`journal_mode=WAL`, `synchronous=FULL`,
-/// `foreign_keys=ON`) are the caller's responsibility (implemented in `connection.rs`, W5).
+/// `foreign_keys=ON`) are the caller's responsibility (implemented in `connection.rs`).
 pub fn apply_migrations(conn: &Connection) -> Result<(), MigrationError> {
     let current = user_version(conn)?;
 

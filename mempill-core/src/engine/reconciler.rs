@@ -43,7 +43,7 @@ use crate::engine::valid_time_helpers;
 ///   Passed in from the engine wrapper; the reconciler threads it into the Proposal for the gate.
 ///
 /// `succession_threshold` — the `valid_time_confidence_threshold` from EngineConfig; used to
-///   determine whether the candidate + incumbent form a trusted temporal succession (TASK-11 §C).
+///   determine whether the candidate + incumbent form a trusted temporal succession.
 ///
 /// `n_gt_1_live_incumbents` — true when the fold produced more than one live claim on this
 ///   subject-line. Resolution #2: when N>1 live incumbents exist, succession check is SKIPPED
@@ -76,7 +76,7 @@ pub(crate) struct ReconcilerInput<'a> {
 ///    mutually exclusive by declaration) → `CrossLineConflict`.
 ///    In v0.1: detected via the MutualExclusion edge kind; without edges we classify as
 ///    `SameLineConflict` if same-predicate or `NoConflict` if different-predicate
-///    (cross-line edges are a W5 feature; see RECOMMENDATIONS).
+///    (cross-line edges via MutualExclusion edge kind are a future feature; see RECOMMENDATIONS).
 /// 5. Same value as incumbent → `NoConflict` (value-identical re-statement, not a contradiction).
 ///
 /// # Returns
@@ -164,13 +164,13 @@ fn classify_conflict(input: &ReconcilerInput<'_>) -> ConflictType {
         }
     } else if cand_subject == incumb_subject && cand_predicate != incumb_predicate {
         // Step 5/6: different predicate on same subject.
-        // In v0.1, cross-line mutual exclusion edges are not implemented (W5 feature).
+        // In v0.1, cross-line mutual exclusion edges are not implemented.
         // We conservatively classify as CrossLineConflict only when subjects match but
         // predicates differ AND the subjects are identical (same entity, different attribute).
         // This is a structural cross-line relationship — the gate handles the adjudication.
         //
-        // IMPORTANT: this is a CONSERVATIVE classification. Without MutualExclusion edges
-        // (W5), we detect structural cross-line relationships by subject-match/predicate-diff.
+        // IMPORTANT: this is a CONSERVATIVE classification. Without MutualExclusion edges,
+        // we detect structural cross-line relationships by subject-match/predicate-diff.
         // The gate will determine whether to route to heavy or cheap path.
         ConflictType::CrossLineConflict
     } else {

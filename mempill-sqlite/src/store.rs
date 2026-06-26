@@ -65,7 +65,7 @@ impl SqlitePersistenceStore {
 
     /// Return a `SqlitePendingStore` that shares the same SQLite connection.
     ///
-    /// This is the standard way to construct the pending-adjudication adapter in W3:
+    /// This is the standard way to construct the pending-adjudication adapter:
     /// ```rust,ignore
     /// let store = SqlitePersistenceStore::new(conn);
     /// let pending = store.pending_store();
@@ -178,7 +178,7 @@ fn str_to_edge_kind(s: &str) -> Result<EdgeKind, SqliteStoreError> {
 }
 
 fn ledger_event_kind_to_str(k: &LedgerEventKind) -> &'static str {
-    // AdjudicationExpired maps to "AdjudicationExpired" for W6 (TTL sweep + lazy expiry).
+    // AdjudicationExpired maps to "AdjudicationExpired" for the TTL sweep and lazy expiry path.
     match k {
         LedgerEventKind::ClaimCommitted => "ClaimCommitted",
         LedgerEventKind::ValidityAsserted => "ValidityAsserted",
@@ -1099,7 +1099,7 @@ impl PersistencePort for SqlitePersistenceStore {
 
 // ── SqlitePendingStore ────────────────────────────────────────────────────────
 
-/// SQLite-backed `PendingAdjudicationPort` implementation (W3, Amendment 1).
+/// SQLite-backed `PendingAdjudicationPort` implementation.
 ///
 /// Shares the same connection mutex as `SqlitePersistenceStore` but operates OUTSIDE
 /// the claim transaction — reads and writes go directly on the connection (no BEGIN/COMMIT
@@ -1507,7 +1507,7 @@ mod tests {
     // ── WRITE ROUND-TRIP ──────────────────────────────────────────────────────
 
     /// Append a claim within a Txn, commit, then verify the row exists via raw SELECT.
-    /// (Typed read path is W6; we use raw SQL here.)
+    /// (We use raw SQL here for direct verification without the typed read path.)
     #[test]
     fn write_round_trip_claim_persists_after_commit() {
         let store = make_store();
@@ -1749,7 +1749,7 @@ mod tests {
         assert_eq!(count, 1, "claim_edge row must exist after commit");
     }
 
-    // ── READ PATH TESTS (W6) ──────────────────────────────────────────────────
+    // ── READ PATH TESTS ───────────────────────────────────────────────────────
 
     /// Write a claim then load_claim returns it with all fields intact (round-trip).
     #[test]
@@ -2190,7 +2190,7 @@ mod tests {
         assert_eq!(edges, 1, "one claim_edge row must exist");
     }
 
-    // ── W3: SqlitePendingStore tests ──────────────────────────────────────────
+    // ── SqlitePendingStore tests ──────────────────────────────────────────────
 
     use mempill_core::ports::pending_adjudication::{PendingAdjudicationPort, PendingAdjudicationRow};
     use mempill_types::{
@@ -2245,7 +2245,7 @@ mod tests {
         }
     }
 
-    /// W3: insert_pending + get_pending round-trip.
+    /// insert_pending + get_pending round-trip.
     #[test]
     fn w3_sqlite_pending_insert_and_get_round_trip() {
         let store = make_store();
@@ -2268,7 +2268,7 @@ mod tests {
         assert!(fetched.expires_at.is_none());
     }
 
-    /// W3: get_pending returns None for unknown handle_id.
+    /// get_pending returns None for unknown handle_id.
     #[test]
     fn w3_sqlite_pending_get_nonexistent_returns_none() {
         let store = make_store();
@@ -2277,7 +2277,7 @@ mod tests {
         assert!(result.is_none(), "unknown handle_id must return None");
     }
 
-    /// W3: list_pending returns only pending rows for the given agent.
+    /// list_pending returns only pending rows for the given agent.
     #[test]
     fn w3_sqlite_pending_list_pending_by_agent() {
         let store = make_store();
@@ -2300,7 +2300,7 @@ mod tests {
         assert_eq!(all_rows.len(), 3, "list_pending(None) must return all 3 rows");
     }
 
-    /// W3: mark_resolved changes status to 'resolved'; resolved row no longer in list_pending.
+    /// mark_resolved changes status to 'resolved'; resolved row no longer in list_pending.
     #[test]
     fn w3_sqlite_pending_mark_resolved() {
         let store = make_store();
@@ -2321,7 +2321,7 @@ mod tests {
         assert!(pending_rows.is_empty(), "resolved row must not appear in list_pending");
     }
 
-    /// W3 durability: persist a pending row, drop the store, reopen on the same in-memory
+    /// Durability: persist a pending row, drop the store, reopen on the same in-memory
     /// connection via the shared Arc, and confirm get_pending still finds the row.
     ///
     /// NOTE: true file-backed durability (drop + reopen file) is tested in lib.rs integration.

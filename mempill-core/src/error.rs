@@ -31,7 +31,7 @@ pub enum MemError {
     WriteLockContention { agent_id: AgentId },
 
     // ── ASYNC / SPAWN_BLOCKING BRIDGE ─────────────────────────────────────────
-    /// Returned when a `tokio::task::spawn_blocking` call fails to join (W7 EngineHandle).
+    /// Returned when a `tokio::task::spawn_blocking` call fails to join at the EngineHandle async boundary.
     #[error("spawn_blocking task failed: {reason}")]
     SpawnBlocking { reason: String },
 
@@ -68,13 +68,13 @@ pub enum MemError {
     PragmaInitFailed { reason: String },
 
     // ── ORACLE PORT ───────────────────────────────────────────────────────────
-    /// Oracle port returned an error (W3 `request_adjudication`, and other oracle call sites).
+    /// Oracle port returned an error during `request_adjudication` or another oracle call site.
     /// Use `OracleError { reason: e.to_string() }` — string-reason convention is consistent
     /// across all non-persistence, non-internal error variants.
     #[error("Oracle port error: {reason}")]
     OracleError { reason: String },
 
-    /// Pending-adjudication store error (W3 — insert_pending / mark_resolved).
+    /// Pending-adjudication store error from insert_pending or mark_resolved.
     #[error("Pending-adjudication store error: {source}")]
     PendingStore {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,

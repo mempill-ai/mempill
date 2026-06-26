@@ -57,13 +57,13 @@ where
         // otherwise use the injected `now`.
         let as_of = req.as_of_tx_time.unwrap_or(now);
 
-        // Load ledger for DEFECT-2 fix (disposition-based liveness filter) — must come before fold.
+        // Load ledger for the disposition-based liveness filter — must come before fold.
         let all_ledger = self.persistence
             .load_ledger(&req.agent_id, None, 10_000)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
 
-        // C2: canonical valid-time fold (with disposition filter — DEFECT-2 fix).
+        // C2: canonical valid-time fold (with disposition filter).
         let fold = truth_engine::fold(
             claims.clone(),
             |cref| {
