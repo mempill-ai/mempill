@@ -17,3 +17,6 @@ __pycache__/
 
 # Orchestrator task/working notes live at the monorepo-root tasks/, never in the product repo
 tasks/
+
+# uv dev-env lockfile (not part of the published wheel)
+uv.lock
