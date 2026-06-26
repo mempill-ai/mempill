@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use mempill_core::application::dto::{
-    AuditQueryRequest, IngestClaimRequest, QueryMemoryRequest, ReconcileRequest,
+    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest, ReconcileRequest,
 };
 use mempill_sqlite::DefaultEngine;
 use pyo3::prelude::*;
@@ -90,6 +90,23 @@ impl PyEngine {
             .map_err(|e| ValidationError::new_err(format!("bad request: {e}")))?;
         let engine = self.engine.clone();
         let resp = py.detach(|| runtime().block_on(engine.reconcile(req)))
+            .map_err(mem_err_to_pyerr)?;
+        Ok(pythonize(py, &resp)?)
+    }
+
+    /// Query the full history timeline for a (subject, predicate) subject-line.
+    ///
+    /// `request` must be a dict with: agent_id, subject, predicate.
+    ///
+    /// Returns a dict with `entries` — all claims ordered oldest→newest, each tagged
+    /// with `status` ("Current" or "Superseded"), `value`, `valid_from`, `valid_until`,
+    /// `provenance`, `value_confidence`, and `claim_ref`.
+    #[pyo3(signature = (request))]
+    fn query_history<'py>(&self, py: Python<'py>, request: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let req: QueryHistoryRequest = depythonize(request)
+            .map_err(|e| ValidationError::new_err(format!("bad request: {e}")))?;
+        let engine = self.engine.clone();
+        let resp = py.detach(|| runtime().block_on(engine.query_history(req)))
             .map_err(mem_err_to_pyerr)?;
         Ok(pythonize(py, &resp)?)
     }

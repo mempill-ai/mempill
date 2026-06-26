@@ -88,6 +88,7 @@ pub use ergonomic::{
     // Functions
     remember,
     recall,
+    history,
     // Option builder
     RememberOptions,
     // Return types
@@ -95,11 +96,15 @@ pub use ergonomic::{
     RecallResult,
     ContestCandidate,
     BeliefDetail,
+    History,
+    HistoryEntry,
+    HistoryEntryStatus,
     // Error
     MempillDxError,
     // Seam traits (for advanced users who write generic code over the engine)
     CanIngestClaim,
     CanQueryMemory,
+    CanQueryHistory,
     // Tier-2 builder
     IngestClaimRequestExt,
     IngestClaimRequestBuilder,

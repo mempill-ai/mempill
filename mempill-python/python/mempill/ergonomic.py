@@ -439,6 +439,134 @@ def recall(
     )
 
 
+# ── History DTOs ──────────────────────────────────────────────────────────────
+
+@dataclass
+class HistoryEntry:
+    """One slot in the history timeline for a subject-line.
+
+    Attributes:
+        claim_ref:        UUID string identifying the underlying claim.
+        value:            The asserted value for this claim.
+        valid_from:       RFC3339 start of the valid-time window, or None if unknown.
+        valid_until:      Effective end of the slot (successor's ordering key), or
+                          None for the open-ended current slot.
+        status:           "Current" or "Superseded".
+        provenance:       Human-readable label, e.g. "External/UserAsserted".
+        value_confidence: Confidence in the claim's value (0.0–1.0).
+    """
+
+    claim_ref:        str
+    value:            Any
+    valid_from:       Optional[str]
+    valid_until:      Optional[str]
+    status:           str
+    provenance:       str
+    value_confidence: float
+
+
+class History:
+    """Full ordered history timeline for a (subject, predicate) subject-line.
+
+    Returned by history(). Iterable over entries (oldest→newest).
+
+    Attributes:
+        entries: All HistoryEntry objects ordered oldest→newest.
+    """
+
+    def __init__(self, entries: list[HistoryEntry]) -> None:
+        self.entries: list[HistoryEntry] = entries
+
+    def current(self) -> Optional[HistoryEntry]:
+        """Return the single Current entry, or None if none exists.
+
+        Guaranteed to agree with recall() — the same canonical fold is used.
+        """
+        for e in self.entries:
+            if e.status == "Current":
+                return e
+        return None
+
+    def is_empty(self) -> bool:
+        """True when the subject-line has no claims at all."""
+        return len(self.entries) == 0
+
+    def __iter__(self):
+        """Iterate over entries oldest→newest."""
+        return iter(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __repr__(self) -> str:
+        return f"History(entries={self.entries!r})"
+
+
+# ── Tier-1 history function ────────────────────────────────────────────────────
+
+def history(
+    engine: Any,
+    agent_id: str,
+    subject: str,
+    predicate: str,
+) -> History:
+    """Return the full ordered history timeline for a (subject, predicate) pair.
+
+    Entries are ordered oldest→newest by the canonical ordering key (same as the
+    truth engine fold). Each entry carries `.status` ("Current" or "Superseded"),
+    `.value`, `.valid_from`, `.valid_until`, `.provenance`, `.value_confidence`,
+    and `.claim_ref`.
+
+    The `.current()` entry is guaranteed to agree with recall() — both use the
+    same canonical fold at the engine level.
+
+    Args:
+        engine:    A mempill Engine or OracleEngine.
+        agent_id:  The agent's identity string.
+        subject:   Entity key (e.g. "acme").
+        predicate: Property key (e.g. "ceo").
+
+    Returns:
+        History — iterable over HistoryEntry objects. Use .current() for the live
+        belief, .is_empty() to check for no claims.
+
+    Raises:
+        mempill.ValidationError: propagated from the engine on malformed requests.
+        mempill.StorageError: propagated from the engine on storage failures.
+    """
+    resp = engine.query_history({
+        "agent_id": agent_id,
+        "subject": subject,
+        "predicate": predicate,
+    })
+
+    raw_entries = resp.get("entries") or []
+    entries: list[HistoryEntry] = []
+    for e in raw_entries:
+        # valid_from / valid_until arrive as RFC3339 strings or None.
+        vf = e.get("valid_from")
+        vu = e.get("valid_until")
+        # status is serde-serialized as the variant name: "Current" or "Superseded".
+        status_raw = e.get("status")
+        if isinstance(status_raw, dict):
+            # If somehow serde emits adjacently-tagged, extract tag.
+            status = status_raw.get("type", str(status_raw))
+        else:
+            status = str(status_raw) if status_raw is not None else "Superseded"
+
+        entries.append(HistoryEntry(
+            claim_ref=e.get("claim_ref", ""),
+            value=e.get("value"),
+            valid_from=vf,
+            valid_until=vu,
+            status=status,
+            provenance=e.get("provenance", ""),
+            value_confidence=float(e.get("value_confidence", 0.0)),
+        ))
+
+    return History(entries)
+
+
 __all__ = [
     "UnparsableDateError",
     "RememberOptions",
@@ -448,4 +576,7 @@ __all__ = [
     "RecallResult",
     "remember",
     "recall",
+    "HistoryEntry",
+    "History",
+    "history",
 ]

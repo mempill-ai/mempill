@@ -95,6 +95,20 @@ pub enum Marker {
     LowDerivationAnchor,
 }
 
+/// History entry status for `query_history` — whether the claim is the current belief
+/// or was superseded by a later one.
+///
+/// `Current` and `Superseded` are derived from `is_live` in the canonical fold result
+/// so that `history()` and `recall()` always agree on which entry is current.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum HistoryEntryStatus {
+    /// This claim is the live (current) belief at the time of the query.
+    Current,
+    /// This claim was superseded by a later claim on the same subject-line.
+    Superseded,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
