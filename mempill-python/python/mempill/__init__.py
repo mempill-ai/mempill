@@ -50,6 +50,16 @@ from mempill.types import (
     AuditQueryResponse,
 )
 
+from mempill.ergonomic import (
+    remember,
+    recall,
+    RememberOptions,
+    RememberReceipt,
+    ContestCandidate,
+    RecallResult,
+    UnparsableDateError,
+)
+
 # Re-export PyEngine under the friendlier name Engine so callers use `Engine` in
 # type annotations while the compiled class is still named PyEngine internally.
 Engine = PyEngine
@@ -141,4 +151,12 @@ __all__ = [
     "ReconcileResponse",
     "AuditQueryRequest",
     "AuditQueryResponse",
+    # Tier-1 ergonomic API
+    "remember",
+    "recall",
+    "RememberOptions",
+    "RememberReceipt",
+    "ContestCandidate",
+    "RecallResult",
+    "UnparsableDateError",
 ]
