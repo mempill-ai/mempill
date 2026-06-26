@@ -104,13 +104,17 @@ where
 /// Optional overrides for [`remember`]. All fields default to sane values.
 ///
 /// ```rust
-/// use mempill::RememberOptions;
-/// use mempill::Criticality;
+/// use mempill::{RememberOptions, Criticality};
 ///
 /// let opts = RememberOptions::new()
 ///     .valid_from("2025-01-01")
 ///     .confidence(0.85)
 ///     .criticality(Criticality::High);
+///
+/// // Lineage (RecallReEntry / model-derived chains):
+/// use mempill::ClaimRef;
+/// let parent_ref = ClaimRef::new_random();
+/// let opts2 = RememberOptions::new().derived_from(vec![parent_ref]);
 /// ```
 #[derive(Default, Clone, Debug)]
 pub struct RememberOptions {
@@ -120,6 +124,9 @@ pub struct RememberOptions {
     /// Also drives `valid_time_confidence` when dates are supplied (set once, no duplication).
     pub confidence: Option<f32>,
     pub criticality: Option<Criticality>,
+    /// Upstream claims this fact was derived from. Default: empty.
+    /// Forwarded directly into `IngestClaimRequest::derived_from`.
+    pub derived_from: Vec<ClaimRef>,
 }
 
 impl RememberOptions {
@@ -151,6 +158,15 @@ impl RememberOptions {
         self.criticality = Some(c);
         self
     }
+
+    /// Upstream claim refs that this fact was derived from.
+    ///
+    /// Used to express lineage for RecallReEntry and model-derived chains.
+    /// Forwarded verbatim into `IngestClaimRequest::derived_from`.
+    pub fn derived_from(mut self, refs: Vec<ClaimRef>) -> Self {
+        self.derived_from = refs;
+        self
+    }
 }
 
 // ── Return types ──────────────────────────────────────────────────────────────
@@ -164,12 +180,37 @@ pub struct RememberReceipt {
     pub contested_with: Vec<ClaimRef>,
 }
 
+/// Rich detail for a single belief (primary or candidate).
+///
+/// Available via [`RecallResult::primary`] (the resolved belief) and via
+/// [`ContestCandidate::detail`] (each contested candidate). Gives the caller
+/// everything needed to build a view without navigating the deep belief path.
+#[derive(Debug, Clone)]
+pub struct BeliefDetail {
+    /// The claim reference (UUID) that backs this belief.
+    pub claim_ref: ClaimRef,
+    /// The asserted value.
+    pub value: serde_json::Value,
+    /// Start of the valid-time window, or `None` if open / unknown.
+    pub valid_from: Option<DateTime<Utc>>,
+    /// End of the valid-time window, or `None` if open-ended.
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Value confidence (0.0–1.0).
+    pub value_confidence: f32,
+    /// Human-readable provenance label (e.g. `"External/UserAsserted"`, `"RecallReEntry"`, `"ModelDerived"`).
+    pub provenance: String,
+    /// Number of independent corroborating sources recorded by the engine.
+    pub corroboration_count: u32,
+}
+
 /// A candidate value surfaced when the belief is `Contested` or `Conflict`.
 #[derive(Debug, Clone)]
 pub struct ContestCandidate {
     pub value: serde_json::Value,
     pub claim_ref: ClaimRef,
     pub valid_from: Option<DateTime<Utc>>,
+    /// Full detail for this candidate — same fields as the primary [`BeliefDetail`].
+    pub detail: BeliefDetail,
 }
 
 /// Flat read result from [`recall`].
@@ -180,11 +221,16 @@ pub struct ContestCandidate {
 /// # use mempill::RecallResult;
 /// # fn example(r: RecallResult) {
 /// if r.is_contested() {
-///     for c in &r.candidates { println!("candidate: {:?}", c.value); }
+///     for c in &r.candidates {
+///         println!("candidate: {:?} conf={}", c.value, c.detail.value_confidence);
+///     }
 /// } else if r.is_empty() {
 ///     println!("no memory");
 /// } else {
 ///     println!("{:?}", r.as_str());
+///     if let Some(p) = &r.primary {
+///         println!("provenance={} corroboration={}", p.provenance, p.corroboration_count);
+///     }
 /// }
 /// # }
 /// ```
@@ -202,6 +248,11 @@ pub struct RecallResult {
     pub currency: mempill_types::CurrencyState,
     /// True when the claim is past the currency decay threshold.
     pub is_stale: bool,
+    /// Full detail for the resolved primary belief.
+    ///
+    /// `None` when status is `NoBelief`. For `Contested`/`Conflict`, the primary
+    /// belief is not resolved — read `candidates` instead and use `candidate.detail`.
+    pub primary: Option<BeliefDetail>,
 }
 
 impl RecallResult {
@@ -400,11 +451,13 @@ pub async fn remember(
     let value_json = serde_json::to_value(value)
         .map_err(|e| MempillDxError::Engine(MemError::MalformedFact { reason: e.to_string() }))?;
 
+    let derived = opts.derived_from.clone();
     let req = IngestClaimRequest::builder(agent_id, subject, predicate, value_json)
         .then_if(opts.valid_from, |b, s| b.valid_from(s))
         .then_if(opts.valid_until, |b, s| b.valid_until(s))
         .then_if(opts.confidence, |b, c| b.confidence(c))
         .then_if(opts.criticality, |b, c| b.criticality(c))
+        .derived_from(derived)
         .build()?;
 
     let resp = engine.ingest_ergo(req).await?;
@@ -438,7 +491,20 @@ pub async fn recall(
     let resp = engine.query_ergo(req).await?;
     let bp = resp.belief;
 
-    let (value, candidates) = match &bp.status {
+    // ── Helper: build a BeliefDetail from a raw Belief ───────────────────────
+    let make_detail = |b: &mempill_types::Belief| -> BeliefDetail {
+        BeliefDetail {
+            claim_ref: b.claim_ref.clone(),
+            value: b.fact.value.clone(),
+            valid_from: b.valid_time.start,
+            valid_until: b.valid_time.end,
+            value_confidence: b.confidence.value_confidence,
+            provenance: provenance_label_str(&b.provenance),
+            corroboration_count: b.currency_signal.corroboration_count,
+        }
+    };
+
+    let (value, candidates, primary) = match &bp.status {
         BeliefStatus::Contested | BeliefStatus::Conflict => {
             // Structurally impossible to misread as NoBelief:
             // value = None, candidates populated with all surfaced beliefs.
@@ -449,24 +515,42 @@ pub async fn recall(
                     value: b.fact.value.clone(),
                     claim_ref: b.claim_ref.clone(),
                     valid_from: b.valid_time.start,
+                    detail: make_detail(b),
                 })
                 .collect();
-            (None, cands)
+            (None, cands, None)
         }
-        BeliefStatus::NoBelief | BeliefStatus::TimingUncertain => {
-            let value = bp.primary.as_ref().map(|b| b.fact.value.clone());
-            (value, vec![])
+        BeliefStatus::NoBelief => {
+            (None, vec![], None)
         }
-        BeliefStatus::Resolved => {
+        BeliefStatus::TimingUncertain | BeliefStatus::Resolved => {
             let value = bp.primary.as_ref().map(|b| b.fact.value.clone());
-            (value, vec![])
+            let detail = bp.primary.as_ref().map(|b| make_detail(b));
+            (value, vec![], detail)
         }
     };
 
     let currency = bp.currency.clone();
     let is_stale = bp.staleness.is_stale;
 
-    Ok(RecallResult { value, status: bp.status, candidates, currency, is_stale })
+    Ok(RecallResult { value, status: bp.status, candidates, currency, is_stale, primary })
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+fn provenance_label_str(p: &ProvenanceLabel) -> String {
+    match p {
+        ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted) => {
+            "External/UserAsserted".to_owned()
+        }
+        ProvenanceLabel::External(mempill_types::ExternalKind::ExternalFirstHand) => {
+            "External/ExternalFirstHand".to_owned()
+        }
+        ProvenanceLabel::RecallReEntry => "RecallReEntry".to_owned(),
+        ProvenanceLabel::ModelDerived => "ModelDerived".to_owned(),
+        // ProvenanceLabel is #[non_exhaustive] — forward-compatible fallback.
+        _ => format!("{p:?}"),
+    }
 }
 
 // ── Builder helper (avoids Option::map chaining) ──────────────────────────────
@@ -573,6 +657,29 @@ mod tests {
             candidates: vec![],
             currency: CurrencyState::Fresh,
             is_stale: false,
+            primary: None,
+        }
+    }
+
+    fn make_belief_detail(value: serde_json::Value) -> BeliefDetail {
+        BeliefDetail {
+            claim_ref: ClaimRef::new_random(),
+            value,
+            valid_from: None,
+            valid_until: None,
+            value_confidence: 1.0,
+            provenance: "External/UserAsserted".to_owned(),
+            corroboration_count: 0,
+        }
+    }
+
+    fn make_contest_candidate(value: serde_json::Value) -> ContestCandidate {
+        let detail = make_belief_detail(value.clone());
+        ContestCandidate {
+            value,
+            claim_ref: detail.claim_ref.clone(),
+            valid_from: None,
+            detail,
         }
     }
 
@@ -590,19 +697,12 @@ mod tests {
             value: None, // structurally enforced
             status: BeliefStatus::Contested,
             candidates: vec![
-                ContestCandidate {
-                    value: serde_json::json!("Alice"),
-                    claim_ref: ClaimRef::new_random(),
-                    valid_from: None,
-                },
-                ContestCandidate {
-                    value: serde_json::json!("Bob"),
-                    claim_ref: ClaimRef::new_random(),
-                    valid_from: None,
-                },
+                make_contest_candidate(serde_json::json!("Alice")),
+                make_contest_candidate(serde_json::json!("Bob")),
             ],
             currency: CurrencyState::Fresh,
             is_stale: false,
+            primary: None,
         };
         assert!(r.is_contested());
         assert!(r.value.is_none(), "Contested must have value=None");
@@ -621,6 +721,55 @@ mod tests {
     fn recall_result_conflict_is_contested() {
         let r = make_recall_result(BeliefStatus::Conflict, None);
         assert!(r.is_contested());
+    }
+
+    #[test]
+    fn remember_options_derived_from_builder() {
+        let ref1 = ClaimRef::new_random();
+        let ref2 = ClaimRef::new_random();
+        let opts = RememberOptions::new().derived_from(vec![ref1.clone(), ref2.clone()]);
+        assert_eq!(opts.derived_from.len(), 2);
+        assert_eq!(opts.derived_from[0], ref1);
+    }
+
+    #[test]
+    fn remember_options_derived_from_default_empty() {
+        let opts = RememberOptions::new();
+        assert!(opts.derived_from.is_empty());
+    }
+
+    #[test]
+    fn belief_detail_fields_accessible() {
+        let detail = make_belief_detail(serde_json::json!("Berlin"));
+        assert_eq!(detail.value, serde_json::json!("Berlin"));
+        assert_eq!(detail.value_confidence, 1.0);
+        assert_eq!(detail.provenance, "External/UserAsserted");
+        assert_eq!(detail.corroboration_count, 0);
+        assert!(detail.valid_from.is_none());
+        assert!(detail.valid_until.is_none());
+    }
+
+    #[test]
+    fn contest_candidate_detail_field_accessible() {
+        let c = make_contest_candidate(serde_json::json!("Alice"));
+        assert_eq!(c.detail.value, serde_json::json!("Alice"));
+        assert_eq!(c.detail.provenance, "External/UserAsserted");
+    }
+
+    #[test]
+    fn recall_result_primary_field_present_on_resolved() {
+        let detail = make_belief_detail(serde_json::json!("Berlin"));
+        let r = RecallResult {
+            value: Some(serde_json::json!("Berlin")),
+            status: BeliefStatus::Resolved,
+            candidates: vec![],
+            currency: CurrencyState::Fresh,
+            is_stale: false,
+            primary: Some(detail),
+        };
+        let p = r.primary.as_ref().unwrap();
+        assert_eq!(p.value, serde_json::json!("Berlin"));
+        assert_eq!(p.provenance, "External/UserAsserted");
     }
 
     // ── Round-trip via SQLite (integration-ish, requires tokio runtime) ───────
@@ -671,6 +820,98 @@ mod tests {
         remember(&engine, "agent", "user", "city", "Munich", opts).await.unwrap();
         let r = recall(&engine, "agent", "user", "city").await.unwrap();
         assert!(!r.is_empty());
+    }
+
+    // ── Gap 1: derived_from forwarded via remember() ──────────────────────────
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn remember_derived_from_forwarded() {
+        let engine = crate::open_default_in_memory().unwrap();
+        // First, remember a "source" fact whose claim_ref we will reference.
+        let source = remember(
+            &engine,
+            "agent",
+            "user",
+            "city",
+            "Berlin",
+            RememberOptions::new(),
+        )
+        .await
+        .unwrap();
+
+        // Now remember a derived fact, referencing the source claim_ref.
+        let derived = remember(
+            &engine,
+            "agent",
+            "user",
+            "city_note",
+            "Capital of Germany",
+            RememberOptions::new().derived_from(vec![source.claim_ref.clone()]),
+        )
+        .await
+        .unwrap();
+
+        // The engine accepted the request (claim_ref issued means it didn't reject it).
+        assert!(!format!("{:?}", derived.claim_ref).is_empty());
+        // Verify we can still recall the derived fact.
+        let r = recall(&engine, "agent", "user", "city_note").await.unwrap();
+        assert!(!r.is_empty());
+    }
+
+    // ── Gap 2: RecallResult.primary exposes rich fields ───────────────────────
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn recall_primary_exposes_rich_fields() {
+        let engine = crate::open_default_in_memory().unwrap();
+        let opts = RememberOptions::new()
+            .valid_from("2025-01-01")
+            .valid_until("2026-01-01")
+            .confidence(0.9);
+        let receipt = remember(&engine, "agent", "user", "city", "Berlin", opts).await.unwrap();
+
+        let r = recall(&engine, "agent", "user", "city").await.unwrap();
+        let p = r.primary.as_ref().expect("primary must be set for a non-empty resolved belief");
+
+        assert_eq!(p.claim_ref, receipt.claim_ref, "claim_ref must match the stored claim");
+        assert_eq!(p.value, serde_json::json!("Berlin"));
+        assert!(p.valid_from.is_some(), "valid_from must be populated");
+        assert!(p.valid_until.is_some(), "valid_until must be populated");
+        assert!((p.value_confidence - 0.9).abs() < 1e-4, "value_confidence must be 0.9");
+        assert!(p.provenance.contains("UserAsserted"), "provenance must contain UserAsserted");
+        // corroboration_count is 0 for a single fresh write (no independent corroboration).
+        assert_eq!(p.corroboration_count, 0);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn recall_contested_candidates_expose_rich_fields() {
+        let engine = crate::open_default_in_memory().unwrap();
+        remember(&engine, "agent", "acme", "ceo", serde_json::json!("Alice"), RememberOptions::new())
+            .await
+            .unwrap();
+        remember(&engine, "agent", "acme", "ceo", serde_json::json!("Bob"), RememberOptions::new())
+            .await
+            .unwrap();
+
+        let r = recall(&engine, "agent", "acme", "ceo").await.unwrap();
+        assert!(r.is_contested());
+        assert!(r.primary.is_none(), "Contested belief must not have primary set");
+        assert_eq!(r.candidates.len(), 2);
+
+        for c in &r.candidates {
+            // Each candidate must have a valid claim_ref and provenance.
+            assert!(!format!("{:?}", c.detail.claim_ref).is_empty());
+            assert!(!c.detail.provenance.is_empty());
+            // Values must match the ones we stored.
+            assert!(
+                c.value == serde_json::json!("Alice") || c.value == serde_json::json!("Bob"),
+                "unexpected candidate value: {:?}", c.value
+            );
+            // detail.value mirrors the top-level value.
+            assert_eq!(c.detail.value, c.value);
+        }
     }
 }
 

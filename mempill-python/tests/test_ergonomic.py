@@ -8,6 +8,8 @@ Covers:
   - recall() returns flat RecallResult with correct .value
   - Contested → value None, is_contested() True, candidates populated (not NoBelief)
   - NoBelief → is_empty() True, is_contested() False
+  - Gap 1: RememberOptions.derived_from forwarded via remember()
+  - Gap 2: RecallResult.primary + ContestCandidate.detail expose rich BeliefDetail fields
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from mempill import (
     RememberOptions,
     RememberReceipt,
     RecallResult,
+    BeliefDetail,
     UnparsableDateError,
 )
 
@@ -235,3 +238,135 @@ class TestContested:
         r2 = remember(engine, AGENT, "acme", "cfo", "Dave")
         assert r2.disposition == "Contested"
         assert r1.claim_ref in r2.contested_with
+
+
+# ── Gap 1: derived_from forwarded via remember() ──────────────────────────────
+
+class TestDerivedFrom:
+    def test_derived_from_default_is_empty(self, engine: mempill.Engine) -> None:
+        """RememberOptions.derived_from defaults to []."""
+        opts = RememberOptions()
+        assert opts.derived_from == []
+
+    def test_derived_from_accepted_by_engine(self, engine: mempill.Engine) -> None:
+        """remember() with derived_from= does not raise and the claim is committed."""
+        source = remember(engine, AGENT, "user", "city", "Berlin")
+        derived = remember(
+            engine, AGENT, "user", "city_note", "Capital of Germany",
+            RememberOptions(derived_from=[source.claim_ref]),
+        )
+        assert len(derived.claim_ref) == 36
+
+    def test_derived_from_multiple_refs(self, engine: mempill.Engine) -> None:
+        """Multiple derived_from refs are all forwarded."""
+        r1 = remember(engine, AGENT, "user", "fact1", "x")
+        r2 = remember(engine, AGENT, "user", "fact2", "y")
+        derived = remember(
+            engine, AGENT, "user", "combined", "xy",
+            RememberOptions(derived_from=[r1.claim_ref, r2.claim_ref]),
+        )
+        assert len(derived.claim_ref) == 36
+
+    def test_derived_from_fact_recalls_correctly(self, engine: mempill.Engine) -> None:
+        """A derived fact can be recalled normally after ingestion."""
+        source = remember(engine, AGENT, "user", "city", "Berlin")
+        remember(
+            engine, AGENT, "user", "city_note", "Capital of Germany",
+            RememberOptions(derived_from=[source.claim_ref]),
+        )
+        result = recall(engine, AGENT, "user", "city_note")
+        assert not result.is_empty()
+        assert result.value == "Capital of Germany"
+
+
+# ── Gap 2: RecallResult.primary + ContestCandidate.detail (BeliefDetail) ─────
+
+class TestBeliefDetail:
+    def test_primary_is_none_for_no_belief(self, engine: mempill.Engine) -> None:
+        result = recall(engine, AGENT, "ghost", "attr")
+        assert result.primary is None
+
+    def test_primary_set_for_resolved_belief(self, engine: mempill.Engine) -> None:
+        receipt = remember(engine, AGENT, "user", "city", "Berlin")
+        result = recall(engine, AGENT, "user", "city")
+        assert result.primary is not None
+        assert isinstance(result.primary, BeliefDetail)
+        assert result.primary.claim_ref == receipt.claim_ref
+
+    def test_primary_value_matches_recall_value(self, engine: mempill.Engine) -> None:
+        remember(engine, AGENT, "user", "city", "Berlin")
+        result = recall(engine, AGENT, "user", "city")
+        assert result.primary is not None
+        assert result.primary.value == result.value
+
+    def test_primary_valid_from_populated_when_date_supplied(self, engine: mempill.Engine) -> None:
+        remember(
+            engine, AGENT, "event", "started", "yes",
+            RememberOptions(valid_from="2025-01-01", valid_until="2026-01-01"),
+        )
+        result = recall(engine, AGENT, "event", "started")
+        assert result.primary is not None
+        assert result.primary.valid_from is not None, "valid_from must be populated"
+        assert result.primary.valid_until is not None, "valid_until must be populated"
+        assert "2025" in result.primary.valid_from
+
+    def test_primary_value_confidence_matches_opts(self, engine: mempill.Engine) -> None:
+        remember(
+            engine, AGENT, "user", "score", 0.8,
+            RememberOptions(confidence=0.75),
+        )
+        result = recall(engine, AGENT, "user", "score")
+        assert result.primary is not None
+        assert abs(result.primary.value_confidence - 0.75) < 1e-4
+
+    def test_primary_provenance_user_asserted(self, engine: mempill.Engine) -> None:
+        """Default provenance is External/UserAsserted."""
+        remember(engine, AGENT, "user", "city", "Berlin")
+        result = recall(engine, AGENT, "user", "city")
+        assert result.primary is not None
+        assert "UserAsserted" in result.primary.provenance
+
+    def test_primary_corroboration_count_zero_for_fresh_write(self, engine: mempill.Engine) -> None:
+        remember(engine, AGENT, "user", "city", "Berlin")
+        result = recall(engine, AGENT, "user", "city")
+        assert result.primary is not None
+        assert result.primary.corroboration_count == 0
+
+    def test_primary_none_for_contested(self, engine: mempill.Engine) -> None:
+        """Contested belief must not set primary — use candidates[n].detail."""
+        remember(engine, AGENT, "acme", "ceo", "Alice")
+        remember(engine, AGENT, "acme", "ceo", "Bob")
+        result = recall(engine, AGENT, "acme", "ceo")
+        assert result.is_contested()
+        assert result.primary is None
+
+    def test_contested_candidates_have_detail(self, engine: mempill.Engine) -> None:
+        remember(engine, AGENT, "acme", "ceo", "Alice")
+        remember(engine, AGENT, "acme", "ceo", "Bob")
+        result = recall(engine, AGENT, "acme", "ceo")
+        assert len(result.candidates) == 2
+        for c in result.candidates:
+            assert c.detail is not None
+            assert isinstance(c.detail, BeliefDetail)
+            assert len(c.detail.claim_ref) == 36
+            assert c.detail.value in ("Alice", "Bob")
+            assert c.detail.value == c.value
+            assert "UserAsserted" in c.detail.provenance
+
+    def test_belief_detail_fields_parity_with_rust(self, engine: mempill.Engine) -> None:
+        """Verify all BeliefDetail fields match the Rust surface exactly."""
+        receipt = remember(
+            engine, AGENT, "user", "city", "Berlin",
+            RememberOptions(valid_from="2025-01-01", confidence=0.9),
+        )
+        result = recall(engine, AGENT, "user", "city")
+        p = result.primary
+        assert p is not None
+        # Field presence and type checks (Rust parity):
+        assert isinstance(p.claim_ref, str) and len(p.claim_ref) == 36
+        assert p.value == "Berlin"
+        assert p.valid_from is not None
+        assert isinstance(p.value_confidence, float)
+        assert isinstance(p.provenance, str)
+        assert isinstance(p.corroboration_count, int)
+        assert p.claim_ref == receipt.claim_ref
