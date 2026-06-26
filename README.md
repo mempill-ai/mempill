@@ -6,7 +6,7 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 424 Rust + 107 Python tests (+ 69 Postgres via `--features`), 0 warnings
+**0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 443 Rust + 135 Python tests (+ Postgres integration via `--features`), 0 warnings
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
 
@@ -70,7 +70,8 @@ Key properties:
 | Python PyO3 wheel (`mempill`) | ✅ Shipped | maturin 1.14, PyO3 0.29, Python ≥ 3.11; includes Python oracle bridge |
 | MCP adapter (`mempill-mcp`) | ✅ Shipped | FastMCP, 4 tools, stdio transport |
 | `mempill` facade crate | ✅ Shipped | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
-| Bi-temporal history + valid-time as-of query | ⏳ Planned (v0.3) | Reads return only the *current* belief — no per-subject-line history (`query_history`), and `as_of_tx_time` is transaction-time only; valid-time as-of (`valid_at`) is planned |
+| Bi-temporal history read (`query_history` / `history()`) | ✅ Shipped | Full claim timeline of a subject line — values, effective valid-time windows, `Current`/`Superseded` status |
+| Valid-time as-of query (`valid_at`) | ⏳ Planned (v0.3) | Point-in-time recall ("who was CEO in 2021?"); `as_of_tx_time` is transaction-time only today |
 | Vector search / VectorPort | ⏳ Planned | Structural seam exists (NoOp); no vector retrieval yet |
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
