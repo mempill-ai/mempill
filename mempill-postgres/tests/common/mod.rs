@@ -15,6 +15,7 @@ use testcontainers_modules::testcontainers::ImageExt;
 /// and invoke `body`. The container lives for the duration of `body`.
 ///
 /// Panics with a clear message if Docker is unavailable or the image is missing.
+#[allow(dead_code)] // shared helper — not every test binary calls this one (Rust dead-code analysis is per-binary)
 pub fn with_pg<F>(tag: &str, body: F)
 where
     F: FnOnce(Arc<PostgresPersistenceStore>),
