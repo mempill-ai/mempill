@@ -409,8 +409,21 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-The PostgreSQL integration tests in `mempill-postgres` require Docker (testcontainers pulls
-`postgres:16` and `postgres:18.4` automatically). The SQLite and core tests run without Docker.
+This runs the SQLite, core, and facade tests — fast and **Docker-free** (starts 0 containers).
+
+The PostgreSQL integration tests are gated behind `#[ignore]`: they spin up real
+`postgres:16` / `postgres:18.4` containers via testcontainers (which requires Docker), so run
+them explicitly:
+
+```sh
+cargo test -p mempill-postgres -- --ignored
+```
+
+If a container-backed run is interrupted, sweep any leaked test containers with:
+
+```sh
+docker rm -f $(docker ps -aq --filter 'label=org.testcontainers.managed-by=testcontainers')
+```
 
 ### Python tests
 

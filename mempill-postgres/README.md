@@ -45,9 +45,17 @@ via `refinery::embed_migrations!("migrations")`. Applied automatically on `open_
 ## Integration tests
 
 Require Docker. testcontainers-modules pulls `postgres:16` and `postgres:18.4` automatically.
+These tests are gated behind `#[ignore]` (so a plain `cargo test` stays Docker-free) — run them
+with `--ignored`:
 
 ```sh
-cargo test -p mempill-postgres
+cargo test -p mempill-postgres -- --ignored
+```
+
+If a run is interrupted, sweep any leaked containers:
+
+```sh
+docker rm -f $(docker ps -aq --filter 'label=org.testcontainers.managed-by=testcontainers')
 ```
 
 ## License
