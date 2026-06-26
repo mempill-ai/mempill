@@ -1,7 +1,7 @@
 //! Port traits — the hexagonal seams of mempill-core.
 //!
 //! All port traits are SYNCHRONOUS (no async fn) per F1 decision.
-//! Async lives only at the EngineHandle boundary (W7) via spawn_blocking.
+//! Async lives only at the EngineHandle boundary via spawn_blocking.
 //!
 //! Visibility: `pub` — port traits must be visible to adapter crates (e.g. mempill-sqlite).
 

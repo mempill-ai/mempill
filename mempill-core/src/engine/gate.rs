@@ -594,7 +594,7 @@ mod tests {
 // ── QA ADVERSARIAL TESTS ─────────────────────────────────────────────────────
 //
 // This module is the adversarial QA layer. It deliberately attacks the five
-// correctness properties defined in TASK-1-W3-QA-GATE and is SEPARATE from
+// correctness properties of the adjudication gate and is SEPARATE from
 // the implementation's own `tests` module above so authorship is clear.
 //
 // Properties under attack:

@@ -9,7 +9,7 @@
 //!
 //! The use-case layer is fully synchronous — no async code below this file.
 //!
-//! # Pending-adjudication port (W3)
+//! # Pending-adjudication port
 //!
 //! `EngineHandle` carries an optional `Arc<dyn ErasedPendingStore>` for the oracle queue.
 //! Use `EngineHandle::new` for the standard case (no pending store) and
@@ -161,7 +161,7 @@ where
     persistence: Arc<P>,
     oracle: Option<Arc<O>>,
     vector: Option<Arc<V>>,
-    /// Type-erased pending-adjudication store (W3). `None` when no oracle queue is configured.
+    /// Type-erased pending-adjudication store. `None` when no oracle queue is configured.
     pending_store: Option<Arc<dyn ErasedPendingStore>>,
     config: EngineConfig,
     write_locks: AgentWriteLockMap,
@@ -199,7 +199,7 @@ where
         }
     }
 
-    /// Create an `EngineHandle` with a concrete pending-adjudication store (W3).
+    /// Create an `EngineHandle` with a concrete pending-adjudication store.
     ///
     /// The store is type-erased via [`ErasedPendingStoreAdapter`] so `EngineHandle` keeps
     /// its 3-param signature unchanged.

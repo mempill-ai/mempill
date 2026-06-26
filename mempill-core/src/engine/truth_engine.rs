@@ -27,7 +27,7 @@ use crate::engine::valid_time_helpers;
 
 /// Dispositions that make a claim non-live regardless of ValidityAssertions.
 /// Even without a Bound assertion, a claim with one of these dispositions
-/// must be excluded from the live set (DEFECT-2 fix).
+/// must be excluded from the live set by the disposition-based liveness filter.
 fn is_non_live_disposition(d: &Disposition) -> bool {
     matches!(
         d,
@@ -57,7 +57,7 @@ pub(crate) struct FoldResult {
     /// True when ≥ 2 live claims conflict on the same subject-line without resolution.
     pub has_conflict: bool,
     /// True when valid-time instant-selection was applied: the live_claims set was narrowed
-    /// from a trusted succession to a single claim matching the query instant (TASK-11 §C).
+    /// from a trusted succession to a single claim matching the query instant via valid-time instant-selection.
     /// When true, `has_conflict` is always false and `live_claims.len()` is 0 or 1.
     pub succession_selected: bool,
 }
@@ -153,7 +153,7 @@ pub(crate) fn is_claim_live(
 /// - `latest_disposition`: map of ClaimRef → latest Disposition from the ledger.
 ///   Claims whose latest disposition is Quarantined, Superseded, Invalidated, or Rejected
 ///   are excluded from the live set even if no ValidityAssertion::Bound was appended
-///   (DEFECT-2 fix — disposition-based liveness filter).
+///   (disposition-based liveness filter — excludes non-live dispositions from the live set).
 ///
 /// Returns a `FoldResult` with live claims in canonical order.
 pub(crate) fn fold<F>(
@@ -177,7 +177,7 @@ where
     // A claim is live if:
     //   (a) it is not bounded by a ValidityAssertion, AND
     //   (b) its latest ledger disposition is NOT one of the non-live dispositions
-    //       (Quarantined, Superseded, Invalidated, Rejected) — DEFECT-2 fix.
+    //       (Quarantined, Superseded, Invalidated, Rejected).
     let mut with_status: Vec<ClaimWithStatus> = claims
         .into_iter()
         .map(|c| {
@@ -204,7 +204,7 @@ where
         .cloned()
         .collect();
 
-    // Step 4 — valid-time instant-selection for trusted successions (TASK-11 §C).
+    // Step 4 — valid-time instant-selection for trusted successions.
     //
     // If ALL live claims form a trusted succession (each has valid_time_confidence >= threshold,
     // bounded start, and windows are pairwise non-overlapping), select the single claim whose

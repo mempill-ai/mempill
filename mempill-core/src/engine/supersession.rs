@@ -103,7 +103,7 @@ pub(crate) fn execute<P: PersistencePort>(
     port.append_ledger_entry(txn, &ledger_supersession)?;
 
     // Step 3 — DependsOn edges are already loaded by the caller (preloaded_edges).
-    // This avoids reads inside the open Txn (DEFECT-1 fix — see module doc).
+    // This avoids reads inside the open Txn (caller pre-loads edges before begin_atomic).
     // `preloaded_edges` contains ALL edges for the superseded claim; we filter to
     // edges where `to_claim == superseded_ref` and `kind == DependsOn`.
     let edges = preloaded_edges;
@@ -465,7 +465,7 @@ mod tests {
         ];
         let port = MockPort::new(agent.clone(), edges.clone());
 
-        // Pre-load edges BEFORE opening the transaction (DEFECT-1 fix).
+        // Pre-load edges BEFORE opening the transaction.
         let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         let mut txn = port.begin_atomic(&agent).unwrap();
         let cascade_n = execute(&port, &mut txn, &req, &preloaded).unwrap();
@@ -499,7 +499,7 @@ mod tests {
         let edges = vec![depends_on_edge(dep, req.superseded_ref.clone(), &agent)];
         let port = MockPort::new(agent.clone(), edges.clone());
 
-        // Pre-load edges BEFORE opening the transaction (DEFECT-1 fix).
+        // Pre-load edges BEFORE opening the transaction.
         let preloaded = port.load_edges_for(&agent, &req.superseded_ref).unwrap();
         // Fail on the 2nd write (the supersession ledger entry) — simulates mid-Txn failure.
         let mut txn = MockTxn::new(agent.clone()).with_fail_on(2);

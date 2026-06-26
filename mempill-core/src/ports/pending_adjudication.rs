@@ -1,10 +1,10 @@
-//! PendingAdjudicationPort — DB-authoritative oracle queue port (TASK-9 W3, Amendment 1).
+//! PendingAdjudicationPort — DB-authoritative oracle queue port.
 //!
 //! This port is the persistence seam for the `pending_adjudications` table. It is SEPARATE
 //! from `PersistencePort` because pending adjudications are oracle workflow state, not
 //! claim/belief data. Keeping them apart preserves clean DDD layering.
 //!
-//! # DB-authoritative (Amendment 1)
+//! # DB-authoritative design
 //!
 //! The `pending_adjudications` table is the source of truth. In-memory caches are permitted
 //! as an optimization but MUST be populated from the DB (not the reverse). Correctness never
@@ -21,8 +21,8 @@ use mempill_types::{AgentId, AdjudicationRequest, ClaimRef};
 
 /// A row in the `pending_adjudications` table.
 ///
-/// `expires_at = None` means no TTL (W6 will populate this).
-/// `status` starts as `'pending'`; W4 will mark it `'resolved'`; W6 will mark expired rows `'expired'`.
+/// `expires_at = None` means no TTL is configured for this row.
+/// `status` starts as `'pending'`; verdict-apply marks it `'resolved'`; the sweep marks expired rows `'expired'`.
 #[derive(Debug, Clone)]
 pub struct PendingAdjudicationRow {
     /// Durable correlation key — returned by `OraclePort::handle_to_uuid`.
@@ -38,7 +38,7 @@ pub struct PendingAdjudicationRow {
     pub request_payload: AdjudicationRequest,
     /// Wall-clock time the adjudication was queued (set by the engine, not the oracle).
     pub queued_at: DateTime<Utc>,
-    /// TTL deadline — `None` until W6 populates it.
+    /// TTL deadline — `None` when no TTL is configured.
     pub expires_at: Option<DateTime<Utc>>,
     /// Current status string: `"pending"`, `"resolved"`, or `"expired"`.
     pub status: String,
@@ -65,16 +65,16 @@ pub trait PendingAdjudicationPort: Send + Sync + 'static {
     fn list_pending(&self, agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error>;
 
     /// List all rows whose `expires_at` is not NULL, `expires_at <= now`, and `status = 'pending'`.
-    /// Used by W6 sweep. Ordered by `expires_at ASC`.
+    /// Used by the sweep use-case. Ordered by `expires_at ASC`.
     fn list_expired(&self, now: DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error>;
 
-    /// Mark a pending row as resolved (status = 'resolved'). Used by W4 verdict-apply.
+    /// Mark a pending row as resolved (status = 'resolved'). Used by the verdict-apply step.
     ///
     /// Returns `Ok(())` if the row existed and was updated; `Ok(())` if the row was already
     /// resolved (idempotent). Returns `Err` only on DB error.
     fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error>;
 
-    /// Mark a pending row as expired (status = 'expired'). Used by W6 sweep + lazy expiry.
+    /// Mark a pending row as expired (status = 'expired'). Used by the sweep and lazy expiry path.
     ///
     /// Idempotent: re-marking an already-expired row is `Ok(())`. Returns `Err` only on DB error.
     fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error>;
@@ -83,7 +83,7 @@ pub trait PendingAdjudicationPort: Send + Sync + 'static {
     /// AND that have NO matching row in `pending_adjudications` with `status = 'pending'`
     /// (i.e., crash-orphaned claims with no pending row).
     ///
-    /// Used by W6 orphan recovery sweep. Both adapters implement this as a cross-table SQL
+    /// Used by the orphan-recovery sweep. Both adapters implement this as a cross-table SQL
     /// query. The returned tuples are `(agent_id, challenger_claim_ref, incumbent_claim_ref)`
     /// where `incumbent_claim_ref` is the most-recent CommittedCheap claim on the same
     /// (agent_id, subject, predicate) line — or `None` if not determinable (sweep skips those).
@@ -94,7 +94,7 @@ pub trait PendingAdjudicationPort: Send + Sync + 'static {
 }
 
 /// A QueuedForAdjudication claim with no matching pending_adjudications row.
-/// Produced by `list_queued_orphan_claims` for the W6 orphan-recovery sweep.
+/// Produced by `list_queued_orphan_claims` for the orphan-recovery sweep.
 #[derive(Debug, Clone)]
 pub struct OrphanedQueuedClaim {
     pub agent_id: AgentId,

@@ -1,4 +1,4 @@
-//! Generic oracle-resolution conformance suite (TASK-9-W8).
+//! Generic oracle-resolution conformance suite.
 //!
 //! `run_oracle_conformance` exercises every observable oracle-resolution behavior
 //! and panics on any deviation from the expected contract.
@@ -18,7 +18,7 @@
 //! Scenarios use a dedicated `AgentId` per-scenario so they are safe to run
 //! sequentially against a shared store without cross-contamination.
 //!
-//! # Scenario catalogue (W8-CONFORMANCE)
+//! # Scenario catalogue
 //!
 //! | Sub-test | Function |
 //! |----------|----------|
@@ -124,7 +124,7 @@ fn adj_response(
 
 // ── Scenario 1: Affirm — challenger wins ─────────────────────────────────────
 
-/// W8-sub-1: Affirm → challenger CommittedCheap, incumbent Superseded,
+/// Scenario 1 (Affirm): challenger CommittedCheap, incumbent Superseded,
 /// ledger entry has External provenance, query_memory surfaces challenger.
 ///
 /// Callers pass `handle_id` matching the UUID used when building the engine's `TestOracle`.

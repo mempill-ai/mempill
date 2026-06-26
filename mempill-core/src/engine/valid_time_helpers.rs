@@ -1,5 +1,5 @@
 //! Shared valid-time helpers for read-time fold instant-selection and
-//! write-time reconciler trusted-succession detection (TASK-11, §C/§D).
+//! write-time reconciler trusted-succession detection.
 //!
 //! PURE: no I/O, no clock reads. All instants are injected by callers.
 //!
@@ -12,7 +12,7 @@
 //!    cause overlap with any adjacent window.
 //! 4. The windows are pairwise NON-OVERLAPPING (strict: [start, end) half-open).
 //!
-//! ## Instant-selection semantics (§C)
+//! ## Instant-selection semantics
 //!
 //! Given a set of claims forming a trusted succession, the claim whose window
 //! `[start, end)` contains `instant` is selected:

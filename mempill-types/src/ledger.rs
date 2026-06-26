@@ -35,7 +35,7 @@ pub enum LedgerEventKind {
     DependentFlaggedPendingReview,
     /// Claim was served as a query result — recorded so the Amplification Guard can detect later recall re-entry.
     ServedAsInjected,
-    /// Adjudication TTL elapsed — challenger reverted to Contested (W6 sweep / lazy expiry).
+    /// Adjudication TTL elapsed — challenger reverted to Contested via the sweep or lazy expiry path.
     AdjudicationExpired,
 }
 
