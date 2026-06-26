@@ -222,31 +222,26 @@ fn run_durability_new_store(store: Arc<PostgresPersistenceStore>, conn_str: Stri
 // ── PG 16 ─────────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg16_pending_insert_and_get_round_trip() {
     common::with_pg("16", run_insert_get_round_trip);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg16_pending_get_nonexistent_returns_none() {
     common::with_pg("16", run_get_nonexistent_returns_none);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg16_pending_list_pending_by_agent() {
     common::with_pg("16", run_list_pending_by_agent);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg16_pending_list_expired() {
     common::with_pg("16", run_list_expired);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg16_pending_mark_resolved() {
     common::with_pg("16", run_mark_resolved);
 }
@@ -254,7 +249,6 @@ fn w3_pg16_pending_mark_resolved() {
 /// PG 16 DB-authoritative durability: insert → drop store → open NEW store on same DB → get_pending succeeds.
 /// Proves Amendment 1: pending rows survive process-state loss; only the DB matters.
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg16_pending_durability_new_store() {
     common::with_pg_and_conn("16", run_durability_new_store);
 }
@@ -262,31 +256,26 @@ fn w3_pg16_pending_durability_new_store() {
 // ── PG 18 ─────────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg18_pending_insert_and_get_round_trip() {
     common::with_pg("18", run_insert_get_round_trip);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg18_pending_get_nonexistent_returns_none() {
     common::with_pg("18", run_get_nonexistent_returns_none);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg18_pending_list_pending_by_agent() {
     common::with_pg("18", run_list_pending_by_agent);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg18_pending_list_expired() {
     common::with_pg("18", run_list_expired);
 }
 
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg18_pending_mark_resolved() {
     common::with_pg("18", run_mark_resolved);
 }
@@ -294,7 +283,6 @@ fn w3_pg18_pending_mark_resolved() {
 /// PG 18 DB-authoritative durability: insert → drop store → open NEW store on same DB → get_pending succeeds.
 /// Proves Amendment 1: pending rows survive process-state loss; only the DB matters.
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w3_pg18_pending_durability_new_store() {
     common::with_pg_and_conn("18", run_durability_new_store);
 }

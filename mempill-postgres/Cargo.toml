@@ -12,6 +12,9 @@ description = "PostgreSQL persistence adapter for mempill — shared-DB topology
 keywords = ["ai", "agent", "memory", "postgres", "temporal"]
 categories = ["database", "data-structures"]
 
+[features]
+postgres-integration = []
+
 [dependencies]
 mempill-core  = { path = "../mempill-core",  version = "0.2.0" }
 mempill-types = { path = "../mempill-types", version = "0.2.0" }
@@ -25,6 +28,41 @@ chrono        = { workspace = true }
 thiserror     = { workspace = true }
 
 [dev-dependencies]
-testcontainers-modules = { version = "0.15", features = ["postgres", "blocking"] }
+testcontainers-modules = { version = "0.15", features = ["postgres", "blocking", "watchdog"] }
 mempill-core = { path = "../mempill-core", version = "0.2.0", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
+
+[[test]]
+name = "postgres_concurrent"
+path = "tests/postgres_concurrent.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_conformance"
+path = "tests/postgres_conformance.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_oracle_conformance"
+path = "tests/postgres_oracle_conformance.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_oracle_e2e"
+path = "tests/postgres_oracle_e2e.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_pending_store"
+path = "tests/postgres_pending_store.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_succession"
+path = "tests/postgres_succession.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_ttl_orphan"
+path = "tests/postgres_ttl_orphan.rs"
+required-features = ["postgres-integration"]

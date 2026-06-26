@@ -15,7 +15,6 @@ use mempill_core::testing::conformance::run_persistence_conformance;
 ///
 /// Pins tag "16". Proves the Postgres adapter passes all 12 sub-tests on PG 16.
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_conformance_pg16() {
     common::with_pg("16", |store| {
         run_persistence_conformance(&*store);
@@ -27,7 +26,6 @@ fn postgres_conformance_pg16() {
 /// Pins tag "18" (current latest stable: 18.4). Proves the Postgres adapter passes
 /// all 12 sub-tests on PG 18 with identical behavior to PG 16.
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_conformance_pg18() {
     common::with_pg("18", |store| {
         run_persistence_conformance(&*store);

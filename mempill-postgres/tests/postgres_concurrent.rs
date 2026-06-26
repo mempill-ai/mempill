@@ -209,7 +209,6 @@ fn run_same_agent_proof(store: Arc<PostgresPersistenceStore>, conn_str: &str) {
 
 /// Cross-agent concurrent writes on postgres:16 — both must succeed (topology-b proof).
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn cross_agent_writes_both_succeed_pg16() {
     common::with_pg("16", |store| {
         run_cross_agent_proof(store);
@@ -218,7 +217,6 @@ fn cross_agent_writes_both_succeed_pg16() {
 
 /// Cross-agent concurrent writes on postgres:18 — both must succeed (topology-b proof).
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn cross_agent_writes_both_succeed_pg18() {
     common::with_pg("18", |store| {
         run_cross_agent_proof(store);
@@ -229,7 +227,6 @@ fn cross_agent_writes_both_succeed_pg18() {
 
 /// Same-agent advisory-lock + stream_seq serialization proof on postgres:16.
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn advisory_lock_same_agent_serializes_pg16() {
     common::with_pg_and_conn("16", |store, conn_str| {
         run_same_agent_proof(store, &conn_str);
@@ -238,7 +235,6 @@ fn advisory_lock_same_agent_serializes_pg16() {
 
 /// Same-agent advisory-lock + stream_seq serialization proof on postgres:18.
 #[test]
-#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn advisory_lock_same_agent_serializes_pg18() {
     common::with_pg_and_conn("18", |store, conn_str| {
         run_same_agent_proof(store, &conn_str);

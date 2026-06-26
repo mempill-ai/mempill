@@ -411,15 +411,17 @@ cargo test --workspace
 
 This runs the SQLite, core, and facade tests — fast and **Docker-free** (starts 0 containers).
 
-The PostgreSQL integration tests are gated behind `#[ignore]`: they spin up real
-`postgres:16` / `postgres:18.4` containers via testcontainers (which requires Docker), so run
-them explicitly:
+The PostgreSQL integration tests spin up real `postgres:16` / `postgres:18.4` containers via
+testcontainers, so they require Docker and are gated behind the **`postgres-integration`**
+cargo feature (sqlx-style):
 
 ```sh
-cargo test -p mempill-postgres -- --ignored
+cargo test -p mempill-postgres --features postgres-integration       # the 69 PG tests
+cargo test --workspace --features mempill-postgres/postgres-integration   # full verification (everything)
 ```
 
-If a container-backed run is interrupted, sweep any leaked test containers with:
+testcontainers' `watchdog` is enabled, so an interrupted run (Ctrl-C / SIGTERM) cleans up its
+own containers. As a fallback (e.g. after a hard `kill -9`), sweep any strays with:
 
 ```sh
 docker rm -f $(docker ps -aq --filter 'label=org.testcontainers.managed-by=testcontainers')
