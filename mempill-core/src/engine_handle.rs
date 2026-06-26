@@ -26,9 +26,11 @@ use crate::{
         audit::AuditUseCase,
         dto::{
             AuditQueryRequest, AuditQueryResponse, IngestClaimRequest, IngestClaimResponse,
-            QueryMemoryRequest, QueryMemoryResponse, ReconcileRequest, ReconcileResponse,
+            QueryHistoryRequest, QueryHistoryResponse, QueryMemoryRequest, QueryMemoryResponse,
+            ReconcileRequest, ReconcileResponse,
         },
         ingest_claim::IngestClaimUseCase,
+        query_history::QueryHistoryUseCase,
         query_memory::QueryMemoryUseCase,
         reconcile::ReconcileUseCase,
         submit_adjudication::SubmitAdjudicationUseCase,
@@ -271,6 +273,28 @@ where
     ) -> Result<QueryMemoryResponse, MemError> {
         let now = Utc::now();
         let uc = QueryMemoryUseCase::new(
+            Arc::clone(&self.persistence),
+            self.vector.clone(),
+            self.config.clone(),
+        );
+        task::spawn_blocking(move || uc.execute_with_time(req, now))
+            .await
+            .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
+    }
+
+    /// History read path: no write lock needed. Delegates to QueryHistoryUseCase.
+    ///
+    /// Returns the full ordered timeline for a (subject, predicate) subject-line.
+    /// Each entry is tagged `Current` or `Superseded` using the same canonical fold
+    /// as `query_memory` — so `history.current().value == recall primary value`.
+    ///
+    /// Clock read ONCE here; passed into the sync use-case (DETERMINISM).
+    pub async fn query_history(
+        &self,
+        req: QueryHistoryRequest,
+    ) -> Result<QueryHistoryResponse, MemError> {
+        let now = Utc::now();
+        let uc = QueryHistoryUseCase::new(
             Arc::clone(&self.persistence),
             self.vector.clone(),
             self.config.clone(),

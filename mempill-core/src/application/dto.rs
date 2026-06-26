@@ -5,7 +5,7 @@
 
 use mempill_types::{
     AgentId, BeliefProjection, Cardinality, ClaimRef, Confidence, Criticality, Disposition,
-    LedgerEntry, ProvenanceLabel, ValidTime,
+    HistoryEntryStatus, LedgerEntry, ProvenanceLabel, ValidTime,
 };
 
 // ── INGEST CLAIM ──────────────────────────────────────────────────────────────
@@ -74,6 +74,57 @@ pub struct ReconcileResponse {
     pub outcomes: Vec<(ClaimRef, Disposition)>,
     /// Number of subject lines that required oracle escalation.
     pub oracle_escalations: u32,
+}
+
+// ── QUERY HISTORY ────────────────────────────────────────────────────────────
+
+/// Request to retrieve the full history timeline for a (subject, predicate) subject-line.
+///
+/// Returns all claims ever written to the line, ordered by the canonical ordering key
+/// (valid_time_start when confidence ≥ threshold, else tx_time). Each entry is tagged
+/// `Current` or `Superseded` based on the same canonical fold that powers `query_memory`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QueryHistoryRequest {
+    pub agent_id: AgentId,
+    pub subject: String,
+    pub predicate: String,
+}
+
+/// One slot in the history timeline for a subject-line.
+///
+/// `status` is derived from `is_live` in the canonical fold — the `Current` entry is
+/// exactly the claim that `recall` / `query_memory` would return as primary.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HistoryEntry {
+    /// Stable reference to the underlying claim (UUID).
+    pub claim_ref: ClaimRef,
+    /// The asserted value for this claim.
+    pub value: serde_json::Value,
+    /// Start of the valid-time window, or `None` if unknown.
+    pub valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    /// Effective end of the slot: equals the successor's canonical ordering key,
+    /// or `None` for the open-ended current slot.
+    pub valid_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether this claim is the live belief or has been superseded.
+    pub status: HistoryEntryStatus,
+    /// Human-readable provenance label (e.g. `"External/UserAsserted"`).
+    pub provenance: String,
+    /// Confidence in the claim's value (0.0–1.0).
+    pub value_confidence: f32,
+}
+
+/// Response from `query_history` — the full ordered timeline for a subject-line.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QueryHistoryResponse {
+    /// All claims for the subject-line, ordered by canonical ordering key (oldest first).
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl QueryHistoryResponse {
+    /// Convenience: returns the single `Current` entry, if any.
+    pub fn current(&self) -> Option<&HistoryEntry> {
+        self.entries.iter().find(|e| e.status == HistoryEntryStatus::Current)
+    }
 }
 
 // ── AUDIT QUERY ───────────────────────────────────────────────────────────────

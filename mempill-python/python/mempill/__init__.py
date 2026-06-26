@@ -59,6 +59,9 @@ from mempill.ergonomic import (
     ContestCandidate,
     RecallResult,
     UnparsableDateError,
+    history,
+    History,
+    HistoryEntry,
 )
 
 # Re-export PyEngine under the friendlier name Engine so callers use `Engine` in
@@ -161,4 +164,8 @@ __all__ = [
     "ContestCandidate",
     "RecallResult",
     "UnparsableDateError",
+    # History API
+    "history",
+    "History",
+    "HistoryEntry",
 ]

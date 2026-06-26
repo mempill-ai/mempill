@@ -15,7 +15,7 @@
 
 use chrono::DateTime;
 use chrono::Utc;
-use mempill_core::{IngestClaimRequest, MemError, QueryMemoryRequest};
+use mempill_core::{IngestClaimRequest, MemError, QueryHistoryRequest, QueryMemoryRequest};
 use mempill_types::{
     AgentId, BeliefStatus, Cardinality, ClaimRef, Confidence, Criticality, Disposition,
     ExternalKind, ProvenanceLabel, ValidTime,
@@ -96,6 +96,88 @@ where
         req: QueryMemoryRequest,
     ) -> Result<mempill_core::QueryMemoryResponse, MemError> {
         self.query_memory(req).await
+    }
+}
+
+/// Object-safe async history-query seam. Implemented for `EngineHandle<P,O,V>` via blanket impl.
+///
+/// Not intended for direct use — call `history()` instead.
+#[async_trait::async_trait]
+pub trait CanQueryHistory: Send + Sync {
+    async fn query_history_ergo(
+        &self,
+        req: QueryHistoryRequest,
+    ) -> Result<mempill_core::QueryHistoryResponse, MemError>;
+}
+
+#[async_trait::async_trait]
+impl<P, O, V> CanQueryHistory for mempill_core::EngineHandle<P, O, V>
+where
+    P: mempill_core::PersistencePort + Send + Sync + 'static,
+    O: mempill_core::OraclePort + Send + Sync + 'static,
+    V: mempill_core::VectorPort + Send + Sync + 'static,
+{
+    async fn query_history_ergo(
+        &self,
+        req: QueryHistoryRequest,
+    ) -> Result<mempill_core::QueryHistoryResponse, MemError> {
+        self.query_history(req).await
+    }
+}
+
+// ── History return type ───────────────────────────────────────────────────────
+
+/// Re-export core's `HistoryEntry` so callers only need `use mempill::HistoryEntry`.
+pub use mempill_core::HistoryEntry;
+
+/// Re-export core's `HistoryEntryStatus` so callers can match on `Current`/`Superseded`.
+pub use mempill_types::HistoryEntryStatus;
+
+/// Ordered timeline of all claims for a (subject, predicate) subject-line.
+///
+/// Returned by [`history`]. Entries are ordered oldest-first by the canonical ordering
+/// key (valid_time_start when confidence ≥ threshold, else tx_time), exactly matching
+/// the sort order of `recall` / `query_memory`.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use mempill::{open_default_in_memory, remember, history, recall, RememberOptions};
+///
+/// let engine = open_default_in_memory()?;
+/// let agent = "my-agent";
+///
+/// remember(&engine, agent, "city_fact", "name", "Berlin",
+///          RememberOptions::new().valid_from("2020-01-01").valid_until("2025-01-01")).await?;
+/// remember(&engine, agent, "city_fact", "name", "Munich",
+///          RememberOptions::new().valid_from("2025-01-01")).await?;
+///
+/// let h = history(&engine, agent, "city_fact", "name").await?;
+/// assert_eq!(h.entries.len(), 2);
+/// assert_eq!(h.current().and_then(|e| e.value.as_str()), Some("Munich"));
+/// # Ok(())
+/// # }
+/// ```
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct History {
+    /// All claims for the subject-line, ordered by canonical ordering key (oldest first).
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl History {
+    /// Returns the single `Current` entry, if any.
+    ///
+    /// The current entry is exactly the claim that [`recall`] would return as primary.
+    /// Returns `None` when the subject-line is empty or all claims have been superseded.
+    pub fn current(&self) -> Option<&HistoryEntry> {
+        self.entries.iter().find(|e| e.status == HistoryEntryStatus::Current)
+    }
+
+    /// Returns `true` when the subject-line has no history at all.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -536,6 +618,32 @@ pub async fn recall(
     Ok(RecallResult { value, status: bp.status, candidates, currency, is_stale, primary })
 }
 
+/// Retrieve the full ordered history timeline for a subject+predicate.
+///
+/// Returns a [`History`] containing all claims ever written to the (subject, predicate)
+/// subject-line, ordered oldest-first. Each entry is tagged [`HistoryEntryStatus::Current`]
+/// or [`HistoryEntryStatus::Superseded`] using the same canonical fold as [`recall`], so
+/// `history().current()` is guaranteed to agree with `recall().primary`.
+///
+/// # Errors
+/// - `MempillDxError::Engine(_)` — persistence failure
+pub async fn history(
+    engine: &impl CanQueryHistory,
+    agent_id: impl Into<String>,
+    subject: impl Into<String>,
+    predicate: impl Into<String>,
+) -> Result<History, MempillDxError> {
+    let req = QueryHistoryRequest {
+        agent_id: AgentId(agent_id.into()),
+        subject: subject.into(),
+        predicate: predicate.into(),
+    };
+
+    let resp = engine.query_history_ergo(req).await?;
+
+    Ok(History { entries: resp.entries })
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn provenance_label_str(p: &ProvenanceLabel) -> String {
@@ -882,6 +990,88 @@ mod tests {
         assert!(p.provenance.contains("UserAsserted"), "provenance must contain UserAsserted");
         // corroboration_count is 0 for a single fresh write (no independent corroboration).
         assert_eq!(p.corroboration_count, 0);
+    }
+
+    // ── history() integration tests ───────────────────────────────────────────
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn history_succession_ordered_with_correct_statuses() {
+        let engine = crate::open_default_in_memory().unwrap();
+
+        // First fact: Berlin valid [2020, 2025)
+        remember(
+            &engine,
+            "agent",
+            "user",
+            "city",
+            "Berlin",
+            RememberOptions::new().valid_from("2020-01-01").valid_until("2025-01-01"),
+        )
+        .await
+        .unwrap();
+
+        // Superseding fact: Munich valid [2025, ∞) — this is what recall() returns now
+        remember(
+            &engine,
+            "agent",
+            "user",
+            "city",
+            "Munich",
+            RememberOptions::new().valid_from("2025-01-01"),
+        )
+        .await
+        .unwrap();
+
+        let h = history(&engine, "agent", "user", "city").await.unwrap();
+
+        assert_eq!(h.entries.len(), 2, "two claims → two history entries");
+        assert!(!h.is_empty());
+
+        // Oldest-first order
+        assert_eq!(
+            h.entries[0].value,
+            serde_json::json!("Berlin"),
+            "Berlin must be first (oldest)"
+        );
+        assert_eq!(
+            h.entries[1].value,
+            serde_json::json!("Munich"),
+            "Munich must be second (newer)"
+        );
+
+        // Status correctness
+        assert_eq!(
+            h.entries[0].status,
+            mempill_types::HistoryEntryStatus::Superseded,
+            "Berlin must be Superseded"
+        );
+        assert_eq!(
+            h.entries[1].status,
+            mempill_types::HistoryEntryStatus::Current,
+            "Munich must be Current"
+        );
+
+        // history().current() agrees with recall().primary value
+        let current = h.current().expect("must have a Current entry");
+        assert_eq!(current.value, serde_json::json!("Munich"));
+
+        let r = recall(&engine, "agent", "user", "city").await.unwrap();
+        let primary_value = r.primary.as_ref().map(|p| &p.value);
+        assert_eq!(
+            primary_value,
+            Some(&serde_json::json!("Munich")),
+            "history().current() value must match recall().primary value"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn history_empty_for_unknown_predicate() {
+        let engine = crate::open_default_in_memory().unwrap();
+        let h = history(&engine, "agent", "nobody", "nothing").await.unwrap();
+        assert!(h.is_empty());
+        assert!(h.current().is_none());
     }
 
     #[cfg(feature = "sqlite")]

@@ -33,7 +33,8 @@ pub mod validity;
 // ── Public re-exports ────────────────────────────────────────────────────────
 
 pub use belief::{
-    Belief, BeliefProjection, BeliefStatus, CurrencySignal, CurrencyState, Marker, StalenessFlag,
+    Belief, BeliefProjection, BeliefStatus, CurrencySignal, CurrencyState, HistoryEntryStatus,
+    Marker, StalenessFlag,
 };
 pub use claim::{Cardinality, Claim, Confidence, Criticality, Fact};
 pub use disposition::{Disposition, WriteOutcome};

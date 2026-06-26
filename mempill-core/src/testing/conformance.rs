@@ -3,8 +3,10 @@
 //! `run_persistence_conformance` exercises every `PersistencePort` method
 //! and panics on any deviation from the expected contract.
 //!
+//! `run_history_conformance` exercises the history timeline logic against a real store.
+//!
 //! Both `mempill-sqlite` and `mempill-postgres` activate `mempill-core/test-support`
-//! in dev-dependencies and call this function to verify behavioral parity.
+//! in dev-dependencies and call both functions to verify behavioral parity.
 //!
 //! Each sub-test uses DISTINCT agent_ids so they do not interfere on a shared store.
 
@@ -777,5 +779,219 @@ where
     assert!(
         edges.is_empty(),
         "conformance[t12]: load_edges_for must return empty vec when no edges exist"
+    );
+}
+
+// ── History conformance harness ───────────────────────────────────────────────
+
+/// Run the history timeline conformance suite against `store`.
+///
+/// Exercises `compute_effective_windows` (pure) and `truth_engine::fold` via the real
+/// persistence backend. Uses DISTINCT agent_id namespace (`conformance-hist-*`).
+///
+/// Panics on any contract violation with a descriptive message.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_history_conformance<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    hist_empty_line(store);
+    hist_single_claim(store);
+    hist_succession_ordering(store);
+    hist_current_agrees_with_fold(store);
+}
+
+/// Empty subject-line → `load_subject_line` returns empty (foundation for history).
+#[cfg(any(test, feature = "test-support"))]
+fn hist_empty_line<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    let agent = AgentId("conformance-hist-t1".into());
+    let claims = store
+        .load_subject_line(&agent, "hist-nobody", "hist-nothing")
+        .expect("conformance[hist-t1]: load_subject_line must not error");
+    assert!(
+        claims.is_empty(),
+        "conformance[hist-t1]: unknown subject-line must return empty vec"
+    );
+}
+
+/// Single committed claim → 1 entry, ordering key is tx_time (low confidence).
+#[cfg(any(test, feature = "test-support"))]
+fn hist_single_claim<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::query_history::compute_effective_windows;
+    use crate::config::EngineConfig;
+
+    let agent = AgentId("conformance-hist-t2".into());
+    let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(10_000_000, 0).unwrap();
+    let claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "hist-acme".to_owned(), predicate: "ceo".to_owned(), value: serde_json::json!("Alice") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    );
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t2]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[hist-t2]: append_claim");
+    store.commit(txn).expect("conformance[hist-t2]: commit");
+
+    let claims = store
+        .load_subject_line(&agent, "hist-acme", "ceo")
+        .expect("conformance[hist-t2]: load_subject_line must not error");
+    assert_eq!(claims.len(), 1, "conformance[hist-t2]: must have 1 claim");
+
+    let config = EngineConfig::default();
+    let refs: Vec<&Claim> = claims.iter().collect();
+    let windows = compute_effective_windows(&refs, &config);
+    assert_eq!(windows.len(), 1, "conformance[hist-t2]: 1 window");
+    assert_eq!(windows[0], None, "conformance[hist-t2]: single claim has open-ended window");
+}
+
+/// CEO succession: Alice→John→Bob — 3 entries ordered oldest first, windows correct.
+/// This is the canonical CEO-timeline scenario from the DESIGN.md.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_succession_ordering<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::query_history::compute_effective_windows;
+    use crate::config::EngineConfig;
+
+    let agent = AgentId("conformance-hist-t3".into());
+
+    let t_alice = chrono::DateTime::<chrono::Utc>::from_timestamp(11_000_000, 0).unwrap();
+    let t_john  = chrono::DateTime::<chrono::Utc>::from_timestamp(11_000_001, 0).unwrap();
+    let t_bob   = chrono::DateTime::<chrono::Utc>::from_timestamp(11_000_002, 0).unwrap();
+
+    let make_c = |val: &str, tx: chrono::DateTime<chrono::Utc>| -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            agent.clone(),
+            Fact { subject: "hist-corp".to_owned(), predicate: "ceo".to_owned(), value: serde_json::json!(val) },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(tx),
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            Criticality::Low,
+            vec![],
+            None,
+            None,
+        )
+    };
+
+    let c_alice = make_c("Alice", t_alice);
+    let c_john  = make_c("John",  t_john);
+    let c_bob   = make_c("Bob",   t_bob);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t3]: begin_atomic");
+    store.append_claim(&mut txn, &c_alice).expect("conformance[hist-t3]: append Alice");
+    store.append_claim(&mut txn, &c_john).expect("conformance[hist-t3]: append John");
+    store.append_claim(&mut txn, &c_bob).expect("conformance[hist-t3]: append Bob");
+    store.commit(txn).expect("conformance[hist-t3]: commit");
+
+    let mut claims = store
+        .load_subject_line(&agent, "hist-corp", "ceo")
+        .expect("conformance[hist-t3]: load_subject_line must not error");
+    assert_eq!(claims.len(), 3, "conformance[hist-t3]: must have 3 claims (Alice, John, Bob)");
+
+    let config = EngineConfig::default();
+    // Sort by canonical ordering key (tx_time — all low confidence).
+    claims.sort_by(|a, b| {
+        a.transaction_time().0.cmp(&b.transaction_time().0)
+            .then(a.claim_ref().0.as_u128().cmp(&b.claim_ref().0.as_u128()))
+    });
+
+    let refs: Vec<&Claim> = claims.iter().collect();
+    let windows = compute_effective_windows(&refs, &config);
+
+    // Windows: Alice closed by John's tx, John closed by Bob's tx, Bob open.
+    assert_eq!(windows[0], Some(t_john), "conformance[hist-t3]: Alice's valid_until = John's ordering key");
+    assert_eq!(windows[1], Some(t_bob),  "conformance[hist-t3]: John's valid_until = Bob's ordering key");
+    assert_eq!(windows[2], None,          "conformance[hist-t3]: Bob is open-ended (current)");
+
+    // Values in canonical order (oldest first).
+    assert_eq!(claims[0].fact().value, serde_json::json!("Alice"), "conformance[hist-t3]: oldest is Alice");
+    assert_eq!(claims[1].fact().value, serde_json::json!("John"),  "conformance[hist-t3]: middle is John");
+    assert_eq!(claims[2].fact().value, serde_json::json!("Bob"),   "conformance[hist-t3]: newest is Bob");
+}
+
+/// Current entry agrees with `truth_engine::fold` on which claim is live.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_current_agrees_with_fold<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use std::collections::HashMap;
+    use mempill_types::disposition::Disposition;
+
+    let agent = AgentId("conformance-hist-t4".into());
+
+    let t1 = chrono::DateTime::<chrono::Utc>::from_timestamp(12_000_000, 0).unwrap();
+    let t2 = chrono::DateTime::<chrono::Utc>::from_timestamp(12_000_001, 0).unwrap();
+
+    let c = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "hist-org".to_owned(), predicate: "lead".to_owned(), value: serde_json::json!("Leader-A") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(t1),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    );
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t4]: begin_atomic");
+    store.append_claim(&mut txn, &c).expect("conformance[hist-t4]: append");
+    store.commit(txn).expect("conformance[hist-t4]: commit");
+
+    let claims = store
+        .load_subject_line(&agent, "hist-org", "lead")
+        .expect("conformance[hist-t4]: load_subject_line");
+    assert_eq!(claims.len(), 1, "conformance[hist-t4]: one claim loaded");
+
+    let config = EngineConfig::default();
+    let latest_disposition: HashMap<_, Disposition> = HashMap::new();
+    let now = t2;
+
+    let fold = truth_engine::fold(
+        claims.clone(),
+        |_| vec![],
+        now,
+        &config,
+        &latest_disposition,
+    );
+
+    assert_eq!(fold.live_claims.len(), 1, "conformance[hist-t4]: one live claim in fold");
+    assert_eq!(
+        fold.live_claims[0].claim.fact().value,
+        serde_json::json!("Leader-A"),
+        "conformance[hist-t4]: fold's live claim must match the single committed claim"
     );
 }

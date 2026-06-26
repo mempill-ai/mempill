@@ -40,8 +40,9 @@ pub mod testing;
 // ── Key public re-exports ─────────────────────────────────────────────────────
 
 pub use application::{
-    AuditQueryRequest, AuditQueryResponse, AuditUseCase, IngestClaimRequest, IngestClaimResponse,
-    IngestClaimUseCase, QueryMemoryRequest, QueryMemoryResponse, QueryMemoryUseCase,
+    AuditQueryRequest, AuditQueryResponse, AuditUseCase, HistoryEntry, IngestClaimRequest,
+    IngestClaimResponse, IngestClaimUseCase, QueryHistoryRequest, QueryHistoryResponse,
+    QueryHistoryUseCase, QueryMemoryRequest, QueryMemoryResponse, QueryMemoryUseCase,
     ReconcileRequest, ReconcileResponse, ReconcileUseCase,
 };
 pub use config::EngineConfig;
