@@ -73,6 +73,33 @@
 //!
 //! The engine core has zero dependency on either adapter crate.
 
+// ── Tier-1 ergonomic modules ──────────────────────────────────────────────────
+
+pub mod ergonomic;
+pub mod date;
+
+// ── Tier-1 surface re-exports ─────────────────────────────────────────────────
+
+pub use ergonomic::{
+    // Functions
+    remember,
+    recall,
+    // Option builder
+    RememberOptions,
+    // Return types
+    RememberReceipt,
+    RecallResult,
+    ContestCandidate,
+    // Error
+    MempillDxError,
+    // Seam traits (for advanced users who write generic code over the engine)
+    CanIngestClaim,
+    CanQueryMemory,
+    // Tier-2 builder
+    IngestClaimRequestExt,
+    IngestClaimRequestBuilder,
+};
+
 // ── Domain-type re-exports (mempill-types) ───────────────────────────────────
 //
 // Re-export the complete set of domain types a consumer needs so they can write
