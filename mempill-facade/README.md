@@ -18,29 +18,27 @@ mempill = { version = "0.2", features = ["postgres"] }
 ## Quick start
 
 ```rust
-use mempill::sqlite::open_default_in_memory;
-use mempill::{IngestClaimRequest, QueryMemoryRequest};
-use mempill_types::{AgentId, Cardinality, Confidence, Criticality, ExternalKind, ProvenanceLabel};
+use mempill::{open_default_in_memory, remember, recall, RememberOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let engine = mempill::open_default_in_memory()?;
-    let agent  = AgentId("my-agent".into());
+    let engine = open_default_in_memory()?;
 
-    let resp = engine.ingest_claim(IngestClaimRequest {
-        agent_id:    agent.clone(),
-        subject:     "user".into(),
-        predicate:   "city".into(),
-        value:       serde_json::json!("Berlin"),
-        provenance:  ProvenanceLabel::External(ExternalKind::UserAsserted),
-        cardinality: Cardinality::Functional,
-        valid_time:  None,
-        confidence:  Confidence { value_confidence: 0.95, valid_time_confidence: 0.0 },
-        criticality: Criticality::Medium,
-        derived_from: vec![],
-    }).await?;
+    // Remember a fact — 3 args + sane defaults. Dates are lenient: "2020", "2020-03", or RFC3339.
+    remember(&engine, "my-agent", "user", "city", "Berlin",
+             RememberOptions::default().valid_from("2020")).await?;
 
-    println!("disposition: {:?}", resp.disposition);
+    // Conflicting facts are NEVER silently overwritten — they surface as Contested.
+    remember(&engine, "my-agent", "acme:ceo", "held_by", "Alice", RememberOptions::default()).await?;
+    remember(&engine, "my-agent", "acme:ceo", "held_by", "Bob",   RememberOptions::default()).await?;
+
+    // Recall — flat result; Contested is explicit (can't be mistaken for "no memory").
+    let r = recall(&engine, "my-agent", "acme:ceo", "held_by").await?;
+    if r.is_contested() {
+        println!("contested: {:?}", r.candidates);
+    } else {
+        println!("ceo = {:?}", r.as_str());
+    }
     Ok(())
 }
 ```

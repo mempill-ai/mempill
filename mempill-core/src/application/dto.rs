@@ -1,4 +1,4 @@
-//! Public DTOs — the stable API surface consumed by all bindings (§4a).
+//! Public DTOs — the stable API surface consumed by all bindings.
 //!
 //! Domain types from `mempill-types` are referenced here but raw internal engine types
 //! never cross this boundary; callers only see these structs.
