@@ -326,16 +326,19 @@ fn run_list_queued_orphan_not_present(store: Arc<PostgresPersistenceStore>) {
 // ── PG 16 ─────────────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w6_pg16_mark_expired_sets_status() {
     common::with_pg("16", run_mark_expired_sets_status);
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w6_pg16_list_queued_orphan_present() {
     common::with_pg("16", run_list_queued_orphan_present);
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w6_pg16_list_queued_orphan_not_present() {
     common::with_pg("16", run_list_queued_orphan_not_present);
 }
@@ -343,16 +346,19 @@ fn w6_pg16_list_queued_orphan_not_present() {
 // ── PG 18 ─────────────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w6_pg18_mark_expired_sets_status() {
     common::with_pg("18", run_mark_expired_sets_status);
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w6_pg18_list_queued_orphan_present() {
     common::with_pg("18", run_list_queued_orphan_present);
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn w6_pg18_list_queued_orphan_not_present() {
     common::with_pg("18", run_list_queued_orphan_not_present);
 }

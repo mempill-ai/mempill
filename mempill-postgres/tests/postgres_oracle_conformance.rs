@@ -460,61 +460,73 @@ fn run_12_b11(conn_str: &str) {
 // ── PG16 tests ────────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_01_affirm_challenger_wins() {
     common::with_pg_and_conn("16", |_store, conn_str| run_01_affirm(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_02_deny_incumbent_stands() {
     common::with_pg_and_conn("16", |_store, conn_str| run_02_deny(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_03_unknown_stays_contested() {
     common::with_pg_and_conn("16", |_store, conn_str| run_03_unknown(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_04_queued_surfaces_contested() {
     common::with_pg_and_conn("16", |_store, conn_str| run_04_queued(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_05_stale_handle_not_found() {
     common::with_pg_and_conn("16", |_store, conn_str| run_05_stale(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_06_duplicate_submit_not_found() {
     common::with_pg_and_conn("16", |_store, conn_str| run_06_dup(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_07_ttl_expiry_reverts_contested() {
     common::with_pg_and_conn("16", |_store, conn_str| run_07_ttl(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_08a_sweep_reverts_expired() {
     common::with_pg_and_conn("16", |_store, conn_str| run_08a_sweep(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_08b_sweep_recovers_orphan() {
     common::with_pg_and_conn("16", |_store, conn_str| run_08b_orphan(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_09_durable_store_survives_reopen() {
     common::with_pg_and_conn("16", |_store, conn_str| run_09_reopen(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_10_atomicity_no_torn_write() {
     common::with_pg_and_conn("16", |_store, conn_str| run_10_atom(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_11a_ledger_affirm() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_11_ledger(&conn_str, AdjudicationVerdict::Affirm, Disposition::CommittedCheap, LedgerEventKind::AdjudicationResolved);
@@ -522,6 +534,7 @@ fn pg16_oc_11a_ledger_affirm() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_11b_ledger_deny() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_11_ledger(&conn_str, AdjudicationVerdict::Deny, Disposition::Superseded, LedgerEventKind::ValidityAsserted);
@@ -529,6 +542,7 @@ fn pg16_oc_11b_ledger_deny() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_11c_ledger_unknown() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_11_ledger(&conn_str, AdjudicationVerdict::Unknown, Disposition::Contested, LedgerEventKind::AdjudicationResolved);
@@ -536,6 +550,7 @@ fn pg16_oc_11c_ledger_unknown() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_oc_12_b11_oracle_absent_contested() {
     common::with_pg_and_conn("16", |_store, conn_str| run_12_b11(&conn_str));
 }
@@ -543,61 +558,73 @@ fn pg16_oc_12_b11_oracle_absent_contested() {
 // ── PG18 tests ────────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_01_affirm_challenger_wins() {
     common::with_pg_and_conn("18", |_store, conn_str| run_01_affirm(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_02_deny_incumbent_stands() {
     common::with_pg_and_conn("18", |_store, conn_str| run_02_deny(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_03_unknown_stays_contested() {
     common::with_pg_and_conn("18", |_store, conn_str| run_03_unknown(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_04_queued_surfaces_contested() {
     common::with_pg_and_conn("18", |_store, conn_str| run_04_queued(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_05_stale_handle_not_found() {
     common::with_pg_and_conn("18", |_store, conn_str| run_05_stale(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_06_duplicate_submit_not_found() {
     common::with_pg_and_conn("18", |_store, conn_str| run_06_dup(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_07_ttl_expiry_reverts_contested() {
     common::with_pg_and_conn("18", |_store, conn_str| run_07_ttl(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_08a_sweep_reverts_expired() {
     common::with_pg_and_conn("18", |_store, conn_str| run_08a_sweep(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_08b_sweep_recovers_orphan() {
     common::with_pg_and_conn("18", |_store, conn_str| run_08b_orphan(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_09_durable_store_survives_reopen() {
     common::with_pg_and_conn("18", |_store, conn_str| run_09_reopen(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_10_atomicity_no_torn_write() {
     common::with_pg_and_conn("18", |_store, conn_str| run_10_atom(&conn_str));
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_11a_ledger_affirm() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_11_ledger(&conn_str, AdjudicationVerdict::Affirm, Disposition::CommittedCheap, LedgerEventKind::AdjudicationResolved);
@@ -605,6 +632,7 @@ fn pg18_oc_11a_ledger_affirm() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_11b_ledger_deny() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_11_ledger(&conn_str, AdjudicationVerdict::Deny, Disposition::Superseded, LedgerEventKind::ValidityAsserted);
@@ -612,6 +640,7 @@ fn pg18_oc_11b_ledger_deny() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_11c_ledger_unknown() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_11_ledger(&conn_str, AdjudicationVerdict::Unknown, Disposition::Contested, LedgerEventKind::AdjudicationResolved);
@@ -619,6 +648,7 @@ fn pg18_oc_11c_ledger_unknown() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_oc_12_b11_oracle_absent_contested() {
     common::with_pg_and_conn("18", |_store, conn_str| run_12_b11(&conn_str));
 }

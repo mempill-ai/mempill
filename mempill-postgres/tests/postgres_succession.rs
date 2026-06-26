@@ -313,6 +313,7 @@ fn run_low_confidence_contested(conn_str: &str) {
 // ── PG16 tests ────────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_succession_and_boundary() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_succession_scenario(&conn_str);
@@ -320,6 +321,7 @@ fn pg16_succession_and_boundary() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg16_low_confidence_is_contested() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_low_confidence_contested(&conn_str);
@@ -329,6 +331,7 @@ fn pg16_low_confidence_is_contested() {
 // ── PG18 tests ────────────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_succession_and_boundary() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_succession_scenario(&conn_str);
@@ -336,6 +339,7 @@ fn pg18_succession_and_boundary() {
 }
 
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn pg18_low_confidence_is_contested() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_low_confidence_contested(&conn_str);

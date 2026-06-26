@@ -545,6 +545,7 @@ fn assert_eq_str<T: std::fmt::Debug + PartialEq>(
 
 /// Live oracle e2e test (pre-submit Contested[both] assertion) against `postgres:16`.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_oracle_e2e_pg16() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_pg_oracle_contested_only(&conn_str);
@@ -556,6 +557,7 @@ fn postgres_oracle_e2e_pg16() {
 /// Proves `submit_adjudication(Affirm)` works on Postgres after W7-FIX:
 /// challenger (bob) surfaces as the belief after Affirm.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_submit_affirm_pg16() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_pg_submit_affirm(&conn_str);
@@ -567,6 +569,7 @@ fn postgres_submit_affirm_pg16() {
 /// Proves `submit_adjudication(Deny)` works on Postgres after W7-FIX:
 /// incumbent (alice) surfaces after Deny.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_submit_deny_pg16() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_pg_submit_deny(&conn_str);
@@ -578,6 +581,7 @@ fn postgres_submit_deny_pg16() {
 /// Proves `submit_adjudication(Unknown)` works on Postgres after W7-FIX:
 /// Contested[alice, bob] after Unknown.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_submit_unknown_pg16() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_pg_submit_unknown(&conn_str);
@@ -589,6 +593,7 @@ fn postgres_submit_unknown_pg16() {
 /// Proves `sweep_expired_adjudications` works on Postgres after W7-FIX:
 /// expired pending row → Contested[alice, bob].
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_sweep_expired_pg16() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         run_pg_sweep_expired(&conn_str);
@@ -599,6 +604,7 @@ fn postgres_sweep_expired_pg16() {
 
 /// Live oracle e2e test against `postgres:18`.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_oracle_e2e_pg18() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_pg_oracle_contested_only(&conn_str);
@@ -607,6 +613,7 @@ fn postgres_oracle_e2e_pg18() {
 
 /// Live Affirm resolution test against `postgres:18`.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_submit_affirm_pg18() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_pg_submit_affirm(&conn_str);
@@ -615,6 +622,7 @@ fn postgres_submit_affirm_pg18() {
 
 /// Live Deny resolution test against `postgres:18`.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_submit_deny_pg18() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_pg_submit_deny(&conn_str);
@@ -623,6 +631,7 @@ fn postgres_submit_deny_pg18() {
 
 /// Live Unknown resolution test against `postgres:18`.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_submit_unknown_pg18() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_pg_submit_unknown(&conn_str);
@@ -631,6 +640,7 @@ fn postgres_submit_unknown_pg18() {
 
 /// Live sweep (TTL expiry) test against `postgres:18`.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_sweep_expired_pg18() {
     common::with_pg_and_conn("18", |_store, conn_str| {
         run_pg_sweep_expired(&conn_str);
@@ -641,6 +651,7 @@ fn postgres_sweep_expired_pg18() {
 
 /// Regression guard: `open_postgres` (no oracle) must still compile and run correctly.
 #[test]
+#[ignore = "requires Docker (testcontainers); run with: cargo test -p mempill-postgres -- --ignored"]
 fn postgres_no_oracle_constructor_unchanged_pg16() {
     common::with_pg_and_conn("16", |_store, conn_str| {
         use mempill_postgres::open_postgres;
