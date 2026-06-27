@@ -144,6 +144,10 @@ mod tests {
             Ok(entries)
         }
 
+        fn load_ledger_for_claims(&self, _: &AgentId, _refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> {
+            Ok(vec![])
+        }
+
         fn load_edges_for(&self, _: &AgentId, _: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> {
             Ok(self.edges.clone())
         }

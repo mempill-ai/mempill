@@ -522,6 +522,12 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
 
+        fn load_ledger_for_claims(
+            &self,
+            _agent_id: &AgentId,
+            _refs: &[ClaimRef],
+        ) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
+
         fn load_edges_for(
             &self,
             _agent_id: &AgentId,
@@ -670,6 +676,10 @@ mod tests {
 
         fn load_ledger(&self, _: &AgentId, _: Option<&TransactionTime>, _: usize) -> Result<Vec<LedgerEntry>, MockErr> {
             Ok(self.ledger.lock().unwrap().clone())
+        }
+
+        fn load_ledger_for_claims(&self, _: &AgentId, _refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> {
+            Ok(vec![])
         }
 
         fn load_edges_for(&self, _: &AgentId, _: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }

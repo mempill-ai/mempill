@@ -9,7 +9,9 @@
 
 mod common;
 
-use mempill_core::testing::conformance::{run_history_conformance, run_persistence_conformance};
+use mempill_core::testing::conformance::{
+    run_disposition_scope_conformance, run_history_conformance, run_persistence_conformance,
+};
 
 /// Conformance suite against postgres:16.
 ///
@@ -45,5 +47,21 @@ fn postgres_history_conformance_pg16() {
 fn postgres_history_conformance_pg18() {
     common::with_pg("18", |store| {
         run_history_conformance(&*store);
+    });
+}
+
+/// Disposition-scope correctness suite against postgres:16.
+#[test]
+fn postgres_disposition_scope_conformance_pg16() {
+    common::with_pg("16", |store| {
+        run_disposition_scope_conformance(&*store);
+    });
+}
+
+/// Disposition-scope correctness suite against postgres:18.
+#[test]
+fn postgres_disposition_scope_conformance_pg18() {
+    common::with_pg("18", |store| {
+        run_disposition_scope_conformance(&*store);
     });
 }

@@ -79,6 +79,28 @@ pub trait PersistencePort: Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<LedgerEntry>, Self::Error>;
 
+    /// Load ALL ledger entries for the given claim refs, with no row cap.
+    ///
+    /// Intended for the read path (query_memory / query_history): builds the
+    /// disposition map scoped to exactly the claims on a subject-line, avoiding
+    /// the agent-wide capped scan that caused silent wrong-belief at scale.
+    ///
+    /// # Empty input
+    ///
+    /// When `claim_refs` is empty this method MUST return `Ok(vec![])` immediately
+    /// without issuing any SQL (an empty `IN ()` clause is a syntax error on most
+    /// backends).
+    ///
+    /// # No row cap
+    ///
+    /// Unlike `load_ledger`, this method applies no `LIMIT`. Subject-lines are
+    /// small (typically 1–100 claims), so the result set is bounded naturally.
+    fn load_ledger_for_claims(
+        &self,
+        agent_id: &AgentId,
+        claim_refs: &[ClaimRef],
+    ) -> Result<Vec<LedgerEntry>, Self::Error>;
+
     fn load_edges_for(
         &self,
         agent_id: &AgentId,

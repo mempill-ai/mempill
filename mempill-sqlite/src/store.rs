@@ -934,6 +934,101 @@ impl PersistencePort for SqlitePersistenceStore {
         Ok(entries)
     }
 
+    /// Load ALL ledger entries for the given claim refs, no row cap.
+    ///
+    /// SQLite limits bound parameters to ~999 per statement (SQLITE_LIMIT_VARIABLE_NUMBER).
+    /// Chunks the IN list into batches of 900 and concatenates results so this method is
+    /// safe for any slice size.
+    fn load_ledger_for_claims(
+        &self,
+        agent_id: &AgentId,
+        claim_refs: &[ClaimRef],
+    ) -> Result<Vec<LedgerEntry>, SqliteStoreError> {
+        if claim_refs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        let to_err = |msg: String| rusqlite::Error::InvalidColumnType(
+            0, msg, rusqlite::types::Type::Text,
+        );
+
+        let map_row = |row: &rusqlite::Row<'_>| {
+            let entry_id_str: String = row.get(0)?;
+            let agent_id_str: String = row.get(1)?;
+            let claim_id_str: String = row.get(2)?;
+            let event_kind_str: String = row.get(3)?;
+            let disposition_str: String = row.get(4)?;
+            let rationale_json: Option<String> = row.get(5)?;
+            let recorded_at_str: String = row.get(6)?;
+
+            let entry_id = uuid::Uuid::parse_str(&entry_id_str)
+                .map_err(|e| to_err(format!("entry_id UUID: {e}")))?;
+            let claim_id = uuid::Uuid::parse_str(&claim_id_str)
+                .map(ClaimRef)
+                .map_err(|e| to_err(format!("claim_id UUID: {e}")))?;
+            let event_kind = str_to_ledger_event_kind(&event_kind_str)
+                .map_err(|e| to_err(e.to_string()))?;
+            let disposition = str_to_disposition(&disposition_str)
+                .map_err(|e| to_err(e.to_string()))?;
+            let rationale: Option<serde_json::Value> = rationale_json
+                .map(|s| serde_json::from_str(&s).map_err(|e| to_err(format!("rationale JSON: {e}"))))
+                .transpose()?;
+            let recorded_at = chrono::DateTime::parse_from_rfc3339(&recorded_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| to_err(format!("recorded_at parse: {e}")))?;
+
+            Ok(LedgerEntry {
+                entry_id,
+                agent_id: AgentId(agent_id_str),
+                claim_ref: claim_id,
+                event_kind,
+                disposition,
+                rationale,
+                recorded_at: TransactionTime(recorded_at),
+            })
+        };
+
+        let mut all_entries = Vec::new();
+        // SQLite's default SQLITE_LIMIT_VARIABLE_NUMBER is 999; use 900 to leave headroom
+        // for the agent_id parameter.
+        const CHUNK: usize = 900;
+
+        for chunk in claim_refs.chunks(CHUNK) {
+            let placeholders: Vec<String> = (2..=chunk.len() + 1)
+                .map(|i| format!("?{i}"))
+                .collect();
+            let sql = format!(
+                "SELECT entry_id, agent_id, claim_id, event_kind, disposition, rationale, recorded_at
+                 FROM ledger_entries
+                 WHERE agent_id = ?1 AND claim_id IN ({})
+                 ORDER BY recorded_at ASC",
+                placeholders.join(", ")
+            );
+
+            let mut stmt = conn.prepare(&sql)?;
+            // Build params: agent_id first, then each claim_ref UUID string.
+            let agent_str = agent_id.0.as_str();
+            let id_strings: Vec<String> = chunk.iter().map(|r| r.0.to_string()).collect();
+
+            // rusqlite requires a Vec<&dyn ToSql> when params are heterogeneous.
+            let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(1 + id_strings.len());
+            params.push(&agent_str);
+            for s in &id_strings {
+                params.push(s);
+            }
+
+            let rows = stmt.query_map(params.as_slice(), map_row)?;
+            for row in rows {
+                all_entries.push(row?);
+            }
+        }
+
+        Ok(all_entries)
+    }
+
     /// Load all edges where `claim_ref` is either the from or to end, for this agent.
     /// Ordered by `created_at ASC` (deterministic cascade — required by convention).
     ///

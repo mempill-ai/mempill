@@ -809,6 +809,72 @@ impl PersistencePort for PostgresPersistenceStore {
         rows.iter().map(map_row).collect()
     }
 
+    /// Load ALL ledger entries for the given claim refs, no row cap.
+    ///
+    /// Uses `claim_id = ANY($2::text[])` to avoid per-parameter binding limits.
+    fn load_ledger_for_claims(
+        &self,
+        agent_id: &AgentId,
+        claim_refs: &[ClaimRef],
+    ) -> Result<Vec<LedgerEntry>, PostgresStoreError> {
+        if claim_refs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut conn = self.pool.get()?;
+
+        let map_row = |row: &postgres::Row| -> Result<LedgerEntry, PostgresStoreError> {
+            let entry_id_str: String = row.get(0);
+            let agent_id_str: String = row.get(1);
+            let claim_id_str: String = row.get(2);
+            let event_kind_str: String = row.get(3);
+            let disposition_str: String = row.get(4);
+            let rationale_json: Option<String> = row.get(5);
+            let recorded_at_str: String = row.get(6);
+
+            let entry_id = uuid::Uuid::parse_str(&entry_id_str)
+                .map_err(|e| PostgresStoreError::Mapping(format!("entry_id UUID: {e}")))?;
+            let claim_id = uuid::Uuid::parse_str(&claim_id_str)
+                .map(ClaimRef)
+                .map_err(|e| PostgresStoreError::Mapping(format!("claim_id UUID: {e}")))?;
+            let event_kind = str_to_ledger_event_kind(&event_kind_str)?;
+            let disposition = str_to_disposition(&disposition_str)?;
+            let rationale: Option<serde_json::Value> = rationale_json
+                .map(|s| {
+                    serde_json::from_str(&s)
+                        .map_err(|e| PostgresStoreError::Mapping(format!("rationale JSON: {e}")))
+                })
+                .transpose()?;
+            let recorded_at = chrono::DateTime::parse_from_rfc3339(&recorded_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| PostgresStoreError::Mapping(format!("recorded_at: {e}")))?;
+
+            Ok(LedgerEntry {
+                entry_id,
+                agent_id: AgentId(agent_id_str),
+                claim_ref: claim_id,
+                event_kind,
+                disposition,
+                rationale,
+                recorded_at: TransactionTime(recorded_at),
+            })
+        };
+
+        // Pass the claim refs as a Postgres text array; ANY avoids per-param binding limits.
+        let id_strings: Vec<String> = claim_refs.iter().map(|r| r.0.to_string()).collect();
+        let ids_ref: Vec<&str> = id_strings.iter().map(|s| s.as_str()).collect();
+
+        let rows = conn.query(
+            "SELECT entry_id, agent_id, claim_id, event_kind, disposition, rationale::text, recorded_at
+             FROM ledger_entries
+             WHERE agent_id = $1 AND claim_id = ANY($2)
+             ORDER BY recorded_at ASC",
+            &[&agent_id.0.as_str(), &ids_ref.as_slice()],
+        )?;
+
+        rows.iter().map(map_row).collect()
+    }
+
     /// Load all edges where `claim_ref` is either the from or to end, ordered by created_at ASC.
     fn load_edges_for(
         &self,
