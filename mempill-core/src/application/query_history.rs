@@ -132,9 +132,11 @@ where
             return Ok(QueryHistoryResponse { entries: vec![] });
         }
 
-        // Load ledger for the disposition-based liveness filter.
+        // Load ledger scoped to the claims on this subject-line — no agent-wide cap,
+        // always complete regardless of total agent ledger size.
+        let claim_refs: Vec<_> = claims.iter().map(|c| c.claim_ref().clone()).collect();
         let all_ledger = self.persistence
-            .load_ledger(&req.agent_id, None, 10_000)
+            .load_ledger_for_claims(&req.agent_id, &claim_refs)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
 
@@ -310,6 +312,13 @@ mod tests {
             _aid: &AgentId,
             _from: Option<&mempill_types::TransactionTime>,
             _lim: usize,
+        ) -> Result<Vec<LedgerEntry>, MockErr> {
+            Ok(vec![])
+        }
+        fn load_ledger_for_claims(
+            &self,
+            _aid: &AgentId,
+            _refs: &[ClaimRef],
         ) -> Result<Vec<LedgerEntry>, MockErr> {
             Ok(vec![])
         }

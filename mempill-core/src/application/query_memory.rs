@@ -58,9 +58,12 @@ where
         // otherwise use the injected `now`.
         let as_of = req.as_of_tx_time.unwrap_or(now);
 
-        // Load ledger for the disposition-based liveness filter — must come before fold.
+        // Load ledger for the disposition-based liveness filter — scoped to exactly the
+        // claims on this subject-line (no agent-wide cap; always complete regardless of
+        // total agent ledger size — fixes the silent-wrong-belief-at-scale bug).
+        let claim_refs: Vec<_> = claims.iter().map(|c| c.claim_ref().clone()).collect();
         let all_ledger = self.persistence
-            .load_ledger(&req.agent_id, None, 10_000)
+            .load_ledger_for_claims(&req.agent_id, &claim_refs)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
 
@@ -157,6 +160,7 @@ mod tests {
         fn load_claim(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Option<Claim>, MockErr> { Ok(None) }
         fn load_validity_assertions_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ValidityAssertion>, MockErr> { Ok(vec![]) }
         fn load_ledger(&self, _aid: &AgentId, _from: Option<&mempill_types::TransactionTime>, _lim: usize) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
+        fn load_ledger_for_claims(&self, _aid: &AgentId, _refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
         fn load_edges_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
         fn load_injected_claims(&self, _aid: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
         fn load_lineage(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }

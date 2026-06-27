@@ -117,6 +117,22 @@ where
     test_load_injected_claims(store);
     test_load_claim_missing(store);
     test_load_edges_for_empty(store);
+    test_load_ledger_for_claims_scoped(store);
+}
+
+/// Run the disposition-scope correctness suite.
+///
+/// Proves that `load_ledger_for_claims` returns complete dispositions for the
+/// queried claims, and that `query_memory` returns the correct live belief on a
+/// subject-line whose superseded claim has a disposition event that would fall
+/// outside a small agent-wide cap — the silent-wrong-belief-at-scale bug.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_disposition_scope_conformance<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    test_superseded_claim_excluded_despite_large_agent_ledger(store);
 }
 
 // ── Sub-tests ─────────────────────────────────────────────────────────────────
@@ -993,5 +1009,250 @@ where
         fold.live_claims[0].claim.fact().value,
         serde_json::json!("Leader-A"),
         "conformance[hist-t4]: fold's live claim must match the single committed claim"
+    );
+}
+
+// ── Disposition-scope conformance tests ───────────────────────────────────────
+
+/// `load_ledger_for_claims` returns exactly the entries for the given claim refs.
+///
+/// Writes two claims each with a ledger entry, queries for only one, asserts only
+/// one entry is returned — proving the method is correctly scoped to `claim_refs`.
+#[cfg(any(test, feature = "test-support"))]
+fn test_load_ledger_for_claims_scoped<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    let agent = AgentId("conformance-lfc-t1".into());
+
+    let claim_a = make_claim(&agent, "scope-subj", "scope-pred");
+    let claim_b = make_claim(&agent, "scope-subj", "scope-pred-b");
+    let ref_a = claim_a.claim_ref().clone();
+    let ref_b = claim_b.claim_ref().clone();
+
+    let ledger_a = make_ledger_entry(&agent, &ref_a);
+    let ledger_b = make_ledger_entry(&agent, &ref_b);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[lfc-t1]: begin_atomic");
+    store.append_claim(&mut txn, &claim_a).expect("conformance[lfc-t1]: append_claim_a");
+    store.append_claim(&mut txn, &claim_b).expect("conformance[lfc-t1]: append_claim_b");
+    store.append_ledger_entry(&mut txn, &ledger_a).expect("conformance[lfc-t1]: append_ledger_a");
+    store.append_ledger_entry(&mut txn, &ledger_b).expect("conformance[lfc-t1]: append_ledger_b");
+    store.commit(txn).expect("conformance[lfc-t1]: commit");
+
+    // Query for only claim_a — must not return claim_b's entry.
+    let result = store
+        .load_ledger_for_claims(&agent, &[ref_a.clone()])
+        .expect("conformance[lfc-t1]: load_ledger_for_claims must not error");
+
+    assert_eq!(result.len(), 1, "conformance[lfc-t1]: exactly one entry for claim_a");
+    assert_eq!(result[0].claim_ref, ref_a, "conformance[lfc-t1]: entry must be for claim_a");
+
+    // Empty input → empty result (no IN () SQL emitted).
+    let empty = store
+        .load_ledger_for_claims(&agent, &[])
+        .expect("conformance[lfc-t1]: empty input must not error");
+    assert!(empty.is_empty(), "conformance[lfc-t1]: empty input must return empty vec");
+}
+
+/// Superseded claim is correctly excluded despite a large agent ledger.
+///
+/// Scenario: one agent accumulates many ledger entries across many subject-lines
+/// (simulating a high-volume agent). On ONE subject-line, claim A is committed then
+/// superseded by claim B (B's tx_time > A's). After supersession, `query_memory`
+/// must return B as the live belief — not A (resurrected), not Contested.
+///
+/// Under the old agent-wide cap (10_000), if the supersession entry for A fell
+/// outside the cap window it was missing from the disposition map and A defaulted
+/// to live — this test would have returned Contested or "A" instead of "B".
+#[cfg(any(test, feature = "test-support"))]
+fn test_superseded_claim_excluded_despite_large_agent_ledger<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+
+    let agent = AgentId("conformance-dscope-t1".into());
+
+    // ── 1. Flood the agent ledger with entries on OTHER subject-lines ──────────
+    // Use 50 noise claims with 2 ledger entries each = 100 total noise entries.
+    // This is a focused correctness proof that would fail under a cap of e.g. 20.
+    // (We don't literally write 10k rows; the unit test for load_ledger_for_claims
+    //  above proves the scoping is correct; this test proves end-to-end correctness.)
+    for i in 0..50u32 {
+        let noise_claim = Claim::new(
+            ClaimRef::new_random(),
+            agent.clone(),
+            mempill_types::claim::Fact {
+                subject: format!("noise-subject-{i}"),
+                predicate: "noise-predicate".to_owned(),
+                value: serde_json::json!(i),
+            },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(Utc::now()),
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            Criticality::Low,
+            vec![],
+            None,
+            None,
+        );
+        let noise_ref = noise_claim.claim_ref().clone();
+        let noise_ledger1 = make_ledger_entry(&agent, &noise_ref);
+        let noise_ledger2 = LedgerEntry {
+            entry_id: Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: noise_ref.clone(),
+            event_kind: LedgerEventKind::ValidityAsserted,
+            disposition: Disposition::CommittedCheap,
+            rationale: None,
+            recorded_at: TransactionTime(Utc::now()),
+        };
+        let mut txn = store.begin_atomic(&agent).expect("dscope[t1]: noise begin_atomic");
+        store.append_claim(&mut txn, &noise_claim).expect("dscope[t1]: noise append_claim");
+        store.append_ledger_entry(&mut txn, &noise_ledger1).expect("dscope[t1]: noise ledger1");
+        store.append_ledger_entry(&mut txn, &noise_ledger2).expect("dscope[t1]: noise ledger2");
+        store.commit(txn).expect("dscope[t1]: noise commit");
+    }
+
+    // ── 2. Ingest claim A on the test subject-line ────────────────────────────
+    let t_a = chrono::DateTime::<Utc>::from_timestamp(1_000_000, 0).unwrap();
+    let claim_a = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        mempill_types::claim::Fact {
+            subject: "dscope-org".to_owned(),
+            predicate: "ceo".to_owned(),
+            value: serde_json::json!("Alice"),
+        },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(t_a),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    );
+    let ref_a = claim_a.claim_ref().clone();
+
+    // A is initially committed.
+    let ledger_a_committed = LedgerEntry {
+        entry_id: Uuid::new_v4(),
+        agent_id: agent.clone(),
+        claim_ref: ref_a.clone(),
+        event_kind: LedgerEventKind::ClaimCommitted,
+        disposition: Disposition::CommittedCheap,
+        rationale: None,
+        recorded_at: TransactionTime(t_a),
+    };
+
+    let mut txn = store.begin_atomic(&agent).expect("dscope[t1]: claim_a begin");
+    store.append_claim(&mut txn, &claim_a).expect("dscope[t1]: claim_a append");
+    store.append_ledger_entry(&mut txn, &ledger_a_committed).expect("dscope[t1]: claim_a ledger");
+    store.commit(txn).expect("dscope[t1]: claim_a commit");
+
+    // ── 3. Ingest claim B (supersedes A) ─────────────────────────────────────
+    let t_b = chrono::DateTime::<Utc>::from_timestamp(2_000_000, 0).unwrap();
+    let claim_b = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        mempill_types::claim::Fact {
+            subject: "dscope-org".to_owned(),
+            predicate: "ceo".to_owned(),
+            value: serde_json::json!("Bob"),
+        },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(t_b),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    );
+    let ref_b = claim_b.claim_ref().clone();
+
+    // A is superseded; B is committed.
+    let ledger_a_superseded = LedgerEntry {
+        entry_id: Uuid::new_v4(),
+        agent_id: agent.clone(),
+        claim_ref: ref_a.clone(),
+        event_kind: LedgerEventKind::ValidityAsserted,
+        disposition: Disposition::Superseded,
+        rationale: None,
+        recorded_at: TransactionTime(t_b),
+    };
+    let ledger_b_committed = LedgerEntry {
+        entry_id: Uuid::new_v4(),
+        agent_id: agent.clone(),
+        claim_ref: ref_b.clone(),
+        event_kind: LedgerEventKind::ClaimCommitted,
+        disposition: Disposition::CommittedCheap,
+        rationale: None,
+        recorded_at: TransactionTime(t_b),
+    };
+
+    let mut txn = store.begin_atomic(&agent).expect("dscope[t1]: claim_b begin");
+    store.append_claim(&mut txn, &claim_b).expect("dscope[t1]: claim_b append");
+    store.append_ledger_entry(&mut txn, &ledger_a_superseded).expect("dscope[t1]: ledger_a_superseded");
+    store.append_ledger_entry(&mut txn, &ledger_b_committed).expect("dscope[t1]: ledger_b_committed");
+    store.commit(txn).expect("dscope[t1]: claim_b commit");
+
+    // ── 4. Verify load_ledger_for_claims returns both entries for both refs ───
+    let scoped = store
+        .load_ledger_for_claims(&agent, &[ref_a.clone(), ref_b.clone()])
+        .expect("dscope[t1]: load_ledger_for_claims must not error");
+    // Expect: ledger_a_committed + ledger_a_superseded + ledger_b_committed = 3 entries.
+    assert_eq!(
+        scoped.len(), 3,
+        "dscope[t1]: load_ledger_for_claims must return all 3 entries for the 2 subject-line claims"
+    );
+
+    // ── 5. End-to-end: truth_engine fold must return only Bob (B) as live ───────
+    // Mirrors exactly what query_memory does after load_ledger_for_claims.
+    use crate::application::ingest_claim::build_latest_disposition_map;
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let subject_claims = store
+        .load_subject_line(&agent, "dscope-org", "ceo")
+        .expect("dscope[t1]: load_subject_line must not error");
+    assert_eq!(subject_claims.len(), 2, "dscope[t1]: must have 2 claims on subject-line");
+
+    let subject_refs: Vec<ClaimRef> = subject_claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let scoped_ledger = store
+        .load_ledger_for_claims(&agent, &subject_refs)
+        .expect("dscope[t1]: load_ledger_for_claims must not error after B committed");
+    let latest_disposition = build_latest_disposition_map(&scoped_ledger);
+
+    let now = chrono::DateTime::<Utc>::from_timestamp(3_000_000, 0).unwrap();
+    let config = EngineConfig::default();
+    let fold = truth_engine::fold(
+        subject_claims,
+        |_cref| vec![],
+        now,
+        &config,
+        &latest_disposition,
+    );
+
+    // With correct disposition map: A is Superseded → not live; B is CommittedCheap → live.
+    // fold.live_claims must be exactly [B].
+    assert_eq!(
+        fold.live_claims.len(), 1,
+        "dscope[t1]: exactly one live claim (Bob/B); got {:?}",
+        fold.live_claims.iter().map(|cs| &cs.claim.fact().value).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        fold.live_claims[0].claim.fact().value,
+        serde_json::json!("Bob"),
+        "dscope[t1]: the live claim must be Bob (B), not Alice (A — superseded)"
     );
 }

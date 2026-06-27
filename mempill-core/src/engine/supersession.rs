@@ -385,6 +385,13 @@ mod tests {
             Ok(vec![])
         }
 
+        fn load_ledger_for_claims(
+            &self, _: &AgentId, _refs: &[ClaimRef],
+        ) -> Result<Vec<LedgerEntry>, MockError> {
+            if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
+            Ok(vec![])
+        }
+
         fn load_injected_claims(&self, _: &AgentId) -> Result<Vec<ClaimRef>, MockError> {
             if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])
