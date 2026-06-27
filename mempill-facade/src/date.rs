@@ -22,6 +22,11 @@ const HINT: &str =
 /// | `"2020-03-15T12:00:00Z"` | pass-through |
 /// | anything else | `MempillDxError::UnparsableDate` |
 ///
+/// **Precision note:** a partial date snaps to the **start of the period** (`2020` → Jan 1,
+/// `2020-03` → the 1st). The filled-in day/month is a normalization placeholder for a sortable
+/// instant — **not** asserted precision. Granularity-aware valid-time (rendering "March 2020")
+/// is planned for v0.3.
+///
 /// # Errors
 /// Returns `MempillDxError::UnparsableDate { input, hint }` for unrecognised formats.
 pub fn parse_lenient_date(s: &str) -> Result<DateTime<Utc>, MempillDxError> {

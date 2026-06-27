@@ -50,6 +50,11 @@ def _to_rfc3339(value: str) -> str:
         "2020-03-15"         → "2020-03-15T00:00:00Z"
         "2020-03-15T12:00Z"  → pass-through (contains "T")
 
+    Precision note: a partial date snaps to the START OF THE PERIOD (year → Jan 1,
+    month → the 1st). The filled-in day/month is a normalization placeholder for a
+    sortable instant — NOT asserted precision. Granularity-aware valid-time
+    (rendering "March 2020") is planned for v0.3.
+
     Raises:
         UnparsableDateError: for empty strings, natural-language dates, or any
                              string not matching the above patterns.
