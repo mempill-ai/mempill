@@ -47,6 +47,7 @@ fn bounded_vt(start: &str, end: &str) -> ValidTime {
         start: Some(parse_dt(start)),
         end: Some(parse_dt(end)),
         valid_time_confidence: 0.9, // above the 0.7 succession threshold
+        granularity: None,
     }
 }
 
@@ -55,6 +56,7 @@ fn open_vt(start: &str) -> ValidTime {
         start: Some(parse_dt(start)),
         end: None, // open-ended: "until further notice"
         valid_time_confidence: 0.9,
+        granularity: None,
     }
 }
 

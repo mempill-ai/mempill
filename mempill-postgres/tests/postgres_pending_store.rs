@@ -51,7 +51,7 @@ fn make_adj_request(ag: &AgentId) -> AdjudicationRequest {
                 value: serde_json::json!("Berlin"),
             },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
-            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             transaction_time: now.clone(),
             confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             currency_signal: CurrencySignal {
@@ -73,7 +73,7 @@ fn make_adj_request(ag: &AgentId) -> AdjudicationRequest {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(Utc::now()),
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             Criticality::Low,
             vec![],

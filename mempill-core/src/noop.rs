@@ -123,7 +123,7 @@ mod tests {
                 value: serde_json::json!(30),
             },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
-            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             transaction_time: TransactionTime(chrono::Utc::now()),
             confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             currency_signal: CurrencySignal {
@@ -148,7 +148,7 @@ mod tests {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(chrono::Utc::now()),
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             Criticality::Low,
             vec![],

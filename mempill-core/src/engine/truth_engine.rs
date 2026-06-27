@@ -152,6 +152,12 @@ pub(crate) fn is_claim_live(
 /// - `assertions_for`: a function mapping `ClaimRef → Vec<ValidityAssertion>` for the
 ///   claims in `claims`.  Callers supply this as a closure to keep the fold pure (no I/O here).
 /// - `as_of_tx_time`: the bi-temporal query point (≤ now for historical queries).
+///   Controls which assertions and claims are *visible* (transaction-time axis).
+/// - `valid_at_instant`: optional valid-time query instant (valid-time axis).
+///   When `Some`, the result is narrowed to the claim whose valid-time window contains this
+///   instant, **after** the tx-time visibility filter is applied first (D2 independence rule).
+///   When `None`, the existing behaviour is preserved: `as_of_tx_time` is also used as the
+///   valid-time instant for succession selection, keeping backward compatibility.
 /// - `config`: EngineConfig for the ordering-key confidence threshold.
 /// - `latest_disposition`: map of ClaimRef → latest Disposition from the ledger.
 ///   Claims whose latest disposition is Quarantined, Superseded, Invalidated, or Rejected
@@ -163,6 +169,7 @@ pub(crate) fn fold<F>(
     mut claims: Vec<Claim>,
     assertions_for: F,
     as_of_tx_time: DateTime<Utc>,
+    valid_at_instant: Option<DateTime<Utc>>,
     config: &EngineConfig,
     latest_disposition: &HashMap<ClaimRef, Disposition>,
 ) -> FoldResult
@@ -176,9 +183,9 @@ where
         ka.cmp(&kb)
     });
 
-    // Step 2 — evaluate liveness for each claim.
+    // Step 2 — evaluate liveness for each claim (transaction-time axis).
     // A claim is live if:
-    //   (a) it is not bounded by a ValidityAssertion, AND
+    //   (a) it is not bounded by a ValidityAssertion (tx-time visibility filter applied first), AND
     //   (b) its latest ledger disposition is NOT one of the non-live dispositions
     //       (Quarantined, Superseded, Invalidated, Rejected).
     let mut with_status: Vec<ClaimWithStatus> = claims
@@ -207,22 +214,30 @@ where
         .cloned()
         .collect();
 
-    // Step 4 — valid-time instant-selection for trusted successions.
+    // Step 4 — valid-time instant-selection for trusted successions (valid-time axis).
+    //
+    // D2 ordering: tx-time visibility filter (step 2) runs FIRST; only then is the
+    // valid-time instant applied to narrow the live set.
+    //
+    // The instant to select against:
+    //  - `valid_at_instant` when the caller supplies an explicit valid-time query point.
+    //  - `as_of_tx_time` when no explicit instant is given (backward-compatible default).
     //
     // If ALL live claims form a trusted succession (each has valid_time_confidence >= threshold,
     // bounded start, and windows are pairwise non-overlapping), select the single claim whose
-    // half-open window [start, end) contains `as_of_tx_time`.
+    // half-open window [start, end) contains the query instant.
     //
     // Boundary semantics: start inclusive, end exclusive. Open end (None) = "until further notice".
     // Gap (instant in no window) → empty live_claims → NoBelief.
     //
     // This fires BEFORE conflict detection (step 5) so that a true succession collapses
     // to a single claim and never reaches has_conflict=true.
+    let vt_instant = valid_at_instant.unwrap_or(as_of_tx_time);
     let (live_claims, succession_selected) = if live_claims.len() > 1 {
         let live_claim_refs: Vec<&Claim> = live_claims.iter().map(|cs| &cs.claim).collect();
         if valid_time_helpers::is_trusted_succession(&live_claim_refs, config.valid_time_confidence_threshold) {
-            // Select the single claim whose window contains as_of_tx_time.
-            let selected = valid_time_helpers::select_by_valid_time_instant(&live_claim_refs, as_of_tx_time);
+            // Select the single claim whose window contains the valid-time query instant.
+            let selected = valid_time_helpers::select_by_valid_time_instant(&live_claim_refs, vt_instant);
             // Extract the claim_ref before dropping live_claim_refs (which borrows live_claims).
             let selected_ref = selected.map(|c| c.claim_ref().clone());
             drop(live_claim_refs); // release borrow on live_claims
@@ -366,7 +381,7 @@ mod tests {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(tx_time),
-            ValidTime { start: vt_start, end: None, valid_time_confidence: vt_confidence },
+            ValidTime { start: vt_start, end: None, valid_time_confidence: vt_confidence , granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: vt_confidence },
             mempill_types::Criticality::Medium,
             vec![],
@@ -406,9 +421,9 @@ mod tests {
         let order_c = vec![c2.clone(), c3.clone(), c1.clone()];
 
         let disp = no_dispositions();
-        let result_a = fold(order_a, no_assertions, now(), &config, &disp);
-        let result_b = fold(order_b, no_assertions, now(), &config, &disp);
-        let result_c = fold(order_c, no_assertions, now(), &config, &disp);
+        let result_a = fold(order_a, no_assertions, now(), None, &config, &disp);
+        let result_b = fold(order_b, no_assertions, now(), None, &config, &disp);
+        let result_c = fold(order_c, no_assertions, now(), None, &config, &disp);
 
         // Live claims count must be identical regardless of input order.
         assert_eq!(result_a.live_claims.len(), result_b.live_claims.len(), "live count must be arrival-order independent");
@@ -521,7 +536,7 @@ mod tests {
             }
         };
 
-        let result = fold(claims, assertions_fn, query_now, &config, &no_dispositions());
+        let result = fold(claims, assertions_fn, query_now, None, &config, &no_dispositions());
 
         // Incumbent should be bounded (not live); newer should be the sole live claim.
         assert_eq!(result.live_claims.len(), 1, "only the newer claim should be live");
@@ -576,7 +591,7 @@ mod tests {
             }
         };
 
-        let result = fold(claims, assertions_fn, query_now, &config, &no_dispositions());
+        let result = fold(claims, assertions_fn, query_now, None, &config, &no_dispositions());
 
         // Total claims passed in = 2; live = 1; the other is bounded (not deleted).
         // The fold result only tracks live — history is provided by the persistence layer.
@@ -598,7 +613,7 @@ mod tests {
         let c1 = make_claim(&agent, "user", "role", serde_json::json!("admin"), t1, None, 0.0, Cardinality::Functional);
         let c2 = make_claim(&agent, "user", "role", serde_json::json!("viewer"), t2, None, 0.0, Cardinality::Functional);
 
-        let result = fold(vec![c1, c2], no_assertions, now(), &config, &no_dispositions());
+        let result = fold(vec![c1, c2], no_assertions, now(), None, &config, &no_dispositions());
 
         assert!(result.has_conflict, "two live Functional claims must produce has_conflict=true (I7)");
         assert_eq!(result.live_claims.len(), 2, "both live claims retained (I7 never silently picks)");
@@ -616,7 +631,7 @@ mod tests {
         let c1 = make_claim(&agent, "user", "tag", serde_json::json!("rust"), t1, None, 0.0, Cardinality::SetValued);
         let c2 = make_claim(&agent, "user", "tag", serde_json::json!("python"), t2, None, 0.0, Cardinality::SetValued);
 
-        let result = fold(vec![c1, c2], no_assertions, now(), &config, &no_dispositions());
+        let result = fold(vec![c1, c2], no_assertions, now(), None, &config, &no_dispositions());
 
         assert!(!result.has_conflict, "set-valued claims should not produce conflict");
         assert_eq!(result.live_claims.len(), 2, "both set-valued claims are live");
@@ -701,6 +716,7 @@ mod tests {
             vec![claim.clone()],
             |_| assertions_fn_clone.clone(),
             past_now,
+            None, // valid_at_instant: None = backward-compatible
             &config,
             &disp,
         );
@@ -711,6 +727,7 @@ mod tests {
             vec![claim],
             |_| assertions.clone(),
             present_now,
+            None, // valid_at_instant: None = backward-compatible
             &config,
             &disp,
         );
@@ -719,5 +736,234 @@ mod tests {
         assert_eq!(result_past.live_claims.len(), 1, "claim should be live before the bound");
         // At present_now (after bound), claim should not be live.
         assert_eq!(result_present.live_claims.len(), 0, "claim should be bounded at present");
+    }
+
+    // ── W1a — valid_at_instant parameter: D2 independence tests ──────────────
+
+    /// Helper: create a claim with a specific trusted valid-time window (confidence=0.9, above threshold).
+    fn make_vt_claim(
+        agent_id: &AgentId,
+        value: serde_json::Value,
+        tx_time: DateTime<Utc>,
+        vt_start: DateTime<Utc>,
+        vt_end: Option<DateTime<Utc>>,
+    ) -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            agent_id.clone(),
+            Fact { subject: "subject".into(), predicate: "predicate".into(), value },
+            Cardinality::Functional,
+            mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted),
+            mempill_types::ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(tx_time),
+            mempill_types::ValidTime { start: Some(vt_start), end: vt_end, valid_time_confidence: 0.9, granularity: None },
+            mempill_types::Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+            mempill_types::Criticality::Medium,
+            vec![],
+            None,
+            None,
+        )
+    }
+
+    /// valid_at_instant=None preserves existing behavior: instant-selection uses as_of_tx_time.
+    ///
+    /// A two-claim succession [Jan–Mar) [Mar–∞) with as_of=Apr should select the second claim.
+    #[test]
+    fn valid_at_instant_none_uses_as_of_tx_time_for_selection() {
+        let config = EngineConfig::default();
+        let agent = agent();
+        use chrono::TimeZone;
+
+        let jan1  = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let feb1  = chrono::Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap();
+        let mar1  = chrono::Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let apr1  = chrono::Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap();
+
+        // tx times before the as_of point so both are tx-visible.
+        let tx_early = jan1 - chrono::Duration::days(1);
+        let tx_mid   = feb1;
+
+        let c1 = make_vt_claim(&agent, serde_json::json!("first"),  tx_early, jan1, Some(mar1));
+        let c2 = make_vt_claim(&agent, serde_json::json!("second"), tx_mid,   mar1, None);
+
+        // as_of_tx_time = Apr 1 → April is in c2's window [Mar, ∞).
+        let fold = fold(
+            vec![c1.clone(), c2.clone()],
+            no_assertions,
+            apr1,
+            None, // valid_at_instant=None → use as_of_tx_time (Apr) for selection
+            &config,
+            &no_dispositions(),
+        );
+
+        assert!(fold.succession_selected, "should be succession");
+        assert_eq!(fold.live_claims.len(), 1, "should select one claim");
+        assert_eq!(
+            fold.live_claims[0].claim.fact().value,
+            serde_json::json!("second"),
+            "None: as_of (Apr) is in second claim's window"
+        );
+    }
+
+    /// valid_at_instant=Some overrides the selection axis independently of tx-time.
+    ///
+    /// Succession [Jan–Mar) [Mar–∞). as_of_tx_time=Apr (both tx-visible), valid_at=Feb.
+    /// D2: tx filter first (both pass), then select by valid_at=Feb → first claim.
+    #[test]
+    fn valid_at_instant_some_selects_independently_of_tx_time() {
+        let config = EngineConfig::default();
+        let agent = agent();
+        use chrono::TimeZone;
+
+        let jan1  = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let feb1  = chrono::Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap();
+        let mar1  = chrono::Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let apr1  = chrono::Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap();
+
+        let tx_early = jan1 - chrono::Duration::days(1);
+        let tx_mid   = jan1 + chrono::Duration::days(10);
+
+        let c1 = make_vt_claim(&agent, serde_json::json!("first"),  tx_early, jan1, Some(mar1));
+        let c2 = make_vt_claim(&agent, serde_json::json!("second"), tx_mid,   mar1, None);
+
+        // as_of=Apr → both tx-visible. valid_at=Feb → should select c1 (Feb in [Jan, Mar)).
+        let fold = fold(
+            vec![c1.clone(), c2.clone()],
+            no_assertions,
+            apr1,
+            Some(feb1), // explicit valid-time instant: Feb 1 → first window
+            &config,
+            &no_dispositions(),
+        );
+
+        assert!(fold.succession_selected, "should be succession");
+        assert_eq!(fold.live_claims.len(), 1, "should select one claim");
+        assert_eq!(
+            fold.live_claims[0].claim.fact().value,
+            serde_json::json!("first"),
+            "valid_at=Feb selects the first window [Jan, Mar)"
+        );
+    }
+
+    /// valid_at_instant=Some with a gap returns NoBelief (empty live_claims).
+    #[test]
+    fn valid_at_instant_gap_returns_no_belief() {
+        let config = EngineConfig::default();
+        let agent = agent();
+        use chrono::TimeZone;
+
+        let jan1  = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let mar1  = chrono::Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let may1  = chrono::Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
+        let apr1  = chrono::Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap();
+        let query = chrono::Utc.with_ymd_and_hms(2024, 12, 1, 0, 0, 0).unwrap();
+
+        let tx = jan1 - chrono::Duration::days(1);
+        // A = [Jan, Mar),  B = [May, ∞) — gap in Apr
+        let c1 = make_vt_claim(&agent, serde_json::json!("a"), tx, jan1, Some(mar1));
+        let c2 = make_vt_claim(&agent, serde_json::json!("b"), tx, may1, None);
+
+        let fold = fold(
+            vec![c1, c2],
+            no_assertions,
+            query,      // tx as_of = Dec → both tx-visible
+            Some(apr1), // valid_at = Apr → in the gap
+            &config,
+            &no_dispositions(),
+        );
+
+        assert!(fold.succession_selected, "gap still counts as trusted succession attempt");
+        assert_eq!(fold.live_claims.len(), 0, "gap → NoBelief");
+        assert!(!fold.has_conflict, "gap must not produce has_conflict");
+    }
+
+    /// D2 ordering: validity-assertion (tx-time axis) filter runs BEFORE valid-at selection.
+    ///
+    /// C1 is bounded (via ValidityAssertion::Bound) at a time AFTER the query as_of_tx_time,
+    /// so the Bound is NOT yet visible — c1 remains live at as_of. C2 is live.
+    /// Both form a trusted succession. valid_at_instant=Feb is in c1's window [Jan, Mar).
+    /// D2 confirmed: tx-time assertion filter first (both live), then valid_at narrows to c1.
+    #[test]
+    fn d2_tx_time_filter_runs_before_valid_at_selection() {
+        let config = EngineConfig::default();
+        let agent = agent();
+        use chrono::TimeZone;
+
+        let jan1  = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let feb1  = chrono::Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap();
+        let mar1  = chrono::Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
+        let may1  = chrono::Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
+        let dec1  = chrono::Utc.with_ymd_and_hms(2024, 12, 1, 0, 0, 0).unwrap();
+
+        let tx = jan1 - chrono::Duration::days(1);
+
+        // c1: valid_time [Jan, Mar), c2: valid_time [Mar, ∞) — non-overlapping succession.
+        let c1 = make_vt_claim(&agent, serde_json::json!("first"),  tx, jan1, Some(mar1));
+        let c2 = make_vt_claim(&agent, serde_json::json!("second"), tx, mar1, None);
+        let c1_ref = c1.claim_ref().clone();
+
+        // A Bound assertion for c1 asserted at May (after query as_of=Feb).
+        // At query time=Feb, this Bound is NOT yet visible → c1 remains live.
+        let bound = ValidityAssertion {
+            assertion_ref: uuid::Uuid::new_v4(),
+            agent_id: AgentId("agent-1".into()),
+            target_claim: c1_ref.clone(),
+            kind: AssertionKind::Bound { bound_at: may1 },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            asserted_at: TransactionTime(may1), // asserted at May → not visible at Feb
+        };
+
+        let assertions_fn = {
+            let c1_ref = c1_ref.clone();
+            let bound = bound.clone();
+            move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+                if cr == &c1_ref { vec![bound.clone()] } else { vec![] }
+            }
+        };
+
+        // as_of=Feb: Bound for c1 is at May → not visible → both c1 and c2 pass tx-filter.
+        // valid_at=Feb → in c1's window [Jan, Mar).
+        // D2: assertions filtered first (both live at Feb), then valid_at selects c1.
+        let fold_result = fold(
+            vec![c1.clone(), c2.clone()],
+            assertions_fn,
+            feb1,        // as_of_tx_time: Feb → Bound(May) invisible → both live
+            Some(feb1),  // valid_at: Feb → selects first window [Jan, Mar)
+            &config,
+            &no_dispositions(),
+        );
+
+        assert!(fold_result.succession_selected, "trusted succession should be detected");
+        assert_eq!(fold_result.live_claims.len(), 1, "valid_at=Feb selects one claim");
+        assert_eq!(
+            fold_result.live_claims[0].claim.fact().value,
+            serde_json::json!("first"),
+            "D2: tx assertion filter first (both pass at Feb), then valid_at narrows to c1"
+        );
+        assert!(!fold_result.has_conflict, "succession → no conflict");
+
+        // Verify the other axis: at as_of=Dec (after Bound), c1 is bounded → only c2 live.
+        let assertions_fn2 = {
+            let c1_ref = c1_ref.clone();
+            move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+                if cr == &c1_ref { vec![bound.clone()] } else { vec![] }
+            }
+        };
+        let fold_dec = fold(
+            vec![c1, c2],
+            assertions_fn2,
+            dec1,        // as_of=Dec → Bound(May) visible → c1 bounded
+            Some(feb1),  // valid_at=Feb (in c1's window, but c1 is now bounded)
+            &config,
+            &no_dispositions(),
+        );
+        // c1 is bounded at Dec view → only c2 live (not a succession anymore, single claim)
+        assert_eq!(fold_dec.live_claims.len(), 1);
+        assert_eq!(
+            fold_dec.live_claims[0].claim.fact().value,
+            serde_json::json!("second"),
+            "at Dec view (Bound visible), c1 is bounded; c2 is the only live claim"
+        );
     }
 }

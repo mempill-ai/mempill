@@ -182,7 +182,7 @@ mod tests {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(dt(2026, 1, 1)),
-            ValidTime { start, end, valid_time_confidence: confidence },
+            ValidTime { start, end, valid_time_confidence: confidence , granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: confidence },
             Criticality::Medium,
             vec![],
