@@ -3,10 +3,14 @@
 **Temporally-correct AI-agent memory — append-only, bi-temporal, provenance-aware.**
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![crates.io](https://img.shields.io/crates/v/mempill.svg)](https://crates.io/crates/mempill)
+[![docs.rs](https://img.shields.io/docsrs/mempill)](https://docs.rs/mempill)
+[![downloads](https://img.shields.io/crates/d/mempill.svg)](https://crates.io/crates/mempill)
+[![PyPI](https://img.shields.io/pypi/v/mempill.svg)](https://pypi.org/project/mempill/)
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 446 Rust + 135 Python tests (+ Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
+**0.2.0** · Apache-2.0 · MSRV 1.88 · 446 Rust + 135 Python tests (+ Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
 
@@ -77,7 +81,7 @@ Key properties:
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
 | Service tier (topology-c) | ⏳ Deferred | Multi-agent shared service; not in scope yet |
-| Published to crates.io / PyPI | ⏳ Planned | Not yet published; use path/git dependencies |
+| Published to crates.io / PyPI | ✅ Shipped | `cargo add mempill` (crates.io) · `pip install mempill` (PyPI) |
 
 The HITL reference oracle and console/LangGraph agent demos live in the separate `mempill-demo` repository.
 
@@ -173,44 +177,36 @@ The host supplies concrete implementations; the engine embeds none.
 
 ### Rust
 
-mempill is not yet published to crates.io. Use the `mempill` facade crate via path or git:
+```sh
+cargo add mempill                          # SQLite backend (default)
+cargo add mempill --features postgres      # PostgreSQL backend
+```
+
+or in `Cargo.toml`:
 
 ```toml
-# Cargo.toml
 [dependencies]
-mempill = { path = "../mempill/mempill-facade" }           # SQLite (default)
-# or:
-mempill = { path = "../mempill/mempill-facade", features = ["postgres"] }
+mempill = "0.2"                            # SQLite (default)
+# mempill = { version = "0.2", features = ["postgres"] }
 ```
 
-You can also depend on individual crates directly:
-
-```toml
-mempill-sqlite = { path = "../mempill/mempill-sqlite" }   # or git = "..."
-mempill-core   = { path = "../mempill/mempill-core" }
-```
-
-For PostgreSQL topology-b directly:
-
-```toml
-mempill-postgres = { path = "../mempill/mempill-postgres" }
-```
+Power users can depend on individual crates directly from crates.io by version:
+`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.2"`.
 
 ### Python wheel
 
-Requires Python ≥ 3.11 and a Rust toolchain.
-
 ```sh
-# Build and install the wheel into your environment
-cd mempill-python
-pip install maturin
-maturin develop --release    # or: maturin build --release && pip install target/wheels/*.whl
+pip install mempill           # Python ≥ 3.11; prebuilt wheel from PyPI
 ```
+
+Contributors building from source: `cd mempill-python && maturin develop --release`
 
 ### MCP adapter
 
+`mempill-mcp` is not on PyPI — install from source:
+
 ```sh
-# Install the wheel first (see above), then:
+# Install the Python wheel first: pip install mempill
 cd mempill-mcp
 pip install .
 ```
@@ -232,49 +228,29 @@ Or equivalently: `python -m mempill_mcp`
 ### Rust
 
 ```rust
-use mempill_sqlite::open_default_in_memory;
-use mempill_core::application::{IngestClaimRequest, QueryMemoryRequest};
-use mempill_types::{AgentId, Cardinality, Confidence, Criticality, ExternalKind, ProvenanceLabel};
+use mempill::{open_default_in_memory, remember, recall, RememberOptions};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = open_default_in_memory()?;
-    let agent = AgentId("my-agent".into());
 
-    // Ingest a claim.
-    let resp = engine.ingest_claim(IngestClaimRequest {
-        agent_id: agent.clone(),
-        subject: "user".into(),
-        predicate: "city".into(),
-        value: serde_json::json!("Berlin"),
-        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
-        cardinality: Cardinality::Functional,
-        valid_time: None,
-        confidence: Confidence { value_confidence: 0.95, valid_time_confidence: 0.0 },
-        criticality: Criticality::Medium,
-        derived_from: vec![],
-    }).await?;
+    remember(&engine, "my-agent", "user", "city", "Berlin", RememberOptions::default()).await?;
 
-    println!("claim_ref={}, disposition={:?}", resp.claim_ref, resp.disposition);
-
-    // Query the belief back.
-    let query = engine.query_memory(QueryMemoryRequest {
-        agent_id: agent,
-        subject: "user".into(),
-        predicate: "city".into(),
-        as_of_tx_time: None,
-    }).await?;
-
-    println!("belief={:?}", query.belief);
+    let r = recall(&engine, "my-agent", "user", "city").await?;
+    println!("city = {:?}", r.as_str());   // Some("Berlin")
     Ok(())
 }
 ```
 
-For PostgreSQL topology-b, open with `mempill_postgres::open_postgres`:
+For full control — explicit provenance, cardinality, confidence, derivation lineage — use the
+power-user API (`mempill::engine::IngestClaimRequest` / `mempill::engine::QueryMemoryRequest`).
+The ergonomic tier is additive; the rigorous core is unchanged.
+
+For PostgreSQL topology-b, open with `mempill::postgres::open_postgres`:
 
 ```rust
-use mempill_postgres::{open_postgres, PostgresEngine};
-use mempill_core::{EngineConfig, NoOpOracle, NoOpVector};
+use mempill::postgres::{open_postgres, PostgresEngine};
+use mempill::engine::{EngineConfig, NoOpOracle, NoOpVector};
 
 let engine: PostgresEngine<NoOpOracle, NoOpVector> = open_postgres(
     "host=localhost port=5432 user=mempill dbname=mempill password=secret",
