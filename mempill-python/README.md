@@ -1,78 +1,79 @@
 # mempill (Python)
 
-Python bindings for the mempill AI-agent memory engine.
-
-Built with PyO3 0.29 and maturin 1.14. Requires Python ≥ 3.11 and a Rust toolchain.
-
-See the [root README](../README.md) for the full architecture, concepts, and invariants.
+Python bindings for the mempill AI-agent memory engine — temporal, contested-belief-aware
+fact storage for AI agents.
 
 ## Install
 
 ```sh
-cd mempill-python
+pip install mempill
+```
+
+Prebuilt wheels are published for Python 3.11, 3.12, and 3.13 on Linux (x86_64, aarch64),
+macOS (x86_64, arm64), and Windows (x86_64). **No Rust toolchain required** to use the
+published wheel.
+
+### Build from source (contributors)
+
+```sh
 pip install maturin
-maturin develop --release        # editable install into current venv
-# or for a wheel:
-maturin build --release && pip install target/wheels/*.whl
+maturin develop --release   # editable install into current venv
 ```
 
 ## Usage
 
 ```python
-import mempill
-from mempill import ProvenanceLabel, Disposition
+from mempill import open_in_memory, remember, recall
 
-# Open an engine (file-backed or in-memory).
-engine = mempill.open("/path/to/agent.db")   # file-backed SQLite
-engine = mempill.open_in_memory()            # ephemeral; tests / MCP sessions
+engine = open_in_memory()
 
-# Ingest a claim.
-resp = engine.ingest_claim({
-    "agent_id": "my-agent",
-    "subject": "user",
-    "predicate": "city",
-    "value": "Berlin",
-    "provenance": ProvenanceLabel.external_user_asserted(),
-    "cardinality": "Functional",      # "Functional" | "SetValued" | "Unknown"
-    "confidence": {"value_confidence": 0.95, "valid_time_confidence": 0.0},
-    "criticality": "Medium",          # "Low" | "Medium" | "High" | "Critical"
-    "derived_from": [],
-})
-print(resp["claim_ref"], resp["disposition"])
-assert resp["disposition"] == Disposition.CommittedCheap
-
-# Query the canonical belief.
-result = engine.query_memory({
-    "agent_id": "my-agent",
-    "subject": "user",
-    "predicate": "city",
-})
-print(result["belief"])
-
-# Reconcile conflicts.
-result = engine.reconcile({
-    "agent_id": "my-agent",
-    "subject_lines": [("user", "city")],
-})
-
-# Query the audit ledger.
-result = engine.query_audit({
-    "agent_id": "my-agent",
-    "claim_ref": None,
-    "from_tx_time": None,
-    "limit": 50,
-})
+remember(engine, "my-agent", "user", "city", "Berlin")
+result = recall(engine, "my-agent", "user", "city")
+print(result.as_str())        # "Berlin"
+print(result.is_contested())  # False
 ```
 
-## Provenance helpers
+### Contested beliefs
+
+When two conflicting claims exist and neither has been reconciled, `recall` signals
+a contest rather than silently returning one value:
 
 ```python
-from mempill import ProvenanceLabel
+from mempill import open_in_memory, remember, recall, RememberOptions
 
-ProvenanceLabel.external_user_asserted()   # {"type": "External", "kind": "UserAsserted"}
-ProvenanceLabel.external_first_hand()      # {"type": "External", "kind": "ExternalFirstHand"}
-ProvenanceLabel.recall_re_entry()          # {"type": "RecallReEntry"}
-ProvenanceLabel.model_derived()            # {"type": "ModelDerived"}
+engine = open_in_memory()
+remember(engine, "agent", "acme", "ceo", "Alice")
+remember(engine, "agent", "acme", "ceo", "Bob")   # conflicts → Contested
+
+result = recall(engine, "agent", "acme", "ceo")
+if result.is_contested():
+    for c in result.candidates:
+        print(c.value, c.claim_ref)
+```
+
+### Fact history
+
+```python
+from mempill import open_in_memory, remember, recall, history, RememberOptions
+
+engine = open_in_memory()
+remember(engine, "agent", "acme", "ceo", "Alice",
+         RememberOptions(valid_until="2024-01-01"))
+remember(engine, "agent", "acme", "ceo", "Bob",
+         RememberOptions(valid_from="2024-01-01"))
+
+h = history(engine, "agent", "acme", "ceo")
+for entry in h:
+    print(entry.value, entry.status, entry.valid_from, entry.valid_until)
+```
+
+### File-backed engine
+
+```python
+from mempill import open, remember, recall
+
+engine = open("/path/to/agent.db")   # SQLite, persists across restarts
+remember(engine, "my-agent", "user", "city", "Berlin")
 ```
 
 ## Exceptions
@@ -91,6 +92,12 @@ MempillError (base)
 
 `.pyi` stubs and `py.typed` marker are included. The package is mypy and stubtest clean.
 
+## Full documentation
+
+https://mempill.netlify.app — concepts, invariants, and the complete API reference.
+
+Source: https://github.com/mempill-ai/mempill
+
 ## License
 
-Apache-2.0. See [LICENSE](../LICENSE) for the full text.
+Apache-2.0

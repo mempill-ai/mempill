@@ -4,10 +4,26 @@ build-backend = "maturin"
 
 [project]
 name = "mempill"
-version = "0.2.0"
+version = "0.2.1"
 requires-python = ">=3.11"
 description = "Python bindings for the mempill AI-agent memory engine"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
+readme = "README.md"
+authors = [{ name = "Aliaksei Ivanouski" }]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://mempill.netlify.app"
+Repository = "https://github.com/mempill-ai/mempill"
+Documentation = "https://mempill.netlify.app"
 
 [tool.maturin]
 module-name = "mempill._mempill"
