@@ -187,7 +187,7 @@ async fn ttl_expiry_via_submit_reverts_to_contested() {
     // Must return AdjudicationHandleNotFound (handle expired).
     assert!(
         matches!(result, Err(mempill_core::MemError::AdjudicationHandleNotFound { .. })),
-        "expired handle must return AdjudicationHandleNotFound; got: {:?}", result
+        "expired handle must return AdjudicationHandleNotFound; got: {result:?}"
     );
 
     // query_memory must surface Contested[both] after lazy expiry.
@@ -198,13 +198,12 @@ async fn ttl_expiry_via_submit_reverts_to_contested() {
     let alt_vals: Vec<_> = qr.belief.alternatives.iter().map(|b| b.fact.value.clone()).collect();
 
     println!(
-        "[TTL_LAZY_EXPIRY] status={:?} primary={:?} alternatives={:?}",
-        status, primary_val, alt_vals
+        "[TTL_LAZY_EXPIRY] status={status:?} primary={primary_val:?} alternatives={alt_vals:?}"
     );
 
     assert_eq!(
         *status, BeliefStatus::Contested,
-        "After TTL expiry, query_memory MUST return Contested. Got {:?}.", status
+        "After TTL expiry, query_memory MUST return Contested. Got {status:?}."
     );
 
     let surfaced_alice = primary_val == Some(serde_json::json!("alice"))
@@ -249,9 +248,9 @@ async fn sweep_reverts_all_expired() {
     // query_memory must surface Contested[both].
     let qr_a = engine_a.query_memory(query_req(&agent_a)).await.expect("query-a");
     let status_a = &qr_a.belief.status;
-    println!("[SWEEP_EXPIRED] agent_a status={:?}", status_a);
+    println!("[SWEEP_EXPIRED] agent_a status={status_a:?}");
     assert_eq!(*status_a, BeliefStatus::Contested,
-        "after sweep, agent_a subject must be Contested. Got {:?}", status_a);
+        "after sweep, agent_a subject must be Contested. Got {status_a:?}");
 
     // Engine B: non-expired (1 hour TTL). Sweep should NOT touch it.
     let handle_not_expired = uuid::Uuid::new_v4();
@@ -402,13 +401,12 @@ async fn sweep_recovers_orphan_queued_claim() {
     let alt_vals: Vec<_> = qr.belief.alternatives.iter().map(|b| b.fact.value.clone()).collect();
 
     println!(
-        "[ORPHAN_RECOVERY] status={:?} primary={:?} alternatives={:?}",
-        status, primary_val, alt_vals
+        "[ORPHAN_RECOVERY] status={status:?} primary={primary_val:?} alternatives={alt_vals:?}"
     );
 
     assert_eq!(
         *status, BeliefStatus::Contested,
-        "After orphan recovery, query_memory MUST return Contested. Got {:?}.", status
+        "After orphan recovery, query_memory MUST return Contested. Got {status:?}."
     );
 
     let surfaced_alice = primary_val == Some(serde_json::json!("alice"))
@@ -449,7 +447,7 @@ async fn non_expired_handle_still_resolvable() {
     let qr = engine.query_memory(query_req(&agent)).await.expect("query must succeed");
     let primary_val = qr.belief.primary.as_ref().map(|b| b.fact.value.clone());
 
-    println!("[NON_EXPIRED] primary={:?}", primary_val);
+    println!("[NON_EXPIRED] primary={primary_val:?}");
 
     // "bob" (challenger) wins after Affirm.
     assert_eq!(primary_val, Some(serde_json::json!("bob")),
@@ -518,7 +516,6 @@ async fn expires_at_populated_at_ingest() {
 
     assert!(
         expires_at >= min_expected && expires_at <= max_expected,
-        "expires_at ({}) must be approx queued_at + {}s (expected [{}, {}])",
-        expires_at, ttl_secs, min_expected, max_expected
+        "expires_at ({expires_at}) must be approx queued_at + {ttl_secs}s (expected [{min_expected}, {max_expected}])"
     );
 }

@@ -158,8 +158,7 @@ mod tests {
         let result = stamp(base_input(None), tx_now());
         assert!(
             matches!(result, Err(MemError::MissingProvenance)),
-            "expected MissingProvenance, got {:?}",
-            result
+            "expected MissingProvenance, got {result:?}"
         );
     }
 

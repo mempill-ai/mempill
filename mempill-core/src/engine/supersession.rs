@@ -542,7 +542,7 @@ mod tests {
                 e.claim_ref == *dep_ref
                     && e.event_kind == LedgerEventKind::DependentFlaggedPendingReview
             }).count();
-            assert_eq!(flagged, 1, "each dependent flagged exactly once: {:?}", dep_ref);
+            assert_eq!(flagged, 1, "each dependent flagged exactly once: {dep_ref:?}");
         }
     }
 
@@ -818,7 +818,7 @@ mod tests {
             .filter(|e| e.claim_ref == dep_d && e.event_kind == LedgerEventKind::DependentFlaggedPendingReview)
             .count();
         assert_eq!(d_flags, 1,
-            "DEFECT: dependent D was flagged {} times instead of 1 (A26 idempotency violated)", d_flags);
+            "DEFECT: dependent D was flagged {d_flags} times instead of 1 (A26 idempotency violated)");
     }
 
     /// WRONG-DIRECTION (source, not target): an edge where the superseded claim is

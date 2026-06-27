@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! TruthEngine — canonical valid-time fold.
 //!
 //! This module is PURE given its inputs — no I/O, no system clock.
@@ -5,9 +6,9 @@
 //!
 //! ## Ordering-key rule:
 //! - If `valid_time_confidence >= config.valid_time_confidence_threshold`:
-//!     ordering key = valid_time_start (authoritative)
+//!   ordering key = valid_time_start (authoritative)
 //! - Else:
-//!     ordering key = transaction_time (fallback)
+//!   ordering key = transaction_time (fallback)
 //!
 //! ## Fold invariants:
 //! - Read-time-canonical: same stored claims → same belief, arrival-order independent.
@@ -133,6 +134,8 @@ pub(crate) fn is_claim_live(
                     live = true;
                 }
             }
+            // AssertionKind is #[non_exhaustive] — future assertion kinds are ignored (conservative: treat as no-op).
+            _ => {}
         }
     }
     live
@@ -343,6 +346,8 @@ mod tests {
         AgentId("agent-1".into())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    // reason: test helper mirrors the full Claim constructor; parameters cover orthogonal axes
     fn make_claim(
         agent_id: &AgentId,
         subject: &str,

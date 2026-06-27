@@ -112,6 +112,8 @@ fn edge_kind_to_str(k: &EdgeKind) -> &'static str {
         EdgeKind::Supersedes => "Supersedes",
         EdgeKind::DependsOn => "DependsOn",
         EdgeKind::MutualExclusion => "MutualExclusion",
+        // EdgeKind is #[non_exhaustive] — future variants stored as "Unknown".
+        _ => "Unknown",
     }
 }
 
@@ -136,6 +138,8 @@ fn ledger_event_kind_to_str(k: &LedgerEventKind) -> &'static str {
         LedgerEventKind::DependentFlaggedPendingReview => "DependentFlaggedPendingReview",
         LedgerEventKind::ServedAsInjected => "ServedAsInjected",
         LedgerEventKind::AdjudicationExpired => "AdjudicationExpired",
+        // LedgerEventKind is #[non_exhaustive] — future variants stored as "Unknown".
+        _ => "Unknown",
     }
 }
 
@@ -168,6 +172,8 @@ fn disposition_to_str(d: &Disposition) -> &'static str {
         Disposition::Invalidated => "Invalidated",
         Disposition::Reinstated => "Reinstated",
         Disposition::Rejected => "Rejected",
+        // Disposition is #[non_exhaustive] — future variants stored as "Unknown".
+        _ => "Unknown",
     }
 }
 
@@ -502,6 +508,8 @@ impl PersistencePort for PostgresPersistenceStore {
             match &assertion.kind {
                 AssertionKind::Bound { bound_at } => ("Bound", Some(bound_at.to_rfc3339()), None),
                 AssertionKind::Reopen { reopen_at } => ("Reopen", None, Some(reopen_at.to_rfc3339())),
+                // AssertionKind is #[non_exhaustive] — future kinds stored as "Unknown" (no-op).
+                _ => ("Unknown", None, None),
             };
 
         txn.client().execute(
@@ -617,10 +625,9 @@ impl PersistencePort for PostgresPersistenceStore {
     ) -> Result<Vec<Claim>, PostgresStoreError> {
         let mut conn = self.pool.get()?;
         let sql = format!(
-            "SELECT {cols} FROM claims
+            "SELECT {CLAIM_SELECT_COLS} FROM claims
              WHERE agent_id = $1 AND subject = $2 AND predicate = $3
-             ORDER BY tx_time ASC",
-            cols = CLAIM_SELECT_COLS
+             ORDER BY tx_time ASC"
         );
         let rows = conn.query(
             &sql,
@@ -638,8 +645,7 @@ impl PersistencePort for PostgresPersistenceStore {
         let mut conn = self.pool.get()?;
         let claim_id_str = claim_ref.0.to_string();
         let sql = format!(
-            "SELECT {cols} FROM claims WHERE agent_id = $1 AND claim_id = $2",
-            cols = CLAIM_SELECT_COLS
+            "SELECT {CLAIM_SELECT_COLS} FROM claims WHERE agent_id = $1 AND claim_id = $2"
         );
         let rows = conn.query(&sql, &[&agent_id.0.as_str(), &claim_id_str.as_str()])?;
         match rows.first() {

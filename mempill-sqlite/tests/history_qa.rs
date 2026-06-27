@@ -7,7 +7,6 @@
 //! 2. `history.current().value == recall (query_memory) primary value`.
 //! 3. Empty subject-line → empty history.
 
-use chrono::Utc;
 use mempill_core::application::{IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest};
 use mempill_sqlite::open_default_in_memory;
 use mempill_types::{

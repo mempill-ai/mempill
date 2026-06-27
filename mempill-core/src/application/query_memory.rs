@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! QueryMemoryUseCase — application layer read path.
 //!
 //! Read-only: no Txn opened, no writes. Delegates to TruthEngine (fold)

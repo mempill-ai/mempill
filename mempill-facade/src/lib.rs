@@ -18,41 +18,36 @@
 //!
 //! Most code only needs two calls — [`remember`] and [`recall`] — with sane defaults:
 //!
-//! ```text
-//! // Cargo.toml
-//! // [dependencies]
-//! // mempill = "0.2"
-//! // tokio   = { version = "1", features = ["rt-multi-thread", "macros"] }
-//!
+//! ```rust,no_run
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use mempill::{open_default_in_memory, remember, recall, RememberOptions};
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let engine = open_default_in_memory()?;
+//! let engine = open_default_in_memory()?;
 //!
-//!     // Remember a fact — 3 args + sane defaults. Dates are lenient: "2020",
-//!     // "2020-03", "2020-03-01", or full RFC3339 all work.
-//!     remember(&engine, "my-agent", "user", "city", "Berlin",
-//!              RememberOptions::default().valid_from("2020")).await?;
+//! // Remember a fact — 3 args + sane defaults. Dates are lenient: "2020",
+//! // "2020-03", "2020-03-01", or full RFC3339 all work.
+//! remember(&engine, "my-agent", "user", "city", "Berlin",
+//!          RememberOptions::default().valid_from("2020")).await?;
 //!
-//!     // Two conflicting facts are NEVER silently overwritten — they surface as Contested.
-//!     remember(&engine, "my-agent", "acme:ceo", "held_by", "Alice", RememberOptions::default()).await?;
-//!     remember(&engine, "my-agent", "acme:ceo", "held_by", "Bob",   RememberOptions::default()).await?;
+//! // Two conflicting facts are NEVER silently overwritten — they surface as Contested.
+//! remember(&engine, "my-agent", "acme:ceo", "held_by", "Alice", RememberOptions::default()).await?;
+//! remember(&engine, "my-agent", "acme:ceo", "held_by", "Bob",   RememberOptions::default()).await?;
 //!
-//!     // Recall — a flat result; Contested is explicit (can't be mistaken for "no memory").
-//!     let r = recall(&engine, "my-agent", "acme:ceo", "held_by").await?;
-//!     if r.is_contested() {
-//!         println!("contested: {:?}", r.candidates);
-//!     } else {
-//!         println!("ceo = {:?}", r.as_str());
-//!     }
-//!     Ok(())
+//! // Recall — a flat result; Contested is explicit (can't be mistaken for "no memory").
+//! let r = recall(&engine, "my-agent", "acme:ceo", "held_by").await?;
+//! if r.is_contested() {
+//!     println!("contested: {:?}", r.candidates);
+//! } else {
+//!     println!("ceo = {:?}", r.as_str());
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Need full control — provenance channels, cardinality, criticality, explicit confidence,
-//! or derivation lineage? Drop to the full claim API ([`IngestClaimRequest`] /
-//! [`QueryMemoryRequest`]); see the type reference. The ergonomic tier is additive — the
+//! or derivation lineage? Drop to the full claim API ([`engine::IngestClaimRequest`] /
+//! [`engine::QueryMemoryRequest`]); see the type reference. The ergonomic tier is additive — the
 //! rigorous core is unchanged.
 //!
 //! ## Feature flags
@@ -77,12 +72,14 @@
 //!
 //! The engine core has zero dependency on either adapter crate.
 
+#![warn(missing_docs)]
+
 // ── Tier-1 ergonomic modules ──────────────────────────────────────────────────
 
 pub mod ergonomic;
 pub mod date;
 
-// ── Tier-1 surface re-exports ─────────────────────────────────────────────────
+// ── Tier-1 surface re-exports (kept at crate root — quickstarts stay valid) ──
 
 pub use ergonomic::{
     // Functions
@@ -110,98 +107,113 @@ pub use ergonomic::{
     IngestClaimRequestBuilder,
 };
 
-// ── Domain-type re-exports (mempill-types) ───────────────────────────────────
+// ── Power-user modules ────────────────────────────────────────────────────────
+
+/// Domain value types shared across the mempill engine.
+///
+/// Import from here when you need the deep type surface: provenance channels,
+/// adjudication request/response, ledger entries, claim edges, validity assertions,
+/// and so on. Most consumers only need the ergonomic tier at the crate root.
+///
+/// # Example
+///
+/// ```rust
+/// use mempill::types::{Disposition, ProvenanceLabel, ExternalKind};
+/// ```
+pub mod types {
+    // Identity
+    pub use mempill_types::{AgentId, ClaimRef, SubjectLineRef};
+    // Provenance
+    pub use mempill_types::{ProvenanceLabel, ExternalKind, ExternalAnchor};
+    // Claim value objects
+    pub use mempill_types::{Cardinality, Confidence, Criticality, Fact, Claim};
+    // Disposition (12-state model)
+    pub use mempill_types::{Disposition, WriteOutcome};
+    // Belief projection (read-time)
+    pub use mempill_types::{Belief, BeliefProjection, BeliefStatus, CurrencySignal, CurrencyState, StalenessFlag, Marker};
+    // Time
+    pub use mempill_types::{TransactionTime, ValidTime};
+    // Ledger
+    pub use mempill_types::{LedgerEntry, LedgerEventKind};
+    // Validity
+    pub use mempill_types::{ValidityAssertion, AssertionKind};
+    // Graph edges
+    pub use mempill_types::{ClaimEdge, EdgeKind};
+    // Oracle adjudication
+    pub use mempill_types::{ClaimProposal, AdjudicationRequest, AdjudicationResponse, AdjudicationVerdict, AdjudicationOutcome, OverturnReason};
+}
+
+/// Core engine surface for power users and adapter authors.
+///
+/// Contains the `EngineHandle`, configuration, port traits, NoOp stubs, and use-case
+/// request/response DTOs. Most consumers only need the ergonomic tier at the crate root.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use mempill::engine::{EngineConfig, NoOpOracle, NoOpVector};
+/// ```
+pub mod engine {
+    // EngineHandle — sole async entry point
+    pub use mempill_core::EngineHandle;
+    // Configuration
+    pub use mempill_core::EngineConfig;
+    // Error types
+    pub use mempill_core::{MemError, WriteResult, BeliefResult};
+    // Port traits
+    pub use mempill_core::{PersistencePort, OraclePort, ExtractorPort, EmbeddingPort, VectorPort, PendingAdjudicationPort, PendingAdjudicationRow};
+    // NoOp stubs for tests / simple setups
+    pub use mempill_core::{NoOpOracle, NoOpVector};
+    // Use-case request/response DTOs
+    pub use mempill_core::{
+        IngestClaimRequest, IngestClaimResponse,
+        QueryMemoryRequest, QueryMemoryResponse,
+        ReconcileRequest, ReconcileResponse,
+        AuditQueryRequest, AuditQueryResponse,
+        QueryHistoryRequest, QueryHistoryResponse,
+    };
+    // Use-case traits
+    pub use mempill_core::{IngestClaimUseCase, QueryMemoryUseCase, ReconcileUseCase, AuditUseCase, QueryHistoryUseCase};
+}
+
+// ── Flat re-exports of commonly-needed types ──────────────────────────────────
 //
-// Re-export the complete set of domain types a consumer needs so they can write
-// `use mempill::AgentId` without adding `mempill-types` to their own Cargo.toml.
+// Keep the most-used power-user types at the crate root for ergonomic imports
+// without requiring `use mempill::types::*`. Power-user-only types live in
+// `mempill::types` and `mempill::engine` modules.
 
 pub use mempill_types::{
-    // Identity
+    // Identity (needed for RememberOptions::derived_from and builder calls)
     AgentId,
     ClaimRef,
     SubjectLineRef,
-    // Provenance
+    // Provenance (needed to call builder .provenance())
     ProvenanceLabel,
     ExternalKind,
-    ExternalAnchor,
-    // Claim value objects
+    // Claim value objects (needed for builder .cardinality() / .criticality())
     Cardinality,
-    Confidence,
     Criticality,
+    Confidence,
     Fact,
-    Claim,
-    // Disposition (12-state model)
+    // Disposition (returned in RememberReceipt)
     Disposition,
-    WriteOutcome,
-    // Belief projection (read-time)
-    Belief,
-    BeliefProjection,
+    // Belief status (in RecallResult)
     BeliefStatus,
-    CurrencySignal,
     CurrencyState,
-    StalenessFlag,
+    // Marker (in RecallResult via BeliefProjection — kept for match arms)
     Marker,
-    // Time
-    TransactionTime,
+    // Time types (used in Tier-2 bi-temporal examples)
     ValidTime,
-    // Ledger
-    LedgerEntry,
-    LedgerEventKind,
-    // Validity
-    ValidityAssertion,
-    AssertionKind,
-    // Graph edges
-    ClaimEdge,
-    EdgeKind,
-    // Oracle adjudication
-    ClaimProposal,
-    AdjudicationRequest,
-    AdjudicationResponse,
-    AdjudicationVerdict,
-    AdjudicationOutcome,
-    OverturnReason,
 };
 
-// ── Core re-exports ───────────────────────────────────────────────────────────
-
-/// Re-exports of the complete mempill-core public API.
 pub use mempill_core::{
-    // EngineHandle — sole async entry point
+    // EngineHandle (returned by open_default_in_memory / open_default)
     EngineHandle,
-    ErasedPendingStore,
-    ErasedPendingStoreAdapter,
-    // Configuration
-    EngineConfig,
-    // Error types
+    // Error types (used in ? chains)
     MemError,
-    WriteResult,
-    BeliefResult,
-    // Port traits
-    PersistencePort,
-    OraclePort,
-    ExtractorPort,
-    EmbeddingPort,
-    VectorPort,
-    PendingAdjudicationPort,
-    PendingAdjudicationRow,
-    Txn,
-    // NoOp stubs for tests / simple setups
-    NoOpOracle,
-    NoOpVector,
-    // Use-case request/response DTOs
+    // Commonly-used request types (Tier-2 usage)
     IngestClaimRequest,
-    IngestClaimResponse,
     QueryMemoryRequest,
-    QueryMemoryResponse,
-    ReconcileRequest,
-    ReconcileResponse,
-    AuditQueryRequest,
-    AuditQueryResponse,
-    // Use-case traits
-    IngestClaimUseCase,
-    QueryMemoryUseCase,
-    ReconcileUseCase,
-    AuditUseCase,
 };
 
 // ── Adapter re-exports (behind feature flags) ─────────────────────────────────
@@ -217,7 +229,6 @@ pub mod sqlite {
         SqlitePersistenceStore,
         SqlitePendingStore,
         SqliteStoreError,
-        OraclePort,
         open_default,
         open_default_in_memory,
         open_with_oracle,
@@ -228,7 +239,7 @@ pub mod sqlite {
 /// PostgreSQL persistence adapter (`feature = "postgres"`).
 ///
 /// Use [`postgres::open_postgres`] to open an engine connected to PostgreSQL.
-/// Note: NoTls only in v0.2 — TLS is planned for v0.3.1.
+/// Note: NoTls only in v0.2.
 #[cfg(feature = "postgres")]
 pub mod postgres {
     pub use mempill_postgres::{

@@ -368,8 +368,7 @@ async fn i9_heavypath_supersession_commits_atomically() {
     assert_eq!(
         committed_count, 1,
         "I9 HeavyPath atomicity: ClaimCommitted entry for claim A MUST be present after B11 \
-         contested ingest (append-only — incumbent retained). Found: {}",
-        committed_count
+         contested ingest (append-only — incumbent retained). Found: {committed_count}"
     );
 
     // CORRECTED (TASK-9-W4-W5-FIX): ValidityAsserted MUST NOT be present at ingest time.
@@ -384,8 +383,7 @@ async fn i9_heavypath_supersession_commits_atomically() {
         validity_asserted_count, 0,
         "TASK-9-W4-W5-FIX: ValidityAsserted for claim A MUST NOT be present at ingest time. \
          The incumbent is not superseded during ingest (only at submit_adjudication Affirm). \
-         Found: {} (expected 0)",
-        validity_asserted_count
+         Found: {validity_asserted_count} (expected 0)"
     );
 
     // ── Step 4: belief reflects B11 Contested (BOTH values visible) ───────────
@@ -410,12 +408,10 @@ async fn i9_heavypath_supersession_commits_atomically() {
         .collect();
     assert!(
         all_values.contains(&serde_json::json!("old@example.com")),
-        "I9 HeavyPath: 'old@example.com' (claim A / incumbent) MUST be visible in Contested. Got: {:?}",
-        all_values
+        "I9 HeavyPath: 'old@example.com' (claim A / incumbent) MUST be visible in Contested. Got: {all_values:?}"
     );
     assert!(
         all_values.contains(&serde_json::json!("new@example.com")),
-        "I9 HeavyPath: 'new@example.com' (claim B / challenger) MUST be visible in Contested. Got: {:?}",
-        all_values
+        "I9 HeavyPath: 'new@example.com' (claim B / challenger) MUST be visible in Contested. Got: {all_values:?}"
     );
 }

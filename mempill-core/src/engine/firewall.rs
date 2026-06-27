@@ -208,9 +208,11 @@ mod tests {
     }
 
     fn guard(threshold: u32, depth_cap: u32) -> AmplificationGuard {
-        let mut cfg = EngineConfig::default();
-        cfg.quarantine_burst_threshold = threshold;
-        cfg.derivation_depth_cap_for_overturning = depth_cap;
+        let cfg = EngineConfig {
+            quarantine_burst_threshold: threshold,
+            derivation_depth_cap_for_overturning: depth_cap,
+            ..EngineConfig::default()
+        };
         AmplificationGuard::new(Arc::new(cfg))
     }
 
@@ -430,7 +432,7 @@ mod tests {
                 assert!(!provenance_independent,
                     "RecallReEntry corroboration must NEVER be provenance-independent (V3-7)");
             }
-            other => panic!("expected CorroborateByIdentity, got {:?}", other),
+            other => panic!("expected CorroborateByIdentity, got {other:?}"),
         }
     }
 
@@ -465,7 +467,7 @@ mod tests {
         for (candidate, refs, burst) in &scenarios {
             let v1 = g.check(candidate, refs, *burst);
             let v2 = g.check(candidate, refs, *burst);
-            assert_eq!(v1, v2, "non-deterministic result for burst={}", burst);
+            assert_eq!(v1, v2, "non-deterministic result for burst={burst}");
         }
     }
 

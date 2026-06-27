@@ -202,7 +202,7 @@ mod tests {
     fn noop_oracle_is_clone_and_debug() {
         let oracle = NoOpOracle;
         let _cloned = oracle.clone();
-        let s = format!("{:?}", oracle);
+        let s = format!("{oracle:?}");
         assert!(s.contains("NoOpOracle"));
     }
 
@@ -210,7 +210,7 @@ mod tests {
     fn noop_vector_is_clone_and_debug() {
         let vector = NoOpVector;
         let _cloned = vector.clone();
-        let s = format!("{:?}", vector);
+        let s = format!("{vector:?}");
         assert!(s.contains("NoOpVector"));
     }
 

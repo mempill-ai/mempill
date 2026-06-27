@@ -11,10 +11,15 @@ use crate::time::TransactionTime;
 /// Immutable audit record appended on every disposition event by the AuditLedger.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LedgerEntry {
+    /// Unique ID for this ledger entry (random UUID, minted at write time).
     pub entry_id: uuid::Uuid,
+    /// The agent that owns the claim this entry is about.
     pub agent_id: AgentId,
+    /// The claim this ledger entry is recording a transition for.
     pub claim_ref: ClaimRef,
+    /// The event type that triggered this ledger entry.
     pub event_kind: LedgerEventKind,
+    /// The disposition assigned to the claim at the time of this entry.
     pub disposition: Disposition,
     /// Rationale and measured estimators from the adjudication gate (for replay audit).
     pub rationale: Option<serde_json::Value>,
@@ -24,12 +29,19 @@ pub struct LedgerEntry {
 
 /// The event that triggered this ledger entry.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum LedgerEventKind {
+    /// A new claim was committed to the store.
     ClaimCommitted,
+    /// A validity assertion (start/end bound) was appended.
     ValidityAsserted,
+    /// An adjudication was requested from the oracle.
     AdjudicationRequested,
+    /// The oracle returned a verdict and it was applied.
     AdjudicationResolved,
+    /// A claim was detected as a recall re-entry (the agent is re-injecting its own output).
     RecallReEntryDetected,
+    /// A claim was quarantined (burst/loop signature or incoherent timestamps).
     Quarantined,
     /// A dependent claim was flagged PendingReview because its parent was superseded.
     DependentFlaggedPendingReview,

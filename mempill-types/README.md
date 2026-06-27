@@ -22,4 +22,4 @@ Tokio or any persistence layer — only `chrono`, `serde`, `serde_json`, and `uu
 
 ## License
 
-Apache-2.0. See [LICENSE](../LICENSE) for the full text.
+Apache-2.0. See [LICENSE](LICENSE) for the full text.

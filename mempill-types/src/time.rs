@@ -16,7 +16,9 @@ impl TransactionTime {
 /// When start/end are None, belief ordering falls back to TransactionTime.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ValidTime {
+    /// Start of the valid-time window (`None` = unknown / open-ended).
     pub start: Option<chrono::DateTime<chrono::Utc>>,
+    /// End of the valid-time window (`None` = unknown / open-ended).
     pub end: Option<chrono::DateTime<chrono::Utc>>,
     /// Confidence in the valid-time extraction itself (mirrors Confidence.valid_time_confidence).
     pub valid_time_confidence: f32,

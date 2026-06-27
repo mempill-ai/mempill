@@ -152,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("  [query]  surfaced values:");
     for v in &contested_values {
-        println!("             - {}", v);
+        println!("             - {v}");
     }
     println!();
     println!("  Result: mempill surfaces BOTH Alice and Bob. Neither is silently dropped.");

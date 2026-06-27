@@ -20,8 +20,11 @@ impl ClaimRef {
 /// Compound key identifying the (agent_id, subject, predicate) subject-line.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SubjectLineRef {
+    /// The agent that owns this subject-line.
     pub agent_id: AgentId,
+    /// The entity being described.
     pub subject: String,
+    /// The aspect being asserted.
     pub predicate: String,
 }
 

@@ -162,6 +162,8 @@ fn edge_kind_to_str(k: &EdgeKind) -> &'static str {
         EdgeKind::Supersedes => "Supersedes",
         EdgeKind::DependsOn => "DependsOn",
         EdgeKind::MutualExclusion => "MutualExclusion",
+        // EdgeKind is #[non_exhaustive] — future variants stored as "Unknown".
+        _ => "Unknown",
     }
 }
 
@@ -189,6 +191,8 @@ fn ledger_event_kind_to_str(k: &LedgerEventKind) -> &'static str {
         LedgerEventKind::DependentFlaggedPendingReview => "DependentFlaggedPendingReview",
         LedgerEventKind::ServedAsInjected => "ServedAsInjected",
         LedgerEventKind::AdjudicationExpired => "AdjudicationExpired",
+        // LedgerEventKind is #[non_exhaustive] — future variants stored as "Unknown".
+        _ => "Unknown",
     }
 }
 
@@ -224,6 +228,8 @@ fn disposition_to_str(d: &mempill_types::disposition::Disposition) -> &'static s
         Disposition::Invalidated => "Invalidated",
         Disposition::Reinstated => "Reinstated",
         Disposition::Rejected => "Rejected",
+        // Disposition is #[non_exhaustive] — future variants stored as "Unknown".
+        _ => "Unknown",
     }
 }
 
@@ -588,6 +594,8 @@ impl PersistencePort for SqlitePersistenceStore {
                 AssertionKind::Reopen { reopen_at } => {
                     ("Reopen", None, Some(reopen_at.to_rfc3339()))
                 }
+                // AssertionKind is #[non_exhaustive] — future kinds stored as "Unknown" (no-op).
+                _ => ("Unknown", None, None),
             };
 
         conn.execute(
@@ -702,10 +710,9 @@ impl PersistencePort for SqlitePersistenceStore {
         let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
 
         let sql = format!(
-            "SELECT {cols} FROM claims
+            "SELECT {CLAIM_SELECT_COLS} FROM claims
              WHERE agent_id = ?1 AND subject = ?2 AND predicate = ?3
-             ORDER BY tx_time ASC",
-            cols = CLAIM_SELECT_COLS
+             ORDER BY tx_time ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(
@@ -730,9 +737,8 @@ impl PersistencePort for SqlitePersistenceStore {
         let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
 
         let sql = format!(
-            "SELECT {cols} FROM claims
-             WHERE agent_id = ?1 AND claim_id = ?2",
-            cols = CLAIM_SELECT_COLS
+            "SELECT {CLAIM_SELECT_COLS} FROM claims
+             WHERE agent_id = ?1 AND claim_id = ?2"
         );
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query_map(

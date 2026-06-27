@@ -16,7 +16,7 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/mempill-ai/mempill"
 homepage = "https://mempill.netlify.app"
-authors = ["The mempill authors"]
+authors = ["Aliaksei Ivanouski"]
 rust-version = "1.88"
 
 [workspace.dependencies]

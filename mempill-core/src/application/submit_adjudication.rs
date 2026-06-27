@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! SubmitAdjudicationUseCase — atomic oracle verdict apply.
 //!
 //! This is the RESOLUTION path: an oracle verdict arrives asynchronously and this use-case
@@ -202,6 +203,8 @@ where
                         // Return the challenger with its new Contested disposition.
                         (challenger_ref, Disposition::Contested)
                     }
+                    // AdjudicationVerdict is #[non_exhaustive] — future verdicts treated as Unknown.
+                    _ => (challenger_ref, Disposition::Contested),
                 };
 
                 Ok(AdjudicationOutcome {
@@ -315,6 +318,8 @@ where
                     .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
                 Ok(())
             }
+            // AdjudicationVerdict is #[non_exhaustive] — future verdicts treated as Unknown (abstain).
+            _ => Ok(()),
         }
     }
 
@@ -564,14 +569,14 @@ mod tests {
 
         fn list_pending(&self, agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, MockErr> {
             Ok(self.rows.lock().unwrap().iter()
-                .filter(|r| agent_id.map_or(true, |a| r.agent_id == *a) && r.status == "pending")
+                .filter(|r| agent_id.is_none_or(|a| r.agent_id == *a) && r.status == "pending")
                 .cloned()
                 .collect())
         }
 
         fn list_expired(&self, now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, MockErr> {
             Ok(self.rows.lock().unwrap().iter()
-                .filter(|r| r.status == "pending" && r.expires_at.map_or(false, |e| e <= now))
+                .filter(|r| r.status == "pending" && r.expires_at.is_some_and(|e| e <= now))
                 .cloned()
                 .collect())
         }

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! SweepAdjudicationsUseCase — TTL expiry and orphan recovery.
 //!
 //! This use-case handles two distinct reversion scenarios atomically:

@@ -17,18 +17,29 @@ use crate::time::{TransactionTime, ValidTime};
 /// performing a canonical valid-time fold. No pre-computed "current value" row exists.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BeliefProjection {
+    /// The resolved belief status (Resolved, Contested, NoBelief, etc.).
     pub status: BeliefStatus,
     /// The claim covering NOW under the canonical fold, if unambiguous.
     pub primary: Option<Belief>,
     /// Both claims when Contested or Conflict (never silently picked).
     pub alternatives: Vec<Belief>,
+    /// Derived currency state at read time: Fresh, AgingUnconfirmed, or Decayed.
     pub currency: CurrencyState,
+    /// Criticality class of the primary claim, or the highest alternative when contested.
     pub criticality: Criticality,
+    /// Computed staleness flag (is_stale = true when currency is Decayed or no reconfirmation).
     pub staleness: StalenessFlag,
+    /// Active markers on the projection (Contested, PendingReview, AgedSetMember, etc.).
     pub markers: Vec<Marker>,
 }
 
+/// Resolved belief status for a subject-line at read time.
+///
+/// Produced by the canonical valid-time fold in `TruthEngine::query_memory`.
+/// The status is authoritative: a `Contested` result means the conflict was
+/// detected and surfaced explicitly, never silently resolved.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum BeliefStatus {
     /// Single live truth.
     Resolved,
@@ -42,22 +53,42 @@ pub enum BeliefStatus {
     NoBelief,
 }
 
+/// A single candidate belief — one arm of the canonical fold result.
+///
+/// A `BeliefProjection` has exactly one `primary` when `Resolved`, two entries in
+/// `alternatives` when `Contested` or `Conflict`, and neither when `NoBelief`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Belief {
+    /// Stable reference to the underlying committed claim.
     pub claim_ref: ClaimRef,
+    /// The (subject, predicate, value) triple of the claim.
     pub fact: Fact,
+    /// Provenance label: who asserted the claim and by what method.
     pub provenance: ProvenanceLabel,
+    /// Valid-time window of the claim (when it holds in the world).
     pub valid_time: ValidTime,
+    /// Transaction time: when the claim was written to the store.
     pub transaction_time: TransactionTime,
+    /// Dual confidence scores (value confidence + valid-time extraction confidence).
     pub confidence: Confidence,
+    /// Derived currency signal at read time (computed, never stored).
     pub currency_signal: CurrencySignal,
+    /// Criticality class of this claim.
     pub criticality: Criticality,
 }
 
+/// Derived currency state at read time.
+///
+/// Computed from `(now - last_refreshed_at)` relative to configured aging thresholds.
+/// Never stored — recomputed on every `query_memory` call.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum CurrencyState {
+    /// Within the configured freshness window.
     Fresh,
+    /// Past the freshness threshold but not yet fully decayed.
     AgingUnconfirmed,
+    /// Beyond the decay threshold — treat value as potentially stale.
     Decayed,
 }
 
@@ -76,16 +107,30 @@ pub struct CurrencySignal {
     pub corroboration_count: u32,
 }
 
+/// Computed staleness flag on a `BeliefProjection`.
+///
+/// `is_stale` is set when currency is `Decayed` or when the engine's currency
+/// aging thresholds have been exceeded without a provenance-independent reconfirmation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StalenessFlag {
+    /// Whether the belief is considered stale at read time.
     pub is_stale: bool,
+    /// Optional human-readable reason for the staleness determination.
     pub reason: Option<String>,
 }
 
+/// Active signal flags on a `BeliefProjection` at read time.
+///
+/// Multiple markers may be set simultaneously. Callers should inspect all markers,
+/// not just the `status`, for full situational awareness.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Marker {
+    /// The belief is in active contest (two or more unresolved conflicting claims).
     Contested,
+    /// A conflict exists but neither claim is contested — pending oracle or evidence.
     PendingConflict,
+    /// A parent claim was superseded; this claim is flagged for human review.
     PendingReview,
     /// Set member that has exceeded the currency decay threshold (aging signal).
     AgedSetMember,
@@ -101,6 +146,7 @@ pub enum Marker {
 /// `Current` and `Superseded` are derived from `is_live` in the canonical fold result
 /// so that `history()` and `recall()` always agree on which entry is current.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 #[serde(rename_all = "PascalCase")]
 pub enum HistoryEntryStatus {
     /// This claim is the live (current) belief at the time of the query.

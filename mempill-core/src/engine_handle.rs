@@ -51,6 +51,7 @@ use crate::{
 ///
 /// Adapters implement `PendingAdjudicationPort`; this wrapper is created via
 /// `ErasedPendingStoreAdapter::new(concrete_store)` and stored as `Arc<dyn ErasedPendingStore>`.
+#[allow(missing_docs)]
 pub trait ErasedPendingStore: Send + Sync + 'static {
     fn insert_pending_erased(
         &self,
@@ -93,6 +94,7 @@ pub struct ErasedPendingStoreAdapter<S: PendingAdjudicationPort> {
 }
 
 impl<S: PendingAdjudicationPort> ErasedPendingStoreAdapter<S> {
+    /// Wrap a concrete `PendingAdjudicationPort` impl as `dyn ErasedPendingStore`.
     pub fn new(inner: S) -> Self {
         Self { inner }
     }

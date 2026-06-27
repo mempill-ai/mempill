@@ -19,9 +19,13 @@ use crate::claim::Claim;
 /// reconciler and adjudication gate before any write is made.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClaimProposal {
+    /// The (subject, predicate, value) triple being proposed.
     pub fact: Fact,
+    /// Advisory valid-time window suggested by the extractor.
     pub suggested_valid_time: Option<ValidTime>,
+    /// Advisory cardinality hint suggested by the extractor.
     pub suggested_cardinality: Cardinality,
+    /// Confidence scores from the extraction model.
     pub confidence: Confidence,
     /// ADVISORY ONLY — engine enforces ModelDerived default and provenance immutability.
     /// If None, gateway assigns ModelDerived (the mandatory default).
@@ -31,31 +35,48 @@ pub struct ClaimProposal {
 /// Adjudication request sent to the `OraclePort` by the adjudication gate.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AdjudicationRequest {
+    /// The subject-line (agent_id, subject, predicate) under adjudication.
     pub subject_line: SubjectLineRef,
+    /// The currently live belief (the incumbent to be potentially superseded).
     pub incumbent: Belief,
+    /// The incoming claim challenging the incumbent.
     pub challenger: Claim,
+    /// Criticality class of the highest-importance claim involved.
     pub criticality: Criticality,
+    /// Why adjudication was triggered.
     pub reason: OverturnReason,
 }
 
 /// Why an adjudication was triggered.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum OverturnReason {
+    /// An external claim directly contradicts the incumbent.
     ExternalContradiction,
+    /// A validity-bound assertion marks the incumbent as no longer true.
     ValidityBound,
+    /// A parent claim of the incumbent was superseded.
     DependsOnSuperseded,
+    /// Derivation depth exceeds the configured threshold.
     HighDerivationDepth,
 }
 
 /// Response delivered asynchronously back into the engine from the oracle.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AdjudicationResponse {
+    /// Correlates this response back to the originating `AdjudicationRequest`.
     pub handle_id: uuid::Uuid,
+    /// The oracle's verdict on the challenger vs incumbent dispute.
     pub verdict: AdjudicationVerdict,
+    /// Provenance label that the oracle used to reach this verdict.
     pub evidence_provenance: ProvenanceLabel,
 }
 
+/// The oracle's verdict on a challenged belief.
+///
+/// Delivered asynchronously via [`AdjudicationResponse`] after the oracle resolves the dispute.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum AdjudicationVerdict {
     /// Challenger confirmed; incumbent bounded.
     Affirm,

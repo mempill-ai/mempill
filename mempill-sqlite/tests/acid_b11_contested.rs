@@ -116,14 +116,12 @@ async fn b11_oracle_absent_external_contradiction_resolves_to_contested() {
         all_surfaced_refs.contains(&resp_a.claim_ref),
         "B11: the INCUMBENT (claim A / 'Berlin') MUST be surfaced in Contested projection. \
          It was not — the incumbent was excluded by ingest-time supersession (now fixed). \
-         Surfaced refs: {:?}",
-        all_surfaced_refs
+         Surfaced refs: {all_surfaced_refs:?}"
     );
     assert!(
         all_surfaced_refs.contains(&resp_b.claim_ref),
         "B11: the CHALLENGER (claim B / 'Paris') MUST be surfaced in Contested projection. \
-         Surfaced refs: {:?}",
-        all_surfaced_refs
+         Surfaced refs: {all_surfaced_refs:?}"
     );
 
     // Values check: both "Berlin" and "Paris" must appear in alternatives.
@@ -134,11 +132,11 @@ async fn b11_oracle_absent_external_contradiction_resolves_to_contested() {
         .collect();
     assert!(
         all_surfaced_values.contains(&serde_json::json!("Berlin")),
-        "B11: 'Berlin' (incumbent value) MUST be visible in Contested. Got: {:?}", all_surfaced_values
+        "B11: 'Berlin' (incumbent value) MUST be visible in Contested. Got: {all_surfaced_values:?}"
     );
     assert!(
         all_surfaced_values.contains(&serde_json::json!("Paris")),
-        "B11: 'Paris' (challenger value) MUST be visible in Contested. Got: {:?}", all_surfaced_values
+        "B11: 'Paris' (challenger value) MUST be visible in Contested. Got: {all_surfaced_values:?}"
     );
 }
 

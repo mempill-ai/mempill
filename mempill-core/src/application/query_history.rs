@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! QueryHistoryUseCase — application layer read path for the history timeline.
 //!
 //! Read-only: no Txn opened, no writes. Returns all claims on a subject-line ordered
@@ -174,7 +175,7 @@ where
         // Map each claim to a HistoryEntry.
         let entries: Vec<HistoryEntry> = sorted_claims
             .iter()
-            .zip(windows.into_iter())
+            .zip(windows)
             .map(|(claim, valid_until)| {
                 let status = if live_refs.contains(claim.claim_ref()) {
                     HistoryEntryStatus::Current
@@ -210,7 +211,7 @@ mod tests {
     use crate::config::EngineConfig;
     use crate::noop::NoOpVector;
     use crate::ports::persistence::Txn;
-    use chrono::{Duration, TimeZone};
+    use chrono::TimeZone;
     use mempill_types::{
         AgentId, Cardinality, Claim, ClaimEdge, ClaimRef, Confidence, Criticality,
         ExternalAnchor, ExternalKind, Fact, LedgerEntry, ProvenanceLabel, TransactionTime,
@@ -340,6 +341,8 @@ mod tests {
         AgentId("test-agent".into())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    // reason: test helper mirrors the full Claim constructor — grouping into a struct would obscure call sites
     fn make_claim(
         agent_id: &AgentId,
         subject: &str,

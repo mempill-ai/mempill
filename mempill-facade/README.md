@@ -4,7 +4,7 @@ Temporally-correct memory for AI agents — bi-temporal claim store with Contest
 
 📖 **Documentation: <https://mempill.netlify.app>**
 
-This crate is a thin facade over [`mempill-core`](../mempill-core) and the persistence adapters.
+This crate is a thin facade over [`mempill-core`](https://crates.io/crates/mempill-core) and the persistence adapters.
 
 ## Usage
 
@@ -52,4 +52,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## License
 
-Apache-2.0. See [LICENSE](../LICENSE) for the full text.
+Apache-2.0. See [LICENSE](LICENSE) for the full text.

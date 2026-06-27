@@ -8,12 +8,15 @@ homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "PostgreSQL persistence adapter for mempill — shared-DB topology, r2d2 pool, per-agent advisory locking, OCC, refinery migrations (NoTls; TLS planned)"
+description = "PostgreSQL persistence adapter for mempill — shared-DB topology, r2d2 pool, per-agent advisory locking, OCC, refinery migrations (NoTls)"
 keywords = ["ai", "agent", "memory", "postgres", "temporal"]
 categories = ["database", "data-structures"]
 
 [features]
 postgres-integration = []
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 mempill-core  = { path = "../mempill-core",  version = "0.2.0" }

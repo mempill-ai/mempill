@@ -273,11 +273,11 @@ async fn test2_genuine_conflict_overlapping_validity_contested() {
     );
     assert!(
         all_values.contains(&serde_json::json!("alice")),
-        "TEST2: alice MUST be in Contested belief. Got: {:?}", all_values
+        "TEST2: alice MUST be in Contested belief. Got: {all_values:?}"
     );
     assert!(
         all_values.contains(&serde_json::json!("bob")),
-        "TEST2: bob MUST be in Contested belief. Got: {:?}", all_values
+        "TEST2: bob MUST be in Contested belief. Got: {all_values:?}"
     );
 
     println!("[TEST2] PASS: genuine conflict → Contested with both values. \
@@ -386,7 +386,7 @@ async fn test3_acid_scenario_review_verdict() {
             .chain(qr.belief.alternatives.iter().map(|b| b.fact.value.clone()))
             .collect();
         assert!(vals.contains(&serde_json::json!("penicillin")),
-            "TEST3: penicillin MUST be visible in Contested. Got: {:?}", vals);
+            "TEST3: penicillin MUST be visible in Contested. Got: {vals:?}");
 
         println!(
             "[TEST3-ALLERGY] VERDICT: genuine conflict (no valid_time, no oracle). \
@@ -449,9 +449,9 @@ async fn test3_acid_scenario_review_verdict() {
             .chain(qr.belief.alternatives.iter().map(|b| b.fact.value.clone()))
             .collect();
         assert!(vals.contains(&serde_json::json!("old@example.com")),
-            "TEST3: old email MUST be visible in Contested. Got: {:?}", vals);
+            "TEST3: old email MUST be visible in Contested. Got: {vals:?}");
         assert!(vals.contains(&serde_json::json!("new@example.com")),
-            "TEST3: new email MUST be visible in Contested. Got: {:?}", vals);
+            "TEST3: new email MUST be visible in Contested. Got: {vals:?}");
 
         println!(
             "[TEST3-EMAIL] VERDICT: genuine conflict (no valid_time, no oracle). \

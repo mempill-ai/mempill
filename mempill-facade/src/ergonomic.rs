@@ -30,15 +30,28 @@ use crate::date::parse_lenient_date;
 /// Translates cryptic engine errors (e.g. "premature end of input") into
 /// human-readable messages with hints for resolution.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MempillDxError {
     /// The supplied date string could not be parsed.
     /// Use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339.
     #[error("Unparsable date {input:?}: {hint}")]
-    UnparsableDate { input: String, hint: &'static str },
+    UnparsableDate {
+        /// The raw input string that could not be parsed.
+        input: String,
+        /// A human-readable hint explaining valid formats.
+        hint: &'static str,
+    },
 
     /// `valid_from` must precede `valid_until`.
     #[error("Incoherent date range: start={start} end={end}. {hint}")]
-    IncoherentDates { start: String, end: String, hint: &'static str },
+    IncoherentDates {
+        /// The parsed start date (RFC3339).
+        start: String,
+        /// The parsed end date (RFC3339).
+        end: String,
+        /// A human-readable hint.
+        hint: &'static str,
+    },
 
     /// Engine-level error (pass-through with original message).
     #[error("Engine error: {0}")]
@@ -50,8 +63,10 @@ pub enum MempillDxError {
 /// Object-safe async ingest seam. Implemented for `EngineHandle<P,O,V>` via blanket impl.
 ///
 /// Not intended for direct use — call `remember()` instead.
+/// You may implement this for mock engines in tests.
 #[async_trait::async_trait]
 pub trait CanIngestClaim: Send + Sync {
+    /// Submit a claim ingest request to the engine.
     async fn ingest_ergo(
         &self,
         req: IngestClaimRequest,
@@ -61,8 +76,10 @@ pub trait CanIngestClaim: Send + Sync {
 /// Object-safe async query seam. Implemented for `EngineHandle<P,O,V>` via blanket impl.
 ///
 /// Not intended for direct use — call `recall()` instead.
+/// You may implement this for mock engines in tests.
 #[async_trait::async_trait]
 pub trait CanQueryMemory: Send + Sync {
+    /// Query the engine for the current belief on a subject+predicate.
     async fn query_ergo(
         &self,
         req: QueryMemoryRequest,
@@ -102,8 +119,10 @@ where
 /// Object-safe async history-query seam. Implemented for `EngineHandle<P,O,V>` via blanket impl.
 ///
 /// Not intended for direct use — call `history()` instead.
+/// You may implement this for mock engines in tests.
 #[async_trait::async_trait]
 pub trait CanQueryHistory: Send + Sync {
+    /// Query the full ordered history timeline for a subject+predicate.
     async fn query_history_ergo(
         &self,
         req: QueryHistoryRequest,
@@ -160,7 +179,7 @@ pub use mempill_types::HistoryEntryStatus;
 /// # }
 /// ```
 #[must_use]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct History {
     /// All claims for the subject-line, ordered by canonical ordering key (oldest first).
     pub entries: Vec<HistoryEntry>,
@@ -199,12 +218,18 @@ impl History {
 /// let opts2 = RememberOptions::new().derived_from(vec![parent_ref]);
 /// ```
 #[derive(Default, Clone, Debug)]
+#[non_exhaustive]
 pub struct RememberOptions {
+    /// Start of the valid-time window as a lenient date string (YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339).
+    /// `None` means open / unknown valid-time start.
     pub valid_from: Option<String>,
+    /// End of the valid-time window as a lenient date string.
+    /// `None` means the fact is open-ended (no known expiry).
     pub valid_until: Option<String>,
     /// Value confidence 0.0–1.0. Default: 1.0.
     /// Also drives `valid_time_confidence` when dates are supplied (set once, no duplication).
     pub confidence: Option<f32>,
+    /// Criticality class. Default: [`Criticality::Medium`].
     pub criticality: Option<Criticality>,
     /// Upstream claims this fact was derived from. Default: empty.
     /// Forwarded directly into `IngestClaimRequest::derived_from`.
@@ -254,9 +279,13 @@ impl RememberOptions {
 // ── Return types ──────────────────────────────────────────────────────────────
 
 /// Receipt returned by [`remember`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RememberReceipt {
+    /// Stable UUID reference to the committed claim. Use this to express lineage via
+    /// [`RememberOptions::derived_from`].
     pub claim_ref: ClaimRef,
+    /// The engine's disposition for this write (12-state model).
     pub disposition: Disposition,
     /// Non-empty only when the write produced a Contested or Conflict disposition.
     pub contested_with: Vec<ClaimRef>,
@@ -267,7 +296,10 @@ pub struct RememberReceipt {
 /// Available via [`RecallResult::primary`] (the resolved belief) and via
 /// [`ContestCandidate::detail`] (each contested candidate). Gives the caller
 /// everything needed to build a view without navigating the deep belief path.
-#[derive(Debug, Clone)]
+///
+/// Note: `PartialEq` is derived but `Eq` is intentionally absent because
+/// `value_confidence` is `f32` and `f32` does not implement `Eq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct BeliefDetail {
     /// The claim reference (UUID) that backs this belief.
     pub claim_ref: ClaimRef,
@@ -286,10 +318,13 @@ pub struct BeliefDetail {
 }
 
 /// A candidate value surfaced when the belief is `Contested` or `Conflict`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContestCandidate {
+    /// The asserted value for this contested candidate.
     pub value: serde_json::Value,
+    /// Stable UUID reference to the underlying claim.
     pub claim_ref: ClaimRef,
+    /// Start of the valid-time window, or `None` if unknown.
     pub valid_from: Option<DateTime<Utc>>,
     /// Full detail for this candidate — same fields as the primary [`BeliefDetail`].
     pub detail: BeliefDetail,
@@ -374,6 +409,7 @@ impl RecallResult {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Debug)]
 pub struct IngestClaimRequestBuilder {
     agent_id: AgentId,
     subject: String,
@@ -389,36 +425,45 @@ pub struct IngestClaimRequestBuilder {
 }
 
 impl IngestClaimRequestBuilder {
+    /// Set the start of the valid-time window. Accepts lenient dates: YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339.
     pub fn valid_from(mut self, s: impl Into<String>) -> Self {
         self.valid_from = Some(s.into());
         self
     }
 
+    /// Set the end of the valid-time window. `None` (the default) means open-ended.
     pub fn valid_until(mut self, s: impl Into<String>) -> Self {
         self.valid_until = Some(s.into());
         self
     }
 
+    /// Set the value confidence (0.0–1.0). Default: `1.0`.
+    /// Also drives `valid_time_confidence` when dates are supplied.
     pub fn confidence(mut self, c: f32) -> Self {
         self.confidence = Some(c);
         self
     }
 
+    /// Set the cardinality hint for the claim. Default: [`Cardinality::Functional`].
     pub fn cardinality(mut self, c: Cardinality) -> Self {
         self.cardinality = Some(c);
         self
     }
 
+    /// Override the provenance label. Default: [`ProvenanceLabel::External(ExternalKind::UserAsserted)`].
+    /// Note: the engine enforces `ModelDerived` for model-emitted content regardless of this override.
     pub fn provenance(mut self, p: ProvenanceLabel) -> Self {
         self.provenance = Some(p);
         self
     }
 
+    /// Set the criticality class. Default: [`Criticality::Medium`].
     pub fn criticality(mut self, c: Criticality) -> Self {
         self.criticality = Some(c);
         self
     }
 
+    /// Set the upstream claim refs this fact was derived from (lineage tracking).
     pub fn derived_from(mut self, refs: Vec<ClaimRef>) -> Self {
         self.derived_from = refs;
         self
@@ -607,9 +652,11 @@ pub async fn recall(
         }
         BeliefStatus::TimingUncertain | BeliefStatus::Resolved => {
             let value = bp.primary.as_ref().map(|b| b.fact.value.clone());
-            let detail = bp.primary.as_ref().map(|b| make_detail(b));
+            let detail = bp.primary.as_ref().map(make_detail);
             (value, vec![], detail)
         }
+        // BeliefStatus is #[non_exhaustive] — future variants treated as NoBelief.
+        _ => (None, vec![], None),
     };
 
     let currency = bp.currency.clone();
@@ -752,7 +799,7 @@ mod tests {
                 assert!(hint.contains("YYYY"));
                 assert!(!hint.contains("premature end of input"));
             }
-            other => panic!("expected UnparsableDate, got {:?}", other),
+            other => panic!("expected UnparsableDate, got {other:?}"),
         }
     }
 

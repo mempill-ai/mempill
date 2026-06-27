@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! ExtractorPort — stochastic proposer port.
 //!
 //! Host-implemented. `extract()` returns proposals only.

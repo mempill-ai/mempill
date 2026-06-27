@@ -6,16 +6,23 @@ use crate::time::TransactionTime;
 /// A directed edge between two claims.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClaimEdge {
+    /// Unique ID for this edge (random UUID, minted at write time).
     pub edge_id: uuid::Uuid,
+    /// The agent that owns both claims in this edge.
     pub agent_id: AgentId,
+    /// The source claim of the directed edge.
     pub from_claim: ClaimRef,
+    /// The target claim of the directed edge.
     pub to_claim: ClaimRef,
+    /// The semantic relationship this edge represents.
     pub kind: EdgeKind,
+    /// When this edge was recorded.
     pub created_at: TransactionTime,
 }
 
 /// The semantic relationship carried by a ClaimEdge.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum EdgeKind {
     /// `from_claim` was derived from `to_claim` (lineage tracking for provenance depth).
     DerivedFrom,

@@ -424,8 +424,7 @@ async fn g1e_supersession_determinism_across_fresh_engine_instances() {
         assert_eq!(
             primary_ref_engine2, primary_ref_engine1,
             "G1e: primary claim_ref MUST be identical across fresh engine instances \
-             (same supersession result persisted). Engine1={:?}, Engine2={:?}",
-            primary_ref_engine1, primary_ref_engine2
+             (same supersession result persisted). Engine1={primary_ref_engine1:?}, Engine2={primary_ref_engine2:?}"
         );
 
         assert_eq!(

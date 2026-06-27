@@ -150,18 +150,16 @@ async fn scenario_queued_before_submit_must_surface_contested() {
     let alt_vals: Vec<_> = qr.belief.alternatives.iter().map(|b| b.fact.value.clone()).collect();
 
     println!(
-        "[QUEUED] status={:?} primary={:?} alternatives={:?}",
-        status, primary_val, alt_vals
+        "[QUEUED] status={status:?} primary={primary_val:?} alternatives={alt_vals:?}"
     );
 
     // MUST be Contested (I7, contested-surfacing principle).
     assert_eq!(
         *status, BeliefStatus::Contested,
         "QUEUED: query_memory BEFORE submit MUST return Contested. \
-         Got {:?}. If this is TimingUncertain or Resolved with only 'bob', \
+         Got {status:?}. If this is TimingUncertain or Resolved with only 'bob', \
          the heavy-path supersession at ingest incorrectly bounded alice before \
-         the oracle could respond — violating the contested-surfacing principle.",
-        status
+         the oracle could respond — violating the contested-surfacing principle."
     );
 
     // Must NOT silently surface only "bob" (challenger) as the winner.
@@ -210,31 +208,28 @@ async fn scenario_affirm_surfaces_challenger_bob() {
     let alt_vals: Vec<_> = qr.belief.alternatives.iter().map(|b| b.fact.value.clone()).collect();
 
     println!(
-        "[AFFIRM] status={:?} primary={:?} alternatives={:?}",
-        status, primary_val, alt_vals
+        "[AFFIRM] status={status:?} primary={primary_val:?} alternatives={alt_vals:?}"
     );
 
     // After Affirm: must NOT be Contested.
     assert_ne!(*status, BeliefStatus::Contested,
-        "AFFIRM: after Affirm verdict, must NOT be Contested. Got {:?}.", status);
+        "AFFIRM: after Affirm verdict, must NOT be Contested. Got {status:?}.");
     assert_ne!(*status, BeliefStatus::NoBelief,
-        "AFFIRM: after Affirm verdict, must NOT be NoBelief. Got {:?}.", status);
+        "AFFIRM: after Affirm verdict, must NOT be NoBelief. Got {status:?}.");
 
     // The surfaced primary must be "bob" (challenger wins).
     let surfaced_bob = primary_val == Some(serde_json::json!("bob"))
         || alt_vals.contains(&serde_json::json!("bob"));
     assert!(surfaced_bob,
         "AFFIRM: query_memory MUST surface 'bob' (challenger) as the belief after Affirm. \
-         Got status={:?}, primary={:?}, alternatives={:?}",
-        status, primary_val, alt_vals);
+         Got status={status:?}, primary={primary_val:?}, alternatives={alt_vals:?}");
 
     // "alice" must NOT be visible (incumbent was superseded).
     let surfaced_alice = primary_val == Some(serde_json::json!("alice"))
         || alt_vals.contains(&serde_json::json!("alice"));
     assert!(!surfaced_alice,
         "AFFIRM: 'alice' (incumbent) must NOT be surfaced after Affirm. \
-         Got status={:?}, primary={:?}, alternatives={:?}",
-        status, primary_val, alt_vals);
+         Got status={status:?}, primary={primary_val:?}, alternatives={alt_vals:?}");
 }
 
 // ── Scenario 3: DENY — incumbent "alice" stands (the suspected bug) ──────────
@@ -294,8 +289,7 @@ async fn scenario_deny_surfaces_incumbent_alice() {
     let alt_vals: Vec<_> = qr.belief.alternatives.iter().map(|b| b.fact.value.clone()).collect();
 
     println!(
-        "[DENY] status={:?} primary={:?} alternatives={:?}",
-        status, primary_val, alt_vals
+        "[DENY] status={status:?} primary={primary_val:?} alternatives={alt_vals:?}"
     );
     println!(
         "[DENY] alice_claim_ref={} bob_claim_ref={}",
@@ -308,31 +302,29 @@ async fn scenario_deny_surfaces_incumbent_alice() {
 
     assert!(surfaced_alice,
         "DENY BUG: query_memory MUST surface 'alice' (incumbent stands after Deny). \
-         Got status={:?}, primary={:?}, alternatives={:?}. \
+         Got status={status:?}, primary={primary_val:?}, alternatives={alt_vals:?}. \
          ROOT CAUSE: heavy-path supersession at ingest already bounded alice with \
          ValidityAssertion::Bound + Superseded ledger entry. After Deny, no reinstatement \
          (Reopen) is written for alice. The fold excludes bounded+Superseded claims. \
          Result: NoBelief instead of alice. Fix: either (a) write Reopen for alice in Deny \
          path, or (b) do NOT run supersession during ingest when oracle is present \
-         (keep incumbent CommittedCheap until oracle resolves).",
-        status, primary_val, alt_vals);
+         (keep incumbent CommittedCheap until oracle resolves).");
 
     // Must NOT be Contested (oracle resolved with Deny = clear winner).
     assert_ne!(*status, BeliefStatus::Contested,
-        "DENY: after Deny verdict, must NOT remain Contested. Got {:?}.", status);
+        "DENY: after Deny verdict, must NOT remain Contested. Got {status:?}.");
 
     // Must NOT be NoBelief.
     assert_ne!(*status, BeliefStatus::NoBelief,
         "DENY: after Deny verdict, MUST NOT return NoBelief. \
          'alice' (incumbent) was confirmed by oracle Deny but is not surfaced. \
-         Got status={:?}, primary={:?}, alternatives={:?}",
-        status, primary_val, alt_vals);
+         Got status={status:?}, primary={primary_val:?}, alternatives={alt_vals:?}");
 
     // "bob" must NOT be surfaced (challenger was superseded by Deny).
     let surfaced_bob = primary_val == Some(serde_json::json!("bob"))
         || alt_vals.contains(&serde_json::json!("bob"));
     assert!(!surfaced_bob,
-        "DENY: 'bob' (challenger) MUST NOT be surfaced after Deny. Got {:?}", status);
+        "DENY: 'bob' (challenger) MUST NOT be surfaced after Deny. Got {status:?}");
 }
 
 // ── Scenario 4: UNKNOWN — oracle abstains, must stay Contested ───────────────
@@ -377,18 +369,16 @@ async fn scenario_unknown_surfaces_contested_both_visible() {
     let alt_vals: Vec<_> = qr.belief.alternatives.iter().map(|b| b.fact.value.clone()).collect();
 
     println!(
-        "[UNKNOWN] status={:?} primary={:?} alternatives={:?}",
-        status, primary_val, alt_vals
+        "[UNKNOWN] status={status:?} primary={primary_val:?} alternatives={alt_vals:?}"
     );
 
     // After Unknown: must be Contested.
     assert_eq!(
         *status, BeliefStatus::Contested,
         "UNKNOWN: after Unknown verdict (oracle abstains), query_memory MUST return Contested. \
-         Got {:?}. If this is TimingUncertain/'bob' only, the ingest-time Bound assertion \
+         Got {status:?}. If this is TimingUncertain/'bob' only, the ingest-time Bound assertion \
          on alice is excluding the incumbent from live_claims. The Unknown verdict writes \
-         Contested to both, but the Bound assertion is never removed.",
-        status
+         Contested to both, but the Bound assertion is never removed."
     );
 
     // Both values must be surfaced.
@@ -399,10 +389,10 @@ async fn scenario_unknown_surfaces_contested_both_visible() {
 
     assert!(surfaced_alice,
         "UNKNOWN: 'alice' (incumbent) MUST be visible in Contested projection. \
-         Got primary={:?}, alternatives={:?}", primary_val, alt_vals);
+         Got primary={primary_val:?}, alternatives={alt_vals:?}");
     assert!(surfaced_bob,
         "UNKNOWN: 'bob' (challenger) MUST be visible in Contested projection. \
-         Got primary={:?}, alternatives={:?}", primary_val, alt_vals);
+         Got primary={primary_val:?}, alternatives={alt_vals:?}");
 }
 
 // ── Scenario 5: B11-ABSENT — oracle absent regression ────────────────────────
@@ -467,14 +457,13 @@ async fn scenario_b11_absent_oracle_surfaces_contested() {
     let alt_vals: Vec<_> = qr.belief.alternatives.iter().map(|b| b.fact.value.clone()).collect();
 
     println!(
-        "[B11-ABSENT] status={:?} primary={:?} alternatives={:?}",
-        status, primary_val, alt_vals
+        "[B11-ABSENT] status={status:?} primary={primary_val:?} alternatives={alt_vals:?}"
     );
 
     assert_eq!(
         *status, BeliefStatus::Contested,
         "B11-ABSENT: query_memory after oracle-absent contradiction MUST return Contested. \
-         Got {:?}.", status
+         Got {status:?}."
     );
 
     let surfaced_alice = primary_val == Some(serde_json::json!("alice"))
@@ -484,8 +473,8 @@ async fn scenario_b11_absent_oracle_surfaces_contested() {
 
     assert!(surfaced_alice,
         "B11-ABSENT: 'alice' MUST be visible in Contested projection. \
-         Got primary={:?}, alternatives={:?}", primary_val, alt_vals);
+         Got primary={primary_val:?}, alternatives={alt_vals:?}");
     assert!(surfaced_bob,
         "B11-ABSENT: 'bob' MUST be visible in Contested projection. \
-         Got primary={:?}, alternatives={:?}", primary_val, alt_vals);
+         Got primary={primary_val:?}, alternatives={alt_vals:?}");
 }

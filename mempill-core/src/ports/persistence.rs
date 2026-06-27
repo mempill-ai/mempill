@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! PersistencePort — INSERT-only, agent_id-first persistence abstraction.
 //!
 //! All methods take `agent_id` as the primary parameter (not a filter).
