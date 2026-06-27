@@ -260,6 +260,7 @@ async fn i9_engine_two_non_conflicting_ingests_leave_no_phantom_rows() {
         subject: "session".into(),
         predicate: "start_time".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query start_time must succeed");
 
     let q2 = engine.query_memory(QueryMemoryRequest {
@@ -267,6 +268,7 @@ async fn i9_engine_two_non_conflicting_ingests_leave_no_phantom_rows() {
         subject: "session".into(),
         predicate: "user_id".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query user_id must succeed");
 
     let primary1 = q1.belief.primary.as_ref()
@@ -394,6 +396,7 @@ async fn i9_heavypath_supersession_commits_atomically() {
         subject: "user".into(),
         predicate: "email".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query after B11 Contested ingest must succeed");
 
     assert_eq!(

@@ -129,6 +129,7 @@ async fn test1_temporal_succession_non_overlapping_valid_time() {
         subject: "acme".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query must succeed");
 
     println!(
@@ -167,6 +168,7 @@ async fn test1_temporal_succession_non_overlapping_valid_time() {
         subject: "acme".into(),
         predicate: "ceo".into(),
         as_of_tx_time: Some(past_instant),
+        valid_at: None,
     }).await.expect("past query must succeed");
 
     println!(
@@ -257,6 +259,7 @@ async fn test2_genuine_conflict_overlapping_validity_contested() {
         subject: "acme".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query must succeed");
 
     let all_values: Vec<_> = qr.belief.primary.iter()
@@ -380,6 +383,7 @@ async fn test3_acid_scenario_review_verdict() {
             subject: "patient".into(),
             predicate: "allergy".into(),
             as_of_tx_time: None,
+        valid_at: None,
         }).await.expect("query must succeed");
 
         assert_eq!(qr.belief.status, BeliefStatus::Contested);
@@ -443,6 +447,7 @@ async fn test3_acid_scenario_review_verdict() {
             subject: "user".into(),
             predicate: "email".into(),
             as_of_tx_time: None,
+        valid_at: None,
         }).await.expect("query must succeed");
 
         assert_eq!(qr.belief.status, BeliefStatus::Contested);

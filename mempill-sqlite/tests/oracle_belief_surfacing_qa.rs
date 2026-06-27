@@ -105,6 +105,7 @@ fn query_req(agent: &AgentId) -> QueryMemoryRequest {
         subject: "acme".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }
 }
 
@@ -450,6 +451,7 @@ async fn scenario_b11_absent_oracle_surfaces_contested() {
         subject: "acme".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query must succeed");
 
     let status = &qr.belief.status;

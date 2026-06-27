@@ -64,6 +64,7 @@ fn query_req(agent_id: AgentId, subject: &str, predicate: &str) -> QueryMemoryRe
         subject: subject.into(),
         predicate: predicate.into(),
         as_of_tx_time: None,
+        valid_at: None,
     }
 }
 
@@ -392,6 +393,7 @@ async fn g1e_supersession_determinism_across_fresh_engine_instances() {
             subject: "profile".into(),
             predicate: "status".into(),
             as_of_tx_time: None,
+        valid_at: None,
         }).await.expect("G1e: query on engine1 must succeed");
 
         belief_status_engine1 = q1.belief.status.clone();
@@ -411,6 +413,7 @@ async fn g1e_supersession_determinism_across_fresh_engine_instances() {
             subject: "profile".into(),
             predicate: "status".into(),
             as_of_tx_time: None,
+        valid_at: None,
         }).await.expect("G1e: query on engine2 must succeed");
 
         assert_eq!(

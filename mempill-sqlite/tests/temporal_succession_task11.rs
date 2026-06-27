@@ -97,6 +97,7 @@ async fn succession_now() {
         subject: "acme".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.unwrap();
 
     println!("[succession_now] status={:?}, primary={:?}", qr.belief.status,
@@ -158,6 +159,7 @@ async fn succession_past_instant() {
         subject: "widget".into(),
         predicate: "owner".into(),
         as_of_tx_time: Some(dt("2022-06-01T00:00:00Z")),
+        valid_at: None,
     }).await.unwrap();
 
     println!("[succession_past_instant] status={:?}, primary={:?}",
@@ -225,6 +227,7 @@ async fn succession_boundary() {
         subject: "corp".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.unwrap();
 
     assert_eq!(qr.belief.status, BeliefStatus::Resolved, "boundary: NOW selects Bob");
@@ -281,6 +284,7 @@ async fn succession_gap() {
         subject: "firm".into(),
         predicate: "cfo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.unwrap();
 
     assert_eq!(qr_now.belief.status, BeliefStatus::Resolved, "NOW in Bob's window → Resolved");
@@ -350,6 +354,7 @@ async fn succession_n_chain() {
         subject: "org".into(),
         predicate: "cto".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.unwrap();
 
     assert_eq!(qr.belief.status, BeliefStatus::Resolved, "3-chain: NOW → Resolved");
@@ -402,6 +407,7 @@ async fn overlapping_is_conflict() {
         subject: "bank".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.unwrap();
 
     assert_eq!(qr.belief.status, BeliefStatus::Contested,
@@ -453,6 +459,7 @@ async fn low_confidence_is_conflict() {
         subject: "startup".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.unwrap();
 
     assert_eq!(qr.belief.status, BeliefStatus::Contested,
@@ -503,6 +510,7 @@ async fn no_valid_time_regression() {
         subject: "co".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.unwrap();
 
     assert_eq!(qr.belief.status, BeliefStatus::Contested,

@@ -150,6 +150,7 @@ fn run_succession_scenario(conn_str: &str) {
                 subject: "acme".into(),
                 predicate: "ceo".into(),
                 as_of_tx_time: None,
+        valid_at: None,
             }).await.map_err(|e| format!("query NOW failed: {e}"))?;
 
             println!("[PG SUCC] query NOW → status={:?}, primary={:?}",
@@ -181,6 +182,7 @@ fn run_succession_scenario(conn_str: &str) {
                 subject: "acme".into(),
                 predicate: "ceo".into(),
                 as_of_tx_time: Some(dt("2022-06-01T00:00:00Z")),
+        valid_at: None,
             }).await.map_err(|e| format!("query as_of 2022 failed: {e}"))?;
 
             println!("[PG SUCC] query as_of 2022-06-01 → status={:?}, primary={:?}",
@@ -213,6 +215,7 @@ fn run_succession_scenario(conn_str: &str) {
                 subject: "acme".into(),
                 predicate: "ceo".into(),
                 as_of_tx_time: Some(boundary),
+        valid_at: None,
             }).await.map_err(|e| format!("query at boundary failed: {e}"))?;
 
             println!("[PG SUCC] query at boundary 2024-03-01 → status={:?}, primary={:?}",

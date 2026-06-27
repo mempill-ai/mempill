@@ -129,6 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             subject: "acme".into(),
             predicate: "ceo".into(),
             as_of_tx_time: None,
+        valid_at: None,
         })
         .await?;
 
@@ -247,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             subject: "globex".into(),
             predicate: "ceo".into(),
             as_of_tx_time: None, // None = use current time
+        valid_at: None,
         })
         .await?;
 
@@ -284,6 +286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             subject: "globex".into(),
             predicate: "ceo".into(),
             as_of_tx_time: Some(parse_dt("2022-06-01T00:00:00Z")),
+        valid_at: None,
         })
         .await?;
 

@@ -186,6 +186,7 @@ async fn history_current_agrees_with_query_memory() {
             subject: "qa-org".into(),
             predicate: "leader".into(),
             as_of_tx_time: None,
+        valid_at: None,
         })
         .await
         .expect("query_memory must succeed");
@@ -295,6 +296,7 @@ async fn query_memory_unchanged_by_history_wave() {
             subject: "regression".into(),
             predicate: "check".into(),
             as_of_tx_time: None,
+        valid_at: None,
         })
         .await
         .expect("query_memory must succeed");

@@ -68,6 +68,12 @@ where
         let latest_disposition = build_latest_disposition_map(&all_ledger);
 
         // C2: canonical valid-time fold (with disposition filter).
+        //
+        // D2 independence: `as_of` drives transaction-time visibility (which claims/assertions
+        // are visible). `req.valid_at` is the independent valid-time axis — it narrows the
+        // live set to the single claim whose valid-time window contains the instant, AFTER
+        // the tx-time filter. When `req.valid_at` is `None`, backward-compatible behaviour
+        // is preserved: the fold uses `as_of` for both axes.
         let fold = truth_engine::fold(
             claims.clone(),
             |cref| {
@@ -76,7 +82,7 @@ where
                     .unwrap_or_default()
             },
             as_of,
-            None, // valid_at_instant: None = use as_of_tx_time for instant-selection (future wave adds query param)
+            req.valid_at, // D2: independent valid-time axis; None = backward-compatible
             &self.config,
             &latest_disposition,
         );
@@ -199,6 +205,7 @@ mod tests {
             subject: "user".into(),
             predicate: "city".into(),
             as_of_tx_time: None,
+        valid_at: None,
         };
         let resp = uc.execute_with_time(req, now).unwrap();
         assert_eq!(resp.belief.status, BeliefStatus::NoBelief);
@@ -222,6 +229,7 @@ mod tests {
             subject: "user".into(),
             predicate: "city".into(),
             as_of_tx_time: None,
+        valid_at: None,
         };
         let resp = uc.execute_with_time(req, now).unwrap();
         // Single live claim with unknown valid_time → TimingUncertain (valid_time is None).
@@ -257,6 +265,7 @@ mod tests {
             subject: "user".into(),
             predicate: "job".into(),
             as_of_tx_time: None,
+        valid_at: None,
         };
         let resp_near = uc.execute_with_time(req.clone(), near_now).unwrap();
         assert!(resp_near.belief.primary.is_some());

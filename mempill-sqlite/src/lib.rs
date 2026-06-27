@@ -231,6 +231,7 @@ mod tests {
             subject: "user".into(),
             predicate: "city".into(),
             as_of_tx_time: None,
+        valid_at: None,
         };
         let query_resp = engine.query_memory(query_req).await
             .expect("query must succeed");
