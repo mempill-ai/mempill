@@ -72,6 +72,7 @@ Key properties:
 | `mempill` facade crate | ✅ Shipped | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
 | Bi-temporal history read (`query_history` / `history()`) | ✅ Shipped | Full claim timeline of a subject line — values, effective valid-time windows, `Current`/`Superseded` status |
 | Valid-time as-of query (`valid_at`) | ⏳ Planned (v0.3) | Point-in-time recall ("who was CEO in 2021?"); `as_of_tx_time` is transaction-time only today |
+| Date precision / granularity | ⏳ Planned (v0.3) | Partial dates (`2020-03`) normalize to the start of the period (`2020-03-01`); the filled day is a placeholder, not asserted precision — granularity-aware valid-time is planned |
 | Vector search / VectorPort | ⏳ Planned | Structural seam exists (NoOp); no vector retrieval yet |
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
