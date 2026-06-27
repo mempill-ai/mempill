@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Adjudication Gate — the deterministic pure function at the stochastic/deterministic boundary.
 //!
 //! Replay-audit invariant: same `Proposal` + same `EngineConfig` → byte-identical `GateDecision`.
@@ -63,7 +64,7 @@ pub(crate) enum Route {
     /// Non-conflicting External(*) → CommittedCheap.
     CheapPath,
     /// ModelDerived → CommittedInferred (down-weighted; cannot overturn until anchored to first-hand external).
-    InferredRoute,
+    Inferred,
     /// RecallReEntry → corroborate-by-identity; no new claim.
     RecallTainted,
     /// Belief-overturning → async adjudication (QueuedForAdjudication or Contested).
@@ -81,7 +82,7 @@ pub(crate) enum Route {
 /// Decision order (execute in this order; return on first match):
 /// 1. RecallReEntry    → RecallTainted / CommittedCheap
 /// 2. Temporal coherence check → Quarantine if incoherent
-/// 3. ModelDerived     → InferredRoute / CommittedInferred
+/// 3. ModelDerived     → Inferred / CommittedInferred
 /// 4. No conflict or no incumbent → CheapPath / CommittedCheap
 /// 5. Heavy path with oracle-absent branching
 pub(crate) fn adjudicate(proposal: &Proposal, config: &EngineConfig) -> GateDecision {
@@ -110,7 +111,7 @@ pub(crate) fn adjudicate(proposal: &Proposal, config: &EngineConfig) -> GateDeci
     // Step 3: ModelDerived → down-weighted, never overturns (V3-4).
     if *proposal.candidate.provenance() == ProvenanceLabel::ModelDerived {
         return GateDecision {
-            route: Route::InferredRoute,
+            route: Route::Inferred,
             disposition: Disposition::CommittedInferred,
             rationale: serde_json::json!({
                 "route": "inferred",
@@ -546,10 +547,10 @@ mod tests {
 
     #[test]
     fn cheap_path_requires_external_provenance() {
-        // ModelDerived is NOT cheap-path eligible — must take InferredRoute.
+        // ModelDerived is NOT cheap-path eligible — must take Inferred.
         let proposal = no_conflict_proposal(model_derived_claim());
         let decision = adjudicate(&proposal, &config());
-        assert_eq!(decision.route, Route::InferredRoute);
+        assert_eq!(decision.route, Route::Inferred);
         assert_eq!(decision.disposition, Disposition::CommittedInferred);
         assert_ne!(decision.route, Route::CheapPath);
     }
@@ -787,7 +788,7 @@ mod adversarial {
             let d1 = adjudicate(&proposal, &cfg());
             let d2 = adjudicate(&proposal, &cfg());
             assert_eq!(d1.rationale.to_string(), d2.rationale.to_string(),
-                "rationale non-deterministic for {:?}", conflict_type);
+                "rationale non-deterministic for {conflict_type:?}");
         }
     }
 
@@ -965,7 +966,7 @@ mod adversarial {
     }
 
     /// Attack: ModelDerived with an incoherent temporal window.
-    /// Step 2 (temporal) fires BEFORE Step 3 (ModelDerived). Must quarantine, not InferredRoute.
+    /// Step 2 (temporal) fires BEFORE Step 3 (ModelDerived). Must quarantine, not Inferred.
     #[test]
     fn p2_model_derived_with_incoherent_window_is_quarantined_not_inferred() {
         let tx = tx_at(2026, 1, 1);
@@ -992,8 +993,8 @@ mod adversarial {
         let d = adjudicate(&proposal, &cfg());
         assert_eq!(d.route, Route::Quarantine,
             "ModelDerived with incoherent temporal window must quarantine (step 2 before step 3)");
-        assert_ne!(d.route, Route::InferredRoute,
-            "incoherent ModelDerived must NOT silently route to InferredRoute");
+        assert_ne!(d.route, Route::Inferred,
+            "incoherent ModelDerived must NOT silently route to Inferred");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1112,13 +1113,13 @@ mod adversarial {
             };
             let d = adjudicate(&proposal, &cfg());
             assert_ne!(d.disposition, Disposition::Contested,
-                "oracle_present=true must NEVER produce Contested (B11b); fired for {:?}", conflict_type);
+                "oracle_present=true must NEVER produce Contested (B11b); fired for {conflict_type:?}");
         }
     }
 
     /// Attack: ModelDerived + SameLineConflict + oracle absent.
     /// ModelDerived is caught at Step 3, BEFORE Step 5 (heavy path).
-    /// ModelDerived routes to InferredRoute at Step 3, before the oracle-absent contradiction path.
+    /// ModelDerived routes to Inferred at Step 3, before the oracle-absent contradiction path.
     #[test]
     fn p3_model_derived_conflict_oracle_absent_routes_to_inferred_not_contested() {
         let claim = model_claim();
@@ -1131,7 +1132,7 @@ mod adversarial {
             oracle_present: false,
         };
         let d = adjudicate(&proposal, &cfg());
-        assert_eq!(d.route, Route::InferredRoute,
+        assert_eq!(d.route, Route::Inferred,
             "ModelDerived is caught at step 3 before step 5; heavy path must not fire");
         assert_ne!(d.disposition, Disposition::Contested,
             "ModelDerived must NEVER produce Contested (V3-4)");
@@ -1269,7 +1270,7 @@ mod adversarial {
                 let valid = matches!(
                     d.route,
                     Route::CheapPath
-                        | Route::InferredRoute
+                        | Route::Inferred
                         | Route::RecallTainted
                         | Route::HeavyPath
                         | Route::Quarantine
@@ -1307,7 +1308,7 @@ mod adversarial {
             let d = adjudicate(&proposal, &cfg());
             let valid = matches!(
                 d.route,
-                Route::CheapPath | Route::InferredRoute | Route::RecallTainted | Route::HeavyPath | Route::Quarantine
+                Route::CheapPath | Route::Inferred | Route::RecallTainted | Route::HeavyPath | Route::Quarantine
             );
             assert!(valid, "invalid route for provenance {:?}: {:?}", prov, d.route);
         }

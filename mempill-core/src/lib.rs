@@ -24,6 +24,8 @@
 //! uses `tokio::sync` primitives (Mutex/RwLock) because the lock map is acquired by async
 //! Tokio tasks — this is the lock layer, not the domain layer.
 
+#![warn(missing_docs)]
+
 pub mod application;
 pub mod config;
 pub mod engine_handle;

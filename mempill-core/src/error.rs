@@ -11,40 +11,73 @@ use mempill_types::{AgentId, ClaimRef};
 #[derive(Debug, Error)]
 pub enum MemError {
     // ── STRUCTURAL WRITE REJECTIONS (Disposition::Rejected) ──────────────────
+    /// Provenance label is absent on the write request.
     #[error("Missing or untyped provenance on write: claim cannot be committed without a provenance label")]
     MissingProvenance,
 
+    /// The caller does not hold write authority for the specified `agent_id`.
     #[error("Caller does not hold write authority for agent_id {agent_id:?}")]
-    WriteAuthorityViolation { agent_id: AgentId },
+    WriteAuthorityViolation {
+        /// The agent ID that the caller attempted to write on behalf of.
+        agent_id: AgentId,
+    },
 
+    /// The fact payload is structurally invalid (empty subject, invalid JSON, etc.).
     #[error("Malformed fact: {reason}")]
-    MalformedFact { reason: String },
+    MalformedFact {
+        /// Human-readable description of the malformation.
+        reason: String,
+    },
 
+    /// The supplied `agent_id` is not recognised by the engine.
     #[error("Unknown or invalid agent_id: {agent_id:?}")]
-    UnknownAgentId { agent_id: AgentId },
+    UnknownAgentId {
+        /// The unrecognised agent ID.
+        agent_id: AgentId,
+    },
 
+    /// The referenced claim does not exist in the store.
     #[error("Claim not found: {claim_ref:?}")]
-    ClaimNotFound { claim_ref: ClaimRef },
+    ClaimNotFound {
+        /// The claim reference that was not found.
+        claim_ref: ClaimRef,
+    },
 
     // ── CONCURRENCY ───────────────────────────────────────────────────────────
+    /// Single-writer-per-agent-id invariant violated: the write lock is already held.
     #[error("Write lock for agent_id {agent_id:?} is already held (single-writer-per-agent-id violation)")]
-    WriteLockContention { agent_id: AgentId },
+    WriteLockContention {
+        /// The agent ID whose write lock is already held.
+        agent_id: AgentId,
+    },
 
     // ── ASYNC / SPAWN_BLOCKING BRIDGE ─────────────────────────────────────────
     /// Returned when a `tokio::task::spawn_blocking` call fails to join at the EngineHandle async boundary.
     #[error("spawn_blocking task failed: {reason}")]
-    SpawnBlocking { reason: String },
+    SpawnBlocking {
+        /// Description of the join error.
+        reason: String,
+    },
 
     // ── INVARIANT VIOLATIONS (bugs — should never occur in correct impl) ──────
+    /// Partial write detected — atomic commit unit invariant violated.
     #[error("Atomic commit unit violated: partial write detected for agent_id {agent_id:?}")]
-    AtomicCommitViolation { agent_id: AgentId },
+    AtomicCommitViolation {
+        /// The agent ID for which the partial write was detected.
+        agent_id: AgentId,
+    },
 
+    /// Belief changed between reads without an intervening write — fixed-history monotonicity violated.
     #[error(
         "Fixed-history monotonicity violated: belief changed between reads without an intervening write \
          for agent_id {agent_id:?}"
     )]
-    MonotonicityViolation { agent_id: AgentId },
+    MonotonicityViolation {
+        /// The agent ID for which monotonicity was violated.
+        agent_id: AgentId,
+    },
 
+    /// Materialized belief cache disagrees with the canonical fold result.
     #[error(
         "Belief cache inconsistency: materialized belief cache disagrees with canonical fold \
          (cache must be subordinate)"
@@ -52,42 +85,66 @@ pub enum MemError {
     BeliefCacheInconsistency,
 
     // ── TEMPORAL COHERENCE ────────────────────────────────────────────────────
+    /// `valid_time_start` is after `valid_time_end`.
     #[error(
         "Temporal coherence failure: valid_time_start ({start}) is after valid_time_end ({end})"
     )]
-    IncoherentTemporalWindow { start: String, end: String },
+    IncoherentTemporalWindow {
+        /// The valid-time start (RFC3339).
+        start: String,
+        /// The valid-time end (RFC3339).
+        end: String,
+    },
 
     // ── PERSISTENCE ───────────────────────────────────────────────────────────
+    /// Underlying persistence adapter returned an error.
     #[error("Persistence error: {source}")]
     Persistence {
+        /// The wrapped persistence error.
         #[from]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
+    /// SQLite PRAGMA initialization failed (WAL, FULL sync, foreign keys).
     #[error("SQLite PRAGMA initialization failed: {reason}")]
-    PragmaInitFailed { reason: String },
+    PragmaInitFailed {
+        /// Description of the PRAGMA failure.
+        reason: String,
+    },
 
     // ── ORACLE PORT ───────────────────────────────────────────────────────────
     /// Oracle port returned an error during `request_adjudication` or another oracle call site.
     /// Use `OracleError { reason: e.to_string() }` — string-reason convention is consistent
     /// across all non-persistence, non-internal error variants.
     #[error("Oracle port error: {reason}")]
-    OracleError { reason: String },
+    OracleError {
+        /// Description of the oracle error.
+        reason: String,
+    },
 
     /// Pending-adjudication store error from insert_pending or mark_resolved.
     #[error("Pending-adjudication store error: {source}")]
     PendingStore {
+        /// The wrapped pending-store error.
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
+    /// The adjudication handle is unknown, expired, or has already been resolved.
     #[error("Adjudication handle not found: {handle_id}")]
-    AdjudicationHandleNotFound { handle_id: uuid::Uuid },
+    AdjudicationHandleNotFound {
+        /// The handle UUID that was not found.
+        handle_id: uuid::Uuid,
+    },
 
     // ── CONFIGURATION ─────────────────────────────────────────────────────────
+    /// An engine calibration parameter has an invalid value.
     #[error("Engine calibration parameter invalid: {param} = {value}: {reason}")]
     ConfigurationError {
+        /// The parameter name.
         param: String,
+        /// The invalid value.
         value: String,
+        /// Why the value is invalid.
         reason: String,
     },
 }
@@ -197,7 +254,7 @@ mod tests {
     #[test]
     fn mem_error_is_debug() {
         let e = MemError::MissingProvenance;
-        let s = format!("{:?}", e);
+        let s = format!("{e:?}");
         assert!(s.contains("MissingProvenance"));
     }
 }

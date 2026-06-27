@@ -11,8 +11,11 @@ use crate::time::{TransactionTime, ValidTime};
 /// The atomic asserted statement: a (subject, predicate, value) triple.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Fact {
+    /// The entity being described (e.g. `"user"`, `"acme:ceo"`).
     pub subject: String,
+    /// The aspect being asserted (e.g. `"city"`, `"held_by"`).
     pub predicate: String,
+    /// The asserted value as a JSON value.
     pub value: serde_json::Value,
 }
 
@@ -32,6 +35,10 @@ pub enum Cardinality {
 }
 
 /// Two separate confidence scores: one for the value itself, one for the valid-time extraction.
+///
+/// Note: `Eq` is intentionally not implemented because the inner fields are `f32`,
+/// which does not satisfy the `Eq` contract (`NaN != NaN`). Use `PartialEq` comparisons
+/// with an appropriate epsilon if you need approximate equality in tests.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Confidence {
     /// Confidence in the value itself (0.0–1.0).
@@ -43,8 +50,11 @@ pub struct Confidence {
 /// Criticality class — reflects the importance of the claim, distinct from its freshness (currency).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Criticality {
+    /// Low importance. May be evicted or down-weighted under pressure.
     Low,
+    /// Standard importance. Default for most claims.
     Medium,
+    /// High importance. Errors should be surfaced promptly.
     High,
     /// Safety-relevant (e.g., allergy, medication).
     Critical,
@@ -110,18 +120,31 @@ impl Claim {
 
     // ── Getters (read-only; no setters by design) ─────────────────────────────
 
+    /// Return the stable claim reference (UUID).
     pub fn claim_ref(&self) -> &ClaimRef { &self.claim_ref }
+    /// Return the agent that owns this claim.
     pub fn agent_id(&self) -> &AgentId { &self.agent_id }
+    /// Return the (subject, predicate, value) triple.
     pub fn fact(&self) -> &Fact { &self.fact }
+    /// Return the caller-supplied cardinality hint.
     pub fn cardinality(&self) -> &Cardinality { &self.cardinality }
+    /// Return the provenance label.
     pub fn provenance(&self) -> &ProvenanceLabel { &self.provenance }
+    /// Return the external anchor (source document, URL, etc.).
     pub fn external_anchor(&self) -> &ExternalAnchor { &self.external_anchor }
+    /// Return the transaction time (when the claim was written to the store).
     pub fn transaction_time(&self) -> &TransactionTime { &self.transaction_time }
+    /// Return the valid-time window (when the claim holds in the world).
     pub fn valid_time(&self) -> &ValidTime { &self.valid_time }
+    /// Return the dual confidence scores.
     pub fn confidence(&self) -> &Confidence { &self.confidence }
+    /// Return the criticality class.
     pub fn criticality(&self) -> &Criticality { &self.criticality }
+    /// Return the list of upstream claims this claim was derived from.
     pub fn derived_from(&self) -> &[ClaimRef] { &self.derived_from }
+    /// Return the optional caller-supplied metadata blob.
     pub fn metadata(&self) -> Option<&serde_json::Value> { self.metadata.as_ref() }
+    /// Return the optional snapshot schema version for migration support.
     pub fn snapshot_schema_version(&self) -> Option<u32> { self.snapshot_schema_version }
 }
 

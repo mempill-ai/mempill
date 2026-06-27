@@ -61,6 +61,8 @@ use crate::{
 /// so that both adapters exercise **identical oracle behavior**.
 #[cfg(any(test, feature = "test-support"))]
 pub struct TestOracle {
+    /// The UUID returned by every `request_adjudication` call, allowing callers to predict
+    /// the handle before submitting an adjudication response.
     pub fixed_uuid: uuid::Uuid,
 }
 
@@ -84,6 +86,8 @@ impl OraclePort for TestOracle {
 
 // ── Common request builders ───────────────────────────────────────────────────
 
+/// Builds a minimal `IngestClaimRequest` for `agent` with the given `value`.
+/// All other fields are set to conformance-stable defaults (External/UserAsserted, Functional, High).
 #[cfg(any(test, feature = "test-support"))]
 pub fn ingest_req(agent: &AgentId, value: &str) -> IngestClaimRequest {
     IngestClaimRequest {
@@ -100,6 +104,8 @@ pub fn ingest_req(agent: &AgentId, value: &str) -> IngestClaimRequest {
     }
 }
 
+/// Builds a `QueryMemoryRequest` targeting the fixed `(subject, predicate)` pair used by all
+/// conformance scenarios, scoped to `agent`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn query_req(agent: &AgentId) -> QueryMemoryRequest {
     QueryMemoryRequest {
@@ -203,6 +209,8 @@ pub async fn scenario_affirm_challenger_wins_with_handle<P, O, V>(
 
 // ── Scenario 2: Deny — incumbent stands ──────────────────────────────────────
 
+/// Scenario 2 (Deny): after `AdjudicationVerdict::Deny` the incumbent remains the primary belief
+/// and the challenger is Superseded.  Verifies that `query_memory` surfaces the incumbent value.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn scenario_deny_incumbent_stands<P, O, V>(
     engine: &EngineHandle<P, O, V>,
@@ -249,6 +257,8 @@ pub async fn scenario_deny_incumbent_stands<P, O, V>(
 
 // ── Scenario 3: Unknown — stays Contested ────────────────────────────────────
 
+/// Scenario 3 (Unknown): `AdjudicationVerdict::Unknown` leaves both claims in `Contested` state.
+/// Verifies that a second submit on the now-consumed handle returns `AdjudicationHandleNotFound`.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn scenario_unknown_stays_contested<P, O, V>(
     engine: &EngineHandle<P, O, V>,
@@ -301,8 +311,7 @@ pub async fn scenario_unknown_stays_contested<P, O, V>(
     ).await;
     assert!(
         matches!(second, Err(crate::error::MemError::AdjudicationHandleNotFound { .. })),
-        "conformance[unknown]: second submit on consumed handle must be AdjudicationHandleNotFound; got {:?}",
-        second
+        "conformance[unknown]: second submit on consumed handle must be AdjudicationHandleNotFound; got {second:?}"
     );
 
     // Audit: 2 AdjudicationResolved entries (one per claim).
@@ -325,6 +334,8 @@ pub async fn scenario_unknown_stays_contested<P, O, V>(
 
 // ── Scenario 4: Queued — BEFORE submit surfaces Contested ─────────────────────
 
+/// Scenario 4 (Queued): before any adjudication is submitted, `query_memory` must surface
+/// `BeliefStatus::Contested` for both the incumbent and the queued challenger (invariant I7).
 #[cfg(any(test, feature = "test-support"))]
 pub async fn scenario_queued_surfaces_contested<P, O, V>(
     engine: &EngineHandle<P, O, V>,
@@ -362,6 +373,8 @@ pub async fn scenario_queued_surfaces_contested<P, O, V>(
 
 // ── Scenario 5: Stale handle → AdjudicationHandleNotFound ────────────────────
 
+/// Scenario 5 (Stale handle): submitting adjudication with a random/unknown UUID must return
+/// `MemError::AdjudicationHandleNotFound`, proving the engine rejects phantom handles.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn scenario_stale_handle_not_found<P, O, V>(
     engine: &EngineHandle<P, O, V>,
@@ -378,13 +391,14 @@ pub async fn scenario_stale_handle_not_found<P, O, V>(
     ).await;
     assert!(
         matches!(result, Err(crate::error::MemError::AdjudicationHandleNotFound { .. })),
-        "conformance[stale-handle]: random/unknown handle must return AdjudicationHandleNotFound; got {:?}",
-        result
+        "conformance[stale-handle]: random/unknown handle must return AdjudicationHandleNotFound; got {result:?}"
     );
 }
 
 // ── Scenario 6: Duplicate submit → AdjudicationHandleNotFound ─────────────────
 
+/// Scenario 6 (Duplicate submit): after a successful first submit the handle is consumed;
+/// a second submit with the same `handle_id` must return `MemError::AdjudicationHandleNotFound`.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn scenario_duplicate_submit_not_found<P, O, V>(
     engine: &EngineHandle<P, O, V>,
@@ -410,8 +424,7 @@ pub async fn scenario_duplicate_submit_not_found<P, O, V>(
     let second = engine.submit_adjudication(handle_id, adj_response(handle_id, AdjudicationVerdict::Affirm)).await;
     assert!(
         matches!(second, Err(crate::error::MemError::AdjudicationHandleNotFound { .. })),
-        "conformance[dup]: duplicate submit must return AdjudicationHandleNotFound; got {:?}",
-        second
+        "conformance[dup]: duplicate submit must return AdjudicationHandleNotFound; got {second:?}"
     );
 }
 
@@ -449,8 +462,7 @@ pub async fn scenario_ttl_expiry_reverts_contested<P, O, V>(
     ).await;
     assert!(
         matches!(result, Err(crate::error::MemError::AdjudicationHandleNotFound { .. })),
-        "conformance[ttl]: expired handle must return AdjudicationHandleNotFound; got {:?}",
-        result
+        "conformance[ttl]: expired handle must return AdjudicationHandleNotFound; got {result:?}"
     );
 
     // query_memory must surface Contested[both] after lazy expiry.
@@ -568,9 +580,9 @@ pub async fn scenario_sweep_recovers_orphan<P, O, V>(
         .chain(qr.belief.alternatives.iter().map(|b| b.fact.value.clone()))
         .collect();
     assert!(all_vals.contains(&serde_json::json!("orphan-incumbent")),
-        "conformance[sweep-orphan]: incumbent must be visible; got {:?}", all_vals);
+        "conformance[sweep-orphan]: incumbent must be visible; got {all_vals:?}");
     assert!(all_vals.contains(&serde_json::json!("orphan-challenger")),
-        "conformance[sweep-orphan]: orphaned challenger must be visible; got {:?}", all_vals);
+        "conformance[sweep-orphan]: orphaned challenger must be visible; got {all_vals:?}");
 }
 
 // ── Scenario 9: Durable store survives reopen ─────────────────────────────────
@@ -715,7 +727,7 @@ pub async fn scenario_ledger_entry_expectations<P, O, V>(
     O: OraclePort + Send + Sync + 'static,
     V: crate::ports::VectorPort + Send + Sync + 'static,
 {
-    let label = format!("{:?}", verdict);
+    let label = format!("{verdict:?}");
     let agent = AgentId(format!("conformance-ledger-{label}-agent"));
 
     engine.ingest_claim(ingest_req(&agent, "ledger-incumbent")).await
@@ -743,7 +755,7 @@ pub async fn scenario_ledger_entry_expectations<P, O, V>(
             audit.entries.iter().map(|e| (&e.event_kind, &e.disposition)).collect::<Vec<_>>()
         ));
     assert_eq!(ch_entry.disposition, expected_ch_disposition,
-        "conformance[ledger/{label}]: challenger disposition must be {:?}", expected_ch_disposition);
+        "conformance[ledger/{label}]: challenger disposition must be {expected_ch_disposition:?}");
 }
 
 // ── Scenario 12: B11 oracle-absent → Contested ────────────────────────────────

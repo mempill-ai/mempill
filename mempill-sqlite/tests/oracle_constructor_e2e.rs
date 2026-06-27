@@ -130,7 +130,7 @@ async fn e2e_open_with_oracle_in_memory_affirm_resolution() {
         .map(|b| b.fact.value.clone())
         .unwrap_or(serde_json::Value::Null);
     assert_eq!(primary_val, serde_json::json!("Paris"),
-        "AFTER Affirm: challenger 'Paris' must be the surfaced belief; got {:?}", primary_val);
+        "AFTER Affirm: challenger 'Paris' must be the surfaced belief; got {primary_val:?}");
 }
 
 // ── Test 2: open_with_oracle (file-backed) smoke test ────────────────────────

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! EmbeddingPort and VectorPort — fuzzy candidate coverage and vector persistence seam.
 //!
 //! `EmbeddingPort`: bring-your-own-embedding port for fuzzy candidate lookup.

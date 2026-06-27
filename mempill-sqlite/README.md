@@ -2,7 +2,7 @@
 
 SQLite persistence adapter for mempill (topology-a).
 
-See the [root README](../README.md) for the full architecture, quick start, and invariants.
+See the [repository README](https://github.com/mempill-ai/mempill) for the full architecture, quick start, and invariants.
 
 ## What this crate provides
 
@@ -61,4 +61,4 @@ identical by the shared conformance harness.
 
 ## License
 
-Apache-2.0. See [LICENSE](../LICENSE) for the full text.
+Apache-2.0. See [LICENSE](LICENSE) for the full text.

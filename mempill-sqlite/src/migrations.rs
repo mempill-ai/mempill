@@ -26,6 +26,7 @@ const V2_PENDING_ADJUDICATIONS_SQL: &str = include_str!("schema/v2_pending_adjud
 /// Migration error wrapper.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationError {
+    /// A rusqlite error occurred during schema migration.
     #[error("SQLite error during migration: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }

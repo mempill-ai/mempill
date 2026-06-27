@@ -6,7 +6,7 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 443 Rust + 135 Python tests (+ Postgres integration via `--features`), 0 warnings
+**0.2.0** (not yet published) · Apache-2.0 · MSRV 1.88 · 446 Rust + 135 Python tests (+ Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
 

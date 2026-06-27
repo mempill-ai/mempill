@@ -3,7 +3,7 @@
 The deterministic engine core for mempill — port traits, all 8 engine components,
 use-cases, DTOs, and the async `EngineHandle` entry point.
 
-See the [root README](../README.md) for the full architecture, quick start, and invariants.
+See the [repository README](https://github.com/mempill-ai/mempill) for the full architecture, quick start, and invariants.
 
 ## Crate organization
 
@@ -47,4 +47,4 @@ implementations and expose convenience constructors (`open_default`, `open_postg
 
 ## License
 
-Apache-2.0. See [LICENSE](../LICENSE) for the full text.
+Apache-2.0. See [LICENSE](LICENSE) for the full text.

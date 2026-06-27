@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! AuditUseCase — read-only ledger query.
 //!
 //! Delegates to `engine::audit_ledger::query_ledger`. No Txn opened (read path).

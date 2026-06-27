@@ -55,13 +55,11 @@ async fn concurrent_writes_different_agent_ids_succeed() {
 
     assert!(
         res_a.is_ok(),
-        "agent-alpha write must succeed, got: {:?}",
-        res_a
+        "agent-alpha write must succeed, got: {res_a:?}"
     );
     assert!(
         res_b.is_ok(),
-        "agent-beta write must succeed (was TxnAlreadyOpen before fix), got: {:?}",
-        res_b
+        "agent-beta write must succeed (was TxnAlreadyOpen before fix), got: {res_b:?}"
     );
 }
 
@@ -85,6 +83,6 @@ async fn concurrent_writes_same_agent_id_succeed() {
         engine_b.ingest_claim(req_b),
     );
 
-    assert!(res_a.is_ok(), "same-agent write A must succeed, got: {:?}", res_a);
-    assert!(res_b.is_ok(), "same-agent write B must succeed, got: {:?}", res_b);
+    assert!(res_a.is_ok(), "same-agent write A must succeed, got: {res_a:?}");
+    assert!(res_b.is_ok(), "same-agent write B must succeed, got: {res_b:?}");
 }

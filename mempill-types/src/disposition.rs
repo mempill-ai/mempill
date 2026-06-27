@@ -6,6 +6,7 @@
 /// the engine returns `QueuedForAdjudication` immediately; the final state arrives
 /// asynchronously via the oracle callback.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Disposition {
     /// New non-conflicting first-hand external fact; committed Active at low currency.
     CommittedCheap,
@@ -39,7 +40,9 @@ pub enum Disposition {
 /// the final state arrives asynchronously via the oracle callback.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WriteOutcome {
+    /// Stable reference to the committed (or rejected) claim.
     pub claim_ref: crate::identity::ClaimRef,
+    /// The synchronous disposition assigned by the engine on this write.
     pub disposition: Disposition,
     /// Populated when disposition is Contested or PendingConflict.
     pub contested_with: Vec<crate::identity::ClaimRef>,

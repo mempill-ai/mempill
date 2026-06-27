@@ -83,6 +83,8 @@ pub(crate) fn compute_staleness(
                 reason: Some("aging unconfirmed: asserted long ago, not yet reconfirmed".into()),
             },
             CurrencyState::Fresh => fold_staleness(fold),
+            // CurrencyState is #[non_exhaustive] — future variants treated as Fresh.
+            _ => fold_staleness(fold),
         }
     } else {
         fold_staleness(fold)

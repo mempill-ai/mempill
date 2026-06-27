@@ -11,7 +11,7 @@
 //!   - `open_with_oracle`   — open a file-backed engine wired to a Python oracle
 //!   - `open_with_oracle_in_memory` — open an in-memory engine wired to a Python oracle
 //!   - Exception types:  `MempillError`, `ValidationError`, `NotFoundError`,
-//!                       `ConflictError`, `StorageError`, `ConfigError`, `InternalError`
+//!     `ConflictError`, `StorageError`, `ConfigError`, `InternalError`
 
 mod engine;
 mod errors;

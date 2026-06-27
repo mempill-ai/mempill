@@ -12,12 +12,12 @@
 //! - `claim`       — [`Claim`], [`Fact`], [`Cardinality`], [`Confidence`], [`Criticality`]
 //! - `disposition` — [`Disposition`] (12-state model)
 //! - `belief`      — [`BeliefProjection`], [`Belief`], [`CurrencySignal`], [`CurrencyState`],
-//!                   [`BeliefStatus`], [`StalenessFlag`], [`Marker`]
+//!   [`BeliefStatus`], [`StalenessFlag`], [`Marker`]
 //! - `validity`    — [`ValidityAssertion`], [`AssertionKind`]
 //! - `edge`        — [`ClaimEdge`], [`EdgeKind`]
 //! - `ledger`      — [`LedgerEntry`], [`LedgerEventKind`]
 //! - `proposal`    — [`ClaimProposal`], [`AdjudicationRequest`], [`AdjudicationResponse`],
-//!                   [`AdjudicationVerdict`], [`OverturnReason`], [`AdjudicationOutcome`]
+//!   [`AdjudicationVerdict`], [`OverturnReason`], [`AdjudicationOutcome`]
 
 pub mod belief;
 pub mod claim;

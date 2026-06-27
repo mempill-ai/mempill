@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! PendingAdjudicationPort — DB-authoritative oracle queue port.
 //!
 //! This port is the persistence seam for the `pending_adjudications` table. It is SEPARATE

@@ -132,7 +132,7 @@ mod tests {
                 assert!(!hint.contains("premature end of input"), "hint must not say 'premature end of input'");
                 assert!(hint.contains("YYYY"), "hint must mention YYYY format");
             }
-            other => panic!("expected UnparsableDate, got {:?}", other),
+            other => panic!("expected UnparsableDate, got {other:?}"),
         }
     }
 

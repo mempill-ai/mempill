@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! OraclePort — pull-based, non-blocking adjudication port.
 //!
 //! Host-implemented. The engine NEVER blocks waiting for a verdict.

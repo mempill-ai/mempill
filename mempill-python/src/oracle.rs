@@ -20,7 +20,7 @@
 //!         ----------
 //!         agent_id : str
 //!             The agent whose belief store is being written to.
-//! 	    request : dict
+//!         request : dict
 //!             AdjudicationRequest dict with keys:
 //!               subject_line  — dict with agent_id, subject, predicate
 //!               incumbent     — Belief dict (current winner)

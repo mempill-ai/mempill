@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Contradiction Detector / Reconciler.
 //!
 //! Classifies contradictions and builds gate Proposals.
@@ -70,8 +71,7 @@ pub(crate) struct ReconcilerInput<'a> {
 /// 1. No incumbent → `NoConflict`.
 /// 2. Candidate's derived_from intersects superseded_claim_refs → `DependsOnSuperseded`.
 /// 3. Same (subject, predicate) as incumbent, different value → `SameLineConflict`.
-///    3a. If candidate + incumbent form a trusted temporal succession (non-overlapping windows,
-///        confidence >= threshold, N=1 live incumbent) → `Succession` instead.
+///    3a. If candidate + incumbent form a trusted temporal succession (non-overlapping windows, confidence >= threshold, N=1 live incumbent) → `Succession` instead.
 /// 4. Cross-predicate mutual exclusion (subject matches, predicate differs but facts are
 ///    mutually exclusive by declaration) → `CrossLineConflict`.
 ///    In v0.1: detected via the MutualExclusion edge kind; without edges we classify as

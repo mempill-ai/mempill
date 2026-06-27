@@ -13,6 +13,7 @@ use mempill_types::{
 /// Public write request. Maps to domain Claim at the application boundary.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IngestClaimRequest {
+    /// The agent performing the write.
     pub agent_id: AgentId,
     /// Opaque key — the entity the claim is about (e.g. `"acme:ceo"`). mempill does
     /// **not** perform entity resolution; you must use the same `subject` on write and
@@ -21,6 +22,7 @@ pub struct IngestClaimRequest {
     /// Opaque key — the property being asserted (e.g. `"held_by"`). Like [`Self::subject`],
     /// it is matched verbatim; the engine cannot reconcile differently-keyed facts for you.
     pub predicate: String,
+    /// The JSON value being asserted.
     pub value: serde_json::Value,
     /// Required; no default imposed here — gateway enforces ModelDerived default for model output.
     pub provenance: ProvenanceLabel,
@@ -28,15 +30,20 @@ pub struct IngestClaimRequest {
     pub cardinality: Cardinality,
     /// None = unknown; fallback to tx_time ordering.
     pub valid_time: Option<ValidTime>,
+    /// Confidence in the value and valid-time assertion (0.0–1.0 each).
     pub confidence: Confidence,
+    /// Criticality class for this claim.
     pub criticality: Criticality,
     /// Lineage for ModelDerived claims.
     pub derived_from: Vec<ClaimRef>,
 }
 
+/// Response from a successful claim ingest.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IngestClaimResponse {
+    /// Stable UUID reference to the committed claim.
     pub claim_ref: ClaimRef,
+    /// The engine's disposition for this write.
     pub disposition: Disposition,
     /// Populated when disposition is Contested or PendingConflict.
     pub contested_with: Vec<ClaimRef>,
@@ -44,15 +51,20 @@ pub struct IngestClaimResponse {
 
 // ── QUERY MEMORY ──────────────────────────────────────────────────────────────
 
+/// Request to retrieve the current belief for a (subject, predicate) subject-line.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueryMemoryRequest {
+    /// The agent whose memory is queried.
     pub agent_id: AgentId,
+    /// The subject of the query.
     pub subject: String,
+    /// The predicate of the query.
     pub predicate: String,
     /// Optional: query as of a specific transaction time (bi-temporal as-of query).
     pub as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Response from a memory query — the canonical belief projection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueryMemoryResponse {
     /// Canonical fold result; computed at read time, never persisted.
@@ -61,13 +73,16 @@ pub struct QueryMemoryResponse {
 
 // ── RECONCILE ─────────────────────────────────────────────────────────────────
 
+/// Request to reconcile one or more subject lines.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReconcileRequest {
+    /// The agent whose subject lines are reconciled.
     pub agent_id: AgentId,
     /// Subject lines to reconcile. Empty = reconcile all subject lines for agent_id.
     pub subject_lines: Vec<(String, String)>, // (subject, predicate) pairs
 }
 
+/// Response from a reconciliation pass.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReconcileResponse {
     /// Per-claim disposition outcomes from the reconciliation pass.
@@ -85,8 +100,11 @@ pub struct ReconcileResponse {
 /// `Current` or `Superseded` based on the same canonical fold that powers `query_memory`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueryHistoryRequest {
+    /// The agent whose history is queried.
     pub agent_id: AgentId,
+    /// The subject of the history query.
     pub subject: String,
+    /// The predicate of the history query.
     pub predicate: String,
 }
 
@@ -94,7 +112,7 @@ pub struct QueryHistoryRequest {
 ///
 /// `status` is derived from `is_live` in the canonical fold — the `Current` entry is
 /// exactly the claim that `recall` / `query_memory` would return as primary.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HistoryEntry {
     /// Stable reference to the underlying claim (UUID).
     pub claim_ref: ClaimRef,
@@ -129,16 +147,22 @@ impl QueryHistoryResponse {
 
 // ── AUDIT QUERY ───────────────────────────────────────────────────────────────
 
+/// Request to query the audit ledger.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuditQueryRequest {
+    /// The agent whose audit ledger is queried.
     pub agent_id: AgentId,
     /// None = load full ledger for agent_id.
     pub claim_ref: Option<ClaimRef>,
+    /// Filter to entries recorded at or after this transaction time.
     pub from_tx_time: Option<chrono::DateTime<chrono::Utc>>,
+    /// Maximum number of entries to return.
     pub limit: usize,
 }
 
+/// Response from an audit ledger query.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuditQueryResponse {
+    /// The matching audit ledger entries.
     pub entries: Vec<LedgerEntry>,
 }

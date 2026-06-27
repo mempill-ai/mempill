@@ -107,7 +107,7 @@ async fn acid_amplification_808_recall_reentries_collapse_to_one_claim() {
         let re_resp = engine
             .ingest_claim(re_req)
             .await
-            .unwrap_or_else(|e| panic!("re-ingest {} must succeed: {}", i, e));
+            .unwrap_or_else(|e| panic!("re-ingest {i} must succeed: {e}"));
 
         // C6 CorroborateByIdentity: the response returns the EXISTING claim_ref.
         // The disposition is CommittedCheap (returned by the early-return path).
@@ -151,14 +151,12 @@ async fn acid_amplification_808_recall_reentries_collapse_to_one_claim() {
     // All 808 re-ingestions must have been corroborated by identity (no new rows).
     assert_eq!(
         corroborate_count, AMPLIFICATION_COUNT,
-        "ACID I6 mem0 #4573: all {} RecallReEntry re-ingestions must return the EXISTING \
-         claim_ref (CorroborateByIdentity). Unexpected new refs: {}",
-        AMPLIFICATION_COUNT, unexpected_new_refs
+        "ACID I6 mem0 #4573: all {AMPLIFICATION_COUNT} RecallReEntry re-ingestions must return the EXISTING \
+         claim_ref (CorroborateByIdentity). Unexpected new refs: {unexpected_new_refs}"
     );
     assert_eq!(
         unexpected_new_refs, 0,
-        "ACID I6: zero new claim rows must be created by {} RecallReEntry re-ingestions",
-        AMPLIFICATION_COUNT
+        "ACID I6: zero new claim rows must be created by {AMPLIFICATION_COUNT} RecallReEntry re-ingestions"
     );
 
     // Also verify via the audit ledger that there is only ONE ClaimCommitted entry
@@ -196,9 +194,8 @@ async fn acid_amplification_808_recall_reentries_collapse_to_one_claim() {
 
     // Summary: COUNT asserted = 1 (ONE claim row for 808+1 total ingest calls)
     println!(
-        "ACID AMPLIFICATION PASS: {} RecallReEntry re-ingestions → 1 claim row, \
-         {} corroborations, {} unexpected new refs",
-        AMPLIFICATION_COUNT, corroborate_count, unexpected_new_refs
+        "ACID AMPLIFICATION PASS: {AMPLIFICATION_COUNT} RecallReEntry re-ingestions → 1 claim row, \
+         {corroborate_count} corroborations, {unexpected_new_refs} unexpected new refs"
     );
 }
 

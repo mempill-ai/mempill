@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! ReconcileUseCase — contradiction detection pass over a set of subject-lines.
 //!
 //! Orchestrates the Reconciler, AdjudicationGate, and optionally Supersession for each claim
@@ -97,7 +98,7 @@ where
             );
 
             let n_live = fold.live_claims.len();
-            let incumbent = fold.live_claims.first().map(|cs| truth_engine::claim_to_belief(cs));
+            let incumbent = fold.live_claims.first().map(truth_engine::claim_to_belief);
 
             let mut per_claim = Vec::new();
             for cs in &fold.live_claims {
@@ -148,7 +149,7 @@ where
         let result = (|| {
             for (sld_idx, sld) in subject_line_data.iter().enumerate() {
                 let incumbent = sld.fold.live_claims.first()
-                    .map(|cs| truth_engine::claim_to_belief(cs));
+                    .map(truth_engine::claim_to_belief);
                 let _ = sld_idx; // suppress unused warning
 
                 for (claim_ref, decision, preloaded_edges) in &sld.per_claim {

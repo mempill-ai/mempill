@@ -190,8 +190,7 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
     assert_eq!(
         committed, 1,
         "I1: original penicillin-allergy claim MUST still have its ClaimCommitted audit entry \
-         after B11 contested ingest (append-only). Found: {}",
-        committed
+         after B11 contested ingest (append-only). Found: {committed}"
     );
 
     // CORRECTED ASSERTION (TASK-9-W4-W5-FIX): the incumbent must NOT have a ValidityAsserted
@@ -211,8 +210,7 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
         validity_asserted, 0,
         "TASK-9-W4-W5-FIX: the incumbent MUST NOT have a ValidityAsserted entry at ingest time. \
          Ingest-time supersession of the incumbent was the root cause of the Contested-surfacing bug. \
-         Found: {} (expected 0). Supersession only happens at submit_adjudication Affirm.",
-        validity_asserted
+         Found: {validity_asserted} (expected 0). Supersession only happens at submit_adjudication Affirm."
     );
 
     // query_memory must surface Contested with BOTH values visible.
@@ -234,7 +232,7 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
         .collect();
     assert!(
         all_values.contains(&serde_json::json!("penicillin")),
-        "I1+B11: incumbent 'penicillin' MUST be visible in Contested belief. Got: {:?}", all_values
+        "I1+B11: incumbent 'penicillin' MUST be visible in Contested belief. Got: {all_values:?}"
     );
 
     println!(
@@ -274,15 +272,13 @@ async fn acid_allergy_three_distinct_first_ingests_all_committed() {
             })
             .await
             .unwrap_or_else(|e| {
-                panic!("ingest for {}/{} must succeed: {}", subject, predicate, e)
+                panic!("ingest for {subject}/{predicate} must succeed: {e}")
             });
 
         assert_eq!(
             resp.disposition,
             Disposition::CommittedCheap,
-            "first ingest for {}/{} must be CommittedCheap",
-            subject,
-            predicate
+            "first ingest for {subject}/{predicate} must be CommittedCheap"
         );
 
         // Each claim must be in the audit ledger (I1: write-once, auditable).
@@ -294,7 +290,7 @@ async fn acid_allergy_three_distinct_first_ingests_all_committed() {
                 limit: 20,
             })
             .await
-            .unwrap_or_else(|e| panic!("audit for {}/{} must succeed: {}", subject, predicate, e));
+            .unwrap_or_else(|e| panic!("audit for {subject}/{predicate} must succeed: {e}"));
 
         let committed = audit
             .entries
@@ -307,8 +303,7 @@ async fn acid_allergy_three_distinct_first_ingests_all_committed() {
 
         assert_eq!(
             committed, 1,
-            "I1: claim for {}/{} must have exactly 1 ClaimCommitted entry in audit ledger",
-            subject, predicate
+            "I1: claim for {subject}/{predicate} must have exactly 1 ClaimCommitted entry in audit ledger"
         );
     }
 
@@ -395,8 +390,7 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
 
     assert_eq!(
         committed, 1,
-        "I1: original penicillin-allergy claim MUST have exactly 1 ClaimCommitted audit entry. Found: {}",
-        committed
+        "I1: original penicillin-allergy claim MUST have exactly 1 ClaimCommitted audit entry. Found: {committed}"
     );
 
     // CORRECTED (TASK-9-W4-W5-FIX): no ValidityAsserted at ingest time for oracle-absent B11.
@@ -415,8 +409,7 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
         validity_asserted, 0,
         "TASK-9-W4-W5-FIX: incumbent MUST NOT have ValidityAsserted at ingest time (B11 oracle-absent path). \
          Ingest-time supersession was the bug. Supersession only via Affirm at submit_adjudication. \
-         Found: {} (expected 0)",
-        validity_asserted
+         Found: {validity_asserted} (expected 0)"
     );
 
     // The belief MUST be Contested with both "penicillin" (incumbent) and "none" (challenger).
@@ -437,11 +430,11 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
         .collect();
     assert!(
         all_values.contains(&serde_json::json!("penicillin")),
-        "I1+B11: 'penicillin' (incumbent) MUST be visible in Contested. Got: {:?}", all_values
+        "I1+B11: 'penicillin' (incumbent) MUST be visible in Contested. Got: {all_values:?}"
     );
     assert!(
         all_values.contains(&serde_json::json!("none")),
-        "I1+B11: 'none' (challenger) MUST be visible in Contested. Got: {:?}", all_values
+        "I1+B11: 'none' (challenger) MUST be visible in Contested. Got: {all_values:?}"
     );
 
     println!(

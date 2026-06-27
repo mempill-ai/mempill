@@ -26,6 +26,7 @@ pub enum ProvenanceLabel {
 
 /// Sub-channel for External provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum ExternalKind {
     /// A first-hand human assertion (user as oracle).
     UserAsserted,

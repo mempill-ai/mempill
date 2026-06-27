@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! IngestClaimUseCase — application layer write path.
 //!
 //! Orchestrates Gateway → AmplificationGuard → Reconciler → AdjudicationGate → (optional Supersession)
@@ -104,8 +105,7 @@ where
             derived_from: req.derived_from.clone(),
             metadata: None,
         };
-        let stamped = gateway::stamp(ingest_input, tx_time.clone())
-            .map_err(|e| e)?;
+        let stamped = gateway::stamp(ingest_input, tx_time.clone())?;
         let claim = stamped.claim;
 
         // ── Step 2: C6 firewall — amplification guard ────────────────────────────
@@ -309,6 +309,9 @@ where
     /// `preloaded_edges` is kept for signature stability but is currently always empty —
     /// ingest-time supersession was removed so no edges are needed here.
     /// If a future deterministic-supersede path is added to the gate, this parameter carries it.
+    #[allow(clippy::too_many_arguments)]
+    // reason: all parameters are distinct roles required for the atomic write phase; merging into a struct
+    // would require a transient type used in exactly one call site
     fn append_within_txn(
         &self,
         claim: &Claim,
@@ -561,7 +564,7 @@ mod tests {
         fn list_pending(&self, agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, MockErr> {
             let rows = self.rows.lock().unwrap();
             Ok(rows.iter()
-                .filter(|r| agent_id.map_or(true, |a| r.agent_id == *a) && r.status == "pending")
+                .filter(|r| agent_id.is_none_or(|a| r.agent_id == *a) && r.status == "pending")
                 .cloned()
                 .collect())
         }
@@ -571,7 +574,7 @@ mod tests {
             Ok(rows.iter()
                 .filter(|r| {
                     r.status == "pending"
-                        && r.expires_at.map_or(false, |exp| exp <= now)
+                        && r.expires_at.is_some_and(|exp| exp <= now)
                 })
                 .cloned()
                 .collect())
