@@ -83,6 +83,48 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 
 ---
 
+## Production readiness & scope
+
+mempill 0.2.0 is a **correct, well-tested engine** (bi-temporal fold, ACID writes,
+cross-adapter conformance, append-only integrity — 446 Rust tests) designed for
+**embedded and early-stage** use. Read this before deploying it at scale.
+
+**Safe today for:**
+
+- Embedded, single-process, single-tenant use (e.g. the SQLite adapter / MCP server).
+- Local or private-network PostgreSQL at human scale — roughly ≤ ~1k agents, ≤ a few
+  hundred claims per subject-line, and modest write rates. The correctness guarantees
+  hold within this envelope.
+
+**Current limits (operational hardening is on the roadmap — see [Status and roadmap](#status-and-roadmap)):**
+
+- **Read cost scales with history.** Belief is recomputed from the full claim history of
+  a subject-line on every read (it is never stored — that is the correctness model).
+  There is no snapshot/compaction yet, so a long-lived, high-churn subject-line gets
+  slower over time. Comfortable at hundreds of claims per subject-line; not yet tuned
+  for tens of thousands. *(v0.3: snapshotting.)*
+- **SQLite serializes writes globally.** All agents' writes go through a single writer
+  lock, and reads error while a write transaction is open on that agent's file. Use the
+  **PostgreSQL** adapter for write concurrency across agents.
+- **PostgreSQL is `NoTls` only** — do not expose the connection over an untrusted
+  network. The connection pool size is fixed (20) and not yet configurable. *(v0.3: TLS,
+  configurable pool.)*
+- **No built-in observability** — there is no `tracing`/metrics instrumentation yet, so
+  latency, error rates, and contention are not visible to an operator out of the box.
+  *(v0.3.)*
+- **No published load/stress benchmarks** — all 446 tests are correctness tests;
+  performance at large scale is not yet characterized.
+
+**Not recommended yet for:** public-facing multi-tenant services, high-frequency
+automated write pipelines, networked PostgreSQL with real credentials (until TLS), or
+very high agent cardinality (the per-agent advisory lock uses a 32-bit hash).
+
+If your use case is outside the safe envelope, the engine is still a solid foundation —
+the gaps above are operational, not algorithmic — but treat 0.2.0 as an early release
+and pin a specific version.
+
+---
+
 ## Architecture
 
 ```
