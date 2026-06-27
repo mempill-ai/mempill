@@ -34,6 +34,7 @@ fn vt(start: &str, end: Option<&str>) -> ValidTime {
         start: Some(dt(start)),
         end: end.map(dt),
         valid_time_confidence: 0.9, // above threshold
+        granularity: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn vt_low(start: &str, end: Option<&str>) -> ValidTime {
         start: Some(dt(start)),
         end: end.map(dt),
         valid_time_confidence: 0.5, // BELOW threshold
+        granularity: None,
     }
 }
 

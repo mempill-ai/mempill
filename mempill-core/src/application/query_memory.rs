@@ -76,6 +76,7 @@ where
                     .unwrap_or_default()
             },
             as_of,
+            None, // valid_at_instant: None = use as_of_tx_time for instant-selection (future wave adds query param)
             &self.config,
             &latest_disposition,
         );
@@ -175,7 +176,7 @@ mod tests {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(tx),
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             Criticality::Medium,
             vec![],

@@ -93,6 +93,7 @@ where
                         .unwrap_or_default()
                 },
                 tx_time.0,
+                None, // valid_at_instant: None = use as_of_tx_time for instant-selection (future wave adds query param)
                 &self.config,
                 &latest_disposition,
             );

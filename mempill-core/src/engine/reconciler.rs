@@ -205,7 +205,7 @@ mod tests {
     }
 
     fn no_vt() -> ValidTime {
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 }
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None}
     }
 
     fn make_claim(
@@ -534,5 +534,188 @@ mod tests {
         let proposal = reconcile(inp, &cfg());
         let decision = adjudicate(&proposal, &cfg());
         assert_eq!(decision.route, Route::CheapPath);
+    }
+
+    // ── W1b — valid-time-aware succession reconciler ──────────────────────────
+
+    /// Helper: build a Belief (incumbent) with trusted valid-time window.
+    fn make_belief_with_vt(
+        subject: &str,
+        predicate: &str,
+        value: serde_json::Value,
+        vt_start: Option<chrono::DateTime<chrono::Utc>>,
+        vt_end: Option<chrono::DateTime<chrono::Utc>>,
+        vt_confidence: f32,
+    ) -> Belief {
+        Belief {
+            claim_ref: ClaimRef::new_random(),
+            fact: Fact {
+                subject: subject.into(),
+                predicate: predicate.into(),
+                value,
+            },
+            provenance: mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted),
+            valid_time: ValidTime { start: vt_start, end: vt_end, valid_time_confidence: vt_confidence, granularity: None },
+            transaction_time: tx_past(),
+            confidence: mempill_types::Confidence { value_confidence: 0.8, valid_time_confidence: vt_confidence },
+            currency_signal: mempill_types::CurrencySignal {
+                last_refreshed_at: tx_past(),
+                state: mempill_types::CurrencyState::Fresh,
+                corroboration_count: 0,
+            },
+            criticality: mempill_types::Criticality::Medium,
+        }
+    }
+
+    /// Helper: build a candidate Claim with trusted valid-time window.
+    fn make_claim_with_vt(
+        subject: &str,
+        predicate: &str,
+        value: serde_json::Value,
+        vt_start: Option<chrono::DateTime<chrono::Utc>>,
+        vt_end: Option<chrono::DateTime<chrono::Utc>>,
+        vt_confidence: f32,
+    ) -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            mempill_types::AgentId("agent-rc".into()),
+            Fact { subject: subject.into(), predicate: predicate.into(), value },
+            Cardinality::Functional,
+            mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::ExternalFirstHand),
+            mempill_types::ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            tx(),
+            ValidTime { start: vt_start, end: vt_end, valid_time_confidence: vt_confidence, granularity: None },
+            mempill_types::Confidence { value_confidence: 0.9, valid_time_confidence: vt_confidence },
+            mempill_types::Criticality::Medium,
+            vec![],
+            None,
+            None,
+        )
+    }
+
+    fn dt(year: i32, month: u32, day: u32) -> chrono::DateTime<chrono::Utc> {
+        use chrono::TimeZone;
+        chrono::Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap()
+    }
+
+    /// Non-overlapping, high-confidence windows → Succession (NOT SameLineConflict).
+    #[test]
+    fn w1b_non_overlapping_confident_windows_is_succession() {
+        // Incumbent: [Jan, Mar) — City=Berlin
+        // Candidate: [Mar, ∞)  — City=Paris
+        // Both windows trusted (0.9 >= 0.7 threshold) and non-overlapping.
+        let candidate = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 3, 1)), None, 0.9,
+        );
+        let incumbent = make_belief_with_vt(
+            "user", "city", serde_json::json!("Berlin"),
+            Some(dt(2024, 1, 1)), Some(dt(2024, 3, 1)), 0.9,
+        );
+        let inp = ReconcilerInput {
+            candidate: &candidate,
+            incumbent: Some(&incumbent),
+            superseded_claim_refs: &[],
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+            succession_threshold: 0.7,
+            n_gt_1_live_incumbents: false,
+        };
+        let proposal = reconcile(inp, &cfg());
+        assert_eq!(
+            proposal.conflict_type, ConflictType::Succession,
+            "non-overlapping trusted windows must classify as Succession (not SameLineConflict)"
+        );
+    }
+
+    /// Overlapping high-confidence windows → SameLineConflict (not Succession).
+    #[test]
+    fn w1b_overlapping_confident_windows_is_same_line_conflict() {
+        // Incumbent: [Jan, Apr) — City=Berlin
+        // Candidate: [Mar, ∞)  — City=Paris (overlap: Mar in both windows)
+        let candidate = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 3, 1)), None, 0.9,
+        );
+        let incumbent = make_belief_with_vt(
+            "user", "city", serde_json::json!("Berlin"),
+            Some(dt(2024, 1, 1)), Some(dt(2024, 4, 1)), 0.9, // ends Apr → overlaps [Mar, ∞)
+        );
+        let inp = ReconcilerInput {
+            candidate: &candidate,
+            incumbent: Some(&incumbent),
+            superseded_claim_refs: &[],
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+            succession_threshold: 0.7,
+            n_gt_1_live_incumbents: false,
+        };
+        let proposal = reconcile(inp, &cfg());
+        assert_eq!(
+            proposal.conflict_type, ConflictType::SameLineConflict,
+            "overlapping windows must remain SameLineConflict"
+        );
+    }
+
+    /// Low valid-time confidence → SameLineConflict (even if windows don't overlap).
+    #[test]
+    fn w1b_low_confidence_windows_is_same_line_conflict() {
+        // Candidate window: low confidence (0.3) → not trusted → not Succession.
+        let candidate = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 3, 1)), None, 0.3, // below threshold
+        );
+        let incumbent = make_belief_with_vt(
+            "user", "city", serde_json::json!("Berlin"),
+            Some(dt(2024, 1, 1)), Some(dt(2024, 3, 1)), 0.9, // incumbent trusted
+        );
+        let inp = ReconcilerInput {
+            candidate: &candidate,
+            incumbent: Some(&incumbent),
+            superseded_claim_refs: &[],
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+            succession_threshold: 0.7,
+            n_gt_1_live_incumbents: false,
+        };
+        let proposal = reconcile(inp, &cfg());
+        assert_eq!(
+            proposal.conflict_type, ConflictType::SameLineConflict,
+            "low valid_time_confidence → not trusted → SameLineConflict (not Succession)"
+        );
+    }
+
+    /// Succession routes to CheapPath via the gate (NOT HeavyPath / Contested).
+    #[test]
+    fn w1b_succession_routes_cheap_path_in_gate() {
+        use crate::engine::gate::{adjudicate, Route};
+
+        let candidate = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 3, 1)), None, 0.9,
+        );
+        let incumbent = make_belief_with_vt(
+            "user", "city", serde_json::json!("Berlin"),
+            Some(dt(2024, 1, 1)), Some(dt(2024, 3, 1)), 0.9,
+        );
+        let inp = ReconcilerInput {
+            candidate: &candidate,
+            incumbent: Some(&incumbent),
+            superseded_claim_refs: &[],
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+            succession_threshold: 0.7,
+            n_gt_1_live_incumbents: false,
+        };
+        let proposal = reconcile(inp, &cfg());
+        let decision = adjudicate(&proposal, &cfg());
+        assert_eq!(
+            decision.route, Route::CheapPath,
+            "Succession must route CheapPath (not HeavyPath/Contested)"
+        );
     }
 }

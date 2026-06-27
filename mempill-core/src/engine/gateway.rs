@@ -71,6 +71,7 @@ pub(crate) fn stamp(input: IngestInput, tx_time: TransactionTime) -> Result<Stam
         start: None,
         end: None,
         valid_time_confidence: 0.0,
+        granularity: None,
     });
 
     // Construct the immutable Claim via the only constructor (I4 — no setters).
@@ -244,6 +245,7 @@ mod tests {
             start: Some(start),
             end: None,
             valid_time_confidence: 0.8,
+            granularity: None,
         };
         let mut input = base_input(Some(ProvenanceLabel::External(ExternalKind::UserAsserted)));
         input.valid_time = Some(vt.clone());

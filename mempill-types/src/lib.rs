@@ -8,7 +8,7 @@
 //! ## Modules
 //! - `identity`    — [`AgentId`], [`ClaimRef`], [`SubjectLineRef`]
 //! - `provenance`  — [`ProvenanceLabel`], [`ExternalKind`], [`ExternalAnchor`]
-//! - `time`        — [`TransactionTime`], [`ValidTime`]
+//! - `time`        — [`TransactionTime`], [`ValidTime`], [`DateGranularity`], [`parse_valid_time_date`]
 //! - `claim`       — [`Claim`], [`Fact`], [`Cardinality`], [`Confidence`], [`Criticality`]
 //! - `disposition` — [`Disposition`] (12-state model)
 //! - `belief`      — [`BeliefProjection`], [`Belief`], [`CurrencySignal`], [`CurrencyState`],
@@ -46,5 +46,5 @@ pub use proposal::{
     ClaimProposal, OverturnReason,
 };
 pub use provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel};
-pub use time::{TransactionTime, ValidTime};
+pub use time::{parse_valid_time_date, DateGranularity, TransactionTime, ValidTime};
 pub use validity::{AssertionKind, ValidityAssertion};

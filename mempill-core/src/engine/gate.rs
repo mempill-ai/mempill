@@ -276,7 +276,7 @@ mod tests {
     fn model_derived_claim() -> Claim {
         make_claim(
             ProvenanceLabel::ModelDerived,
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             tx_time_at(2026, 1, 1),
         )
     }
@@ -284,7 +284,7 @@ mod tests {
     fn recall_reentry_claim() -> Claim {
         make_claim(
             ProvenanceLabel::RecallReEntry,
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             tx_time_at(2026, 1, 1),
         )
     }
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn adjudicate_is_deterministic_same_inputs_same_output() {
         let tx = tx_time_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = external_claim(vt, tx);
         let proposal = no_conflict_proposal(claim);
         let cfg = config();
@@ -330,7 +330,7 @@ mod tests {
         let inputs: Vec<Proposal> = vec![
             // cheap path
             no_conflict_proposal(external_claim(
-                ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+                ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
                 tx.clone(),
             )),
             // model derived
@@ -364,6 +364,7 @@ mod tests {
             start: Some(start),
             end: Some(end),
             valid_time_confidence: 0.9, // above threshold
+            granularity: None,
         };
         let claim = external_claim(vt, tx);
         let proposal = no_conflict_proposal(claim);
@@ -381,6 +382,7 @@ mod tests {
             start: Some(future_start),
             end: None,
             valid_time_confidence: 0.9, // above threshold
+            granularity: None,
         };
         let claim = external_claim(vt, tx);
         let proposal = no_conflict_proposal(claim);
@@ -398,6 +400,7 @@ mod tests {
             start: Some(future_start),
             end: None,
             valid_time_confidence: 0.3, // below threshold (0.7)
+            granularity: None,
         };
         let claim = external_claim(vt, tx);
         let proposal = no_conflict_proposal(claim);
@@ -416,6 +419,7 @@ mod tests {
             start: Some(start),
             end: Some(end),
             valid_time_confidence: 0.9,
+            granularity: None,
         };
         let claim = external_claim(vt, tx);
         let proposal = no_conflict_proposal(claim);
@@ -437,7 +441,7 @@ mod tests {
                 value: serde_json::json!("Berlin"),
             },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
-            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             transaction_time: tx_time_at(2025, 1, 1),
             confidence: Confidence { value_confidence: 0.8, valid_time_confidence: 0.0 },
             currency_signal: CurrencySignal {
@@ -453,7 +457,7 @@ mod tests {
     fn b11_fresh_external_oracle_absent_routes_to_contested() {
         // B11(a): fresh first-hand external contradiction + oracle_present=false → Contested immediately.
         let tx = tx_time_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = external_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -473,7 +477,7 @@ mod tests {
     fn b11_fresh_external_oracle_present_routes_to_queued() {
         // B11(b): oracle present → QueuedForAdjudication, NOT Contested.
         let tx = tx_time_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = external_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -492,7 +496,7 @@ mod tests {
     #[test]
     fn b11_cross_line_conflict_oracle_absent_routes_to_contested() {
         let tx = tx_time_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = external_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -514,7 +518,7 @@ mod tests {
         // corroboration adjusts confidence externally but does not exist as a gate input.
         // Verify: two proposals with identical routing conditions produce identical routes.
         let tx = tx_time_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
 
         let claim_a = external_claim(vt.clone(), tx.clone());
         let claim_b = external_claim(vt.clone(), tx.clone());
@@ -566,7 +570,7 @@ mod tests {
     #[test]
     fn external_no_conflict_takes_cheap_path() {
         let tx = tx_time_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = external_claim(vt, tx);
         let proposal = no_conflict_proposal(claim);
         let decision = adjudicate(&proposal, &config());
@@ -578,7 +582,7 @@ mod tests {
     fn proposal_carries_oracle_present_field() {
         // Structural: verify oracle_present is a field on Proposal (A24 compliance check).
         let tx = tx_time_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = external_claim(vt, tx);
         let p = Proposal {
             candidate: claim,
@@ -676,7 +680,7 @@ mod adversarial {
     fn recall_claim() -> Claim {
         make_claim_with_confidence(
             ProvenanceLabel::RecallReEntry,
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             tx_at(2026, 1, 1),
             0.0,
         )
@@ -685,7 +689,7 @@ mod adversarial {
     fn model_claim() -> Claim {
         make_claim_with_confidence(
             ProvenanceLabel::ModelDerived,
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             tx_at(2026, 1, 1),
             0.0,
         )
@@ -700,7 +704,7 @@ mod adversarial {
                 value: serde_json::json!("old_value"),
             },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
-            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 },
+            valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
             transaction_time: tx_at(2025, 1, 1),
             confidence: Confidence { value_confidence: 0.8, valid_time_confidence: 0.0 },
             currency_signal: CurrencySignal {
@@ -725,7 +729,7 @@ mod adversarial {
     #[test]
     fn p1_repeated_calls_same_proposal_always_identical() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -752,7 +756,7 @@ mod adversarial {
     #[test]
     fn p1_rationale_json_key_order_is_stable() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -773,7 +777,7 @@ mod adversarial {
     #[test]
     fn p1_heavy_path_contested_rationale_is_deterministic() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
 
         for conflict_type in [ConflictType::SameLineConflict, ConflictType::CrossLineConflict] {
             let claim = ext_claim(vt.clone(), tx.clone());
@@ -806,6 +810,7 @@ mod adversarial {
             start: Some(instant),
             end: Some(instant),
             valid_time_confidence: 0.9,
+            granularity: None,
         };
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
@@ -832,6 +837,7 @@ mod adversarial {
             start: Some(same_moment),
             end: None,
             valid_time_confidence: 0.9,
+            granularity: None,
         };
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
@@ -859,6 +865,7 @@ mod adversarial {
             start: Some(future_start),
             end: None,
             valid_time_confidence: 0.7, // exactly at threshold — check runs
+            granularity: None,
         };
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
@@ -884,6 +891,7 @@ mod adversarial {
             start: Some(future_start),
             end: None,
             valid_time_confidence: 0.6999, // just below 0.7
+            granularity: None,
         };
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
@@ -911,6 +919,7 @@ mod adversarial {
             start: Some(far_past),
             end: Some(far_future),
             valid_time_confidence: 0.9,
+            granularity: None,
         };
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
@@ -943,6 +952,7 @@ mod adversarial {
             start: Some(future_start),
             end: None,
             valid_time_confidence: 0.9,
+            granularity: None,
         };
         let claim = make_claim_with_confidence(
             ProvenanceLabel::RecallReEntry,
@@ -975,6 +985,7 @@ mod adversarial {
             start: Some(future_start),
             end: None,
             valid_time_confidence: 0.9,
+            granularity: None,
         };
         let claim = make_claim_with_confidence(
             ProvenanceLabel::ModelDerived,
@@ -1007,7 +1018,7 @@ mod adversarial {
     #[test]
     fn p3_user_asserted_same_line_oracle_absent_routes_to_contested() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = user_asserted_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -1028,7 +1039,7 @@ mod adversarial {
     #[test]
     fn p3_user_asserted_cross_line_oracle_absent_routes_to_contested() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = user_asserted_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -1050,7 +1061,7 @@ mod adversarial {
     #[test]
     fn p3_depends_on_superseded_oracle_absent_routes_to_queued_not_contested() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -1075,7 +1086,7 @@ mod adversarial {
     #[test]
     fn p3_depends_on_superseded_oracle_present_routes_to_queued() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -1094,7 +1105,7 @@ mod adversarial {
     #[test]
     fn p3_oracle_present_true_never_produces_contested() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
 
         for conflict_type in [
             ConflictType::SameLineConflict,
@@ -1149,7 +1160,7 @@ mod adversarial {
     #[test]
     fn p4_high_confidence_implying_corroboration_does_not_flip_route() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
 
         // "Low corroboration" scenario: measured_confidence = 0.5
         let claim_low = ext_claim(vt.clone(), tx.clone());
@@ -1187,7 +1198,7 @@ mod adversarial {
     #[test]
     fn p4_rationale_records_corroboration_count_zero_always() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -1211,7 +1222,7 @@ mod adversarial {
     #[test]
     fn p4_measured_confidence_only_affects_rationale_not_route() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
 
         let confidences = [0.0f32, 0.5, 0.7, 0.99, 1.0];
         let routes: Vec<Route> = confidences.iter().map(|&mc| {
@@ -1244,7 +1255,7 @@ mod adversarial {
     #[test]
     fn p5_all_conflict_types_produce_valid_route_no_panic() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
 
         let all_conflict_types = [
             ConflictType::NoConflict,
@@ -1286,7 +1297,7 @@ mod adversarial {
     #[test]
     fn p5_all_provenance_types_no_conflict_no_incumbent_produce_valid_route() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
 
         let provenances = [
             ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
@@ -1320,7 +1331,7 @@ mod adversarial {
     #[test]
     fn p5_no_conflict_with_incumbent_still_routes_cheap_path() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,
@@ -1341,7 +1352,7 @@ mod adversarial {
     #[test]
     fn p5_same_line_conflict_no_incumbent_routes_cheap_path() {
         let tx = tx_at(2026, 6, 1);
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
         let claim = ext_claim(vt, tx);
         let proposal = Proposal {
             candidate: claim,

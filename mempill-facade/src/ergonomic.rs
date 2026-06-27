@@ -493,7 +493,7 @@ impl IngestClaimRequestBuilder {
         }
 
         let valid_time = if has_dates {
-            Some(ValidTime { start, end, valid_time_confidence: vtc })
+            Some(ValidTime { start, end, valid_time_confidence: vtc , granularity: None})
         } else {
             None
         };
