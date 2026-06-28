@@ -113,6 +113,23 @@ class PyEngine:
                 - belief (dict): BeliefProjection structure.
                   Access: result["belief"]["primary"]["fact"]["value"]
 
+            Each belief slot (``belief["primary"]``, ``belief["alternatives"][i]``)
+            also carries per-endpoint precision metadata (W6):
+
+                - ``valid_from_display`` (str | absent): start of the valid-time window
+                  rendered at its recorded precision.  Examples:
+                  ``"2020"`` (Year), ``"2020-03"`` (Month), ``"2020-03-15"`` (Day/Instant).
+                  Absent when the start endpoint is unknown.
+
+                - ``valid_until_display`` (str | absent): same for the end endpoint.
+                  Absent when open-ended.
+
+                - ``valid_time["start_granularity"]`` (str | absent): raw granularity tag
+                  (``"year"``, ``"month"``, ``"day"``, ``"instant"``).  Absent for legacy
+                  rows or when the start was not set.
+
+                - ``valid_time["end_granularity"]`` (str | absent): same for the end.
+
         Raises:
             ValidationError: bad request
             NotFoundError: agent or claim not found

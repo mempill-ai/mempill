@@ -19,6 +19,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use pythonize::{depythonize, pythonize};
 
+use crate::display::enrich_query_memory;
 use crate::errors::{mem_err_to_pyerr, StorageError, ValidationError};
 
 // ── Static runtime ────────────────────────────────────────────────────────────
@@ -68,7 +69,14 @@ impl PyEngine {
     /// `request` must be a dict with: agent_id, subject, predicate,
     /// as_of_tx_time (optional ISO-8601 string).
     ///
-    /// Returns a dict with `belief`.
+    /// Returns a dict with `belief`. Each belief slot includes:
+    ///   - `valid_from_display`: start of the valid-time window rendered at its
+    ///     recorded precision (e.g. `"2020-03"` for Month, `"2020"` for Year,
+    ///     `"2020-03-15"` for Day/Instant). Absent when the start is unknown.
+    ///   - `valid_until_display`: same for the end endpoint. Absent when open-ended.
+    ///   - `valid_time.start_granularity`: raw granularity string (`"year"`,
+    ///     `"month"`, `"day"`, `"instant"`) when set, otherwise absent.
+    ///   - `valid_time.end_granularity`: same for the end endpoint.
     #[pyo3(signature = (request))]
     fn query_memory<'py>(&self, py: Python<'py>, request: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let req: QueryMemoryRequest = depythonize(request)
@@ -76,7 +84,7 @@ impl PyEngine {
         let engine = self.engine.clone();
         let resp = py.detach(|| runtime().block_on(engine.query_memory(req)))
             .map_err(mem_err_to_pyerr)?;
-        Ok(pythonize(py, &resp)?)
+        Ok(pythonize(py, &enrich_query_memory(resp))?)
     }
 
     /// Reconcile one or more subject lines for an agent.
