@@ -1,12 +1,13 @@
-//! Bi-temporal as-of micro-benchmark — mempill's "proof of the moat".
+//! Bi-temporal as-of micro-benchmark — internal regression and overhead tool.
 //!
 //! # What this bench measures
 //!
-//! mempill's core differentiator is TRUE bi-temporal querying: the `valid_at` axis
-//! (point-in-time on the valid-time dimension: "who was CEO in 2021?") operates
-//! independently from the `as_of_tx_time` axis (transaction-time: "what did we believe
-//! as of a given transaction instant?"). No mainstream agent-memory library benchmarks
-//! this independently — publishing this micro-benchmark is itself the contribution.
+//! mempill supports two independent time axes: the `valid_at` axis
+//! (point-in-time on the valid-time dimension: "who was CEO in 2021?") and
+//! the `as_of_tx_time` axis (transaction-time: "what did we believe
+//! as of a given transaction instant?"). This benchmark exercises the query path
+//! for each axis in isolation and in combination, to observe how read cost scales
+//! with history depth N.
 //!
 //! ## Scenarios
 //!
@@ -22,7 +23,7 @@
 //!   rewinds transaction time to just after the N-th ingest. Measures tx-time filtering cost.
 //!
 //! - **Bench C** — combined `valid_at + as_of_tx_time`: both axes set independently.
-//!   This is the full D2-independence case that no competitor offers.
+//!   This is the full D2-independence case.
 //!
 //! - **Bench D** — baseline (neither axis set): `query_memory` with current belief, no
 //!   time-travel. Reference point for overhead comparison.
@@ -250,7 +251,6 @@ fn bench_b_as_of_tx_time(c: &mut Criterion) {
 /// Bench C: both axes set independently — the full D2-independence case.
 ///
 /// Measures the combined cost of tx-time filtering AND valid-time axis selection.
-/// This is mempill's novel contribution: no competitor benchmarks this path.
 fn bench_c_combined(c: &mut Criterion) {
     let mut group = c.benchmark_group("bench_c_combined_valid_at_and_as_of");
 

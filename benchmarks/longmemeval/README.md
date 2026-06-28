@@ -34,9 +34,7 @@ The five LongMemEval question categories and their relevance to mempill:
 | Adversarial / negation | "X is NOT Y" | Contested / Superseded disposition surfacing |
 
 The **temporal reasoning** and **knowledge update** categories directly exercise
-mempill's bi-temporal differentiator. These are also the categories where
-mainstream vector-only memory systems fail most often (they return stale facts
-without distinguishing valid-time from write-time).
+mempill's bi-temporal query capabilities.
 
 ## Planned harness shape
 
@@ -96,13 +94,12 @@ TOTAL                  |       500 |     ???  | ???
 - An LLM for question-to-structured-fact extraction (GPT-4o or similar)
 - Estimated runtime: 2–4 hours for the full 500-question eval
 
-## Why this is novel
+## Why LongMemEval
 
-LongMemEval scores for temporal-reasoning and knowledge-update categories have only
-been published for retrieval-augmented systems (vector search + LLM reranking).
-No system has published scores that explicitly attribute correctness to a
-bi-temporal query engine. mempill's `valid_at` + `as_of_tx_time` axes should produce
-qualitatively different (and better) results on temporal and update questions compared
-to naive vector similarity — but this claim needs empirical validation.
+LongMemEval's temporal-reasoning and knowledge-update categories directly exercise
+mempill's bi-temporal query capabilities (`valid_at` axis for valid-time point queries,
+succession fold for knowledge-update questions). The gold-answer format allows
+deterministic exact-match scoring without an LLM judge, making it a tractable
+correctness harness.
 
-**This harness is the vehicle for that validation.**
+**This harness is the vehicle for empirical validation of those capabilities.**
