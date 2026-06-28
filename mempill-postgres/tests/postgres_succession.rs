@@ -176,22 +176,27 @@ fn run_succession_scenario(conn_str: &str) {
                 ));
             }
 
-            // ── 4. Query as_of 2022-06-01 → Alice ────────────────────────────
+            // ── 4. Query valid_at 2022-06-01 → Alice ────────────────────────────
+            //
+            // Both claims are ingested at test-runtime tx_time (now). To query the valid-time
+            // axis ("who was CEO in 2022?") we use `valid_at`, not `as_of_tx_time`.
+            // `as_of_tx_time` is the tx-time axis: "only show claims WRITTEN before T" —
+            // that would return NoBelief here because all claims were written at current time.
             let qr_past = engine.query_memory(QueryMemoryRequest {
                 agent_id: agent.clone(),
                 subject: "acme".into(),
                 predicate: "ceo".into(),
-                as_of_tx_time: Some(dt("2022-06-01T00:00:00Z")),
-        valid_at: None,
-            }).await.map_err(|e| format!("query as_of 2022 failed: {e}"))?;
+                as_of_tx_time: None,
+                valid_at: Some(dt("2022-06-01T00:00:00Z")),
+            }).await.map_err(|e| format!("query valid_at 2022 failed: {e}"))?;
 
-            println!("[PG SUCC] query as_of 2022-06-01 → status={:?}, primary={:?}",
+            println!("[PG SUCC] query valid_at 2022-06-01 → status={:?}, primary={:?}",
                 qr_past.belief.status,
                 qr_past.belief.primary.as_ref().map(|b| &b.fact.value));
 
             if qr_past.belief.status != BeliefStatus::Resolved {
                 return Err(format!(
-                    "Postgres: instant in Alice's window MUST be Resolved; got {:?}",
+                    "Postgres: valid_at in Alice's window MUST be Resolved; got {:?}",
                     qr_past.belief.status
                 ));
             }
@@ -199,23 +204,23 @@ fn run_succession_scenario(conn_str: &str) {
                 .ok_or_else(|| "primary at 2022 must exist".to_string())?;
             if primary_past.fact.value != serde_json::json!("alice") {
                 return Err(format!(
-                    "Postgres: instant in Alice's window → primary MUST be Alice; got {:?}",
+                    "Postgres: valid_at in Alice's window → primary MUST be Alice; got {:?}",
                     primary_past.fact.value
                 ));
             }
 
-            // ── 5. TIMESTAMPTZ boundary: query at exactly 2024-03-01 → Bob ────
+            // ── 5. valid_at boundary: query at exactly 2024-03-01 → Bob ────────
             //
             // instant=2024-03-01 ≥ alice_end=2024-03-01 → Alice NOT selected (end exclusive).
             // instant=2024-03-01 ≥ bob_start=2024-03-01 AND end=None → Bob selected (start inclusive).
-            // This tests TIMESTAMPTZ round-trip through Postgres at second-boundary precision.
+            // Tests valid-time boundary semantics round-tripped through Postgres TEXT columns.
             let boundary = dt("2024-03-01T00:00:00Z");
             let qr_boundary = engine.query_memory(QueryMemoryRequest {
                 agent_id: agent.clone(),
                 subject: "acme".into(),
                 predicate: "ceo".into(),
-                as_of_tx_time: Some(boundary),
-        valid_at: None,
+                as_of_tx_time: None,
+                valid_at: Some(boundary),
             }).await.map_err(|e| format!("query at boundary failed: {e}"))?;
 
             println!("[PG SUCC] query at boundary 2024-03-01 → status={:?}, primary={:?}",
@@ -224,7 +229,7 @@ fn run_succession_scenario(conn_str: &str) {
 
             if qr_boundary.belief.status != BeliefStatus::Resolved {
                 return Err(format!(
-                    "Postgres TIMESTAMPTZ boundary: 2024-03-01 MUST be Resolved; got {:?}",
+                    "Postgres valid-time boundary: 2024-03-01 MUST be Resolved; got {:?}",
                     qr_boundary.belief.status
                 ));
             }
@@ -232,7 +237,7 @@ fn run_succession_scenario(conn_str: &str) {
                 .ok_or_else(|| "primary at boundary must exist".to_string())?;
             if primary_boundary.fact.value != serde_json::json!("bob") {
                 return Err(format!(
-                    "Postgres TIMESTAMPTZ boundary: 2024-03-01 == Bob's start → MUST select Bob; got {:?}",
+                    "Postgres valid-time boundary: 2024-03-01 == Bob's start → MUST select Bob; got {:?}",
                     primary_boundary.fact.value
                 ));
             }
