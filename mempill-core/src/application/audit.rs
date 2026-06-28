@@ -90,7 +90,7 @@ mod tests {
         fn append_claim_edge(&self, _t: &mut MockTxn, _e: &ClaimEdge) -> Result<(), MockErr> { Ok(()) }
         fn commit(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
         fn rollback(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
-        fn load_subject_line(&self, _a: &AgentId, _s: &str, _p: &str) -> Result<Vec<Claim>, MockErr> { Ok(vec![]) }
+        fn load_subject_line(&self, _a: &AgentId, _s: &str, _p: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> { Ok(vec![]) }
         fn load_claim(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Option<Claim>, MockErr> { Ok(None) }
         fn load_validity_assertions_for(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ValidityAssertion>, MockErr> { Ok(vec![]) }
         fn load_ledger(&self, _a: &AgentId, _f: Option<&TransactionTime>, limit: usize) -> Result<Vec<LedgerEntry>, MockErr> {

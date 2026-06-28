@@ -163,10 +163,10 @@ fn run_same_agent_proof(store: Arc<PostgresPersistenceStore>, conn_str: &str) {
 
     // Verify: exactly 1 claim per predicate.
     let claims_t1 = store
-        .load_subject_line(&agent, "same-agent", "predicate-t1")
+        .load_subject_line(&agent, "same-agent", "predicate-t1", None)
         .expect("load_subject_line t1");
     let claims_t2 = store
-        .load_subject_line(&agent, "same-agent", "predicate-t2")
+        .load_subject_line(&agent, "same-agent", "predicate-t2", None)
         .expect("load_subject_line t2");
 
     assert_eq!(claims_t1.len(), 1, "same-agent: predicate-t1 must have exactly 1 claim");

@@ -119,7 +119,7 @@ async fn i9_rollback_leaves_zero_rows_verified_via_public_read_api() {
 
     // Baseline: load_subject_line returns empty before any writes.
     let before = store
-        .load_subject_line(&agent, "user", "role")
+        .load_subject_line(&agent, "user", "role", None)
         .expect("load_subject_line must succeed on empty store");
     assert!(before.is_empty(), "baseline: no claims before any write");
 
@@ -144,7 +144,7 @@ async fn i9_rollback_leaves_zero_rows_verified_via_public_read_api() {
 
     // 1. load_subject_line must return empty (claim row not committed).
     let after_claims = store
-        .load_subject_line(&agent, "user", "role")
+        .load_subject_line(&agent, "user", "role", None)
         .expect("load_subject_line after rollback must succeed");
     assert!(
         after_claims.is_empty(),
@@ -194,7 +194,7 @@ async fn i9_commit_makes_rows_visible_via_public_read_api() {
 
     // Claim must be visible via load_subject_line.
     let claims = store
-        .load_subject_line(&agent, "user", "status")
+        .load_subject_line(&agent, "user", "status", None)
         .expect("load_subject_line after commit must succeed");
     assert_eq!(claims.len(), 1, "after commit, exactly 1 claim must be visible");
     assert_eq!(claims[0].claim_ref(), &claim_ref, "the committed claim_ref must match");

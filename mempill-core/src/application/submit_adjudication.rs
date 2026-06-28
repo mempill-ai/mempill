@@ -512,7 +512,7 @@ mod tests {
             Ok(())
         }
 
-        fn load_subject_line(&self, _: &AgentId, _: &str, _: &str) -> Result<Vec<Claim>, MockErr> {
+        fn load_subject_line(&self, _: &AgentId, _: &str, _: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> {
             Ok(self.claims.lock().unwrap().clone())
         }
 

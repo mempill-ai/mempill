@@ -358,7 +358,7 @@ mod tests {
         // ── Remaining read methods — not exercised by supersession tests ──
 
         fn load_subject_line(
-            &self, _: &AgentId, _: &str, _: &str,
+            &self, _: &AgentId, _: &str, _: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
         ) -> Result<Vec<Claim>, MockError> {
             if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])

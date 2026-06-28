@@ -618,23 +618,42 @@ impl PersistencePort for PostgresPersistenceStore {
     // ── Read methods (pool.get() per call; non-mutating) ─────────────────────
 
     /// Load all claims on (agent_id, subject, predicate), ordered by tx_time ASC.
+    ///
+    /// When `as_of_tx_time` is `Some(T)`, only claims with `tx_time <= T` are
+    /// returned, enforcing bi-temporal tx-time visibility. When `None`, all claims
+    /// are returned (current view).
     fn load_subject_line(
         &self,
         agent_id: &AgentId,
         subject: &str,
         predicate: &str,
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<Claim>, PostgresStoreError> {
         let mut conn = self.pool.get()?;
-        let sql = format!(
-            "SELECT {CLAIM_SELECT_COLS} FROM claims
-             WHERE agent_id = $1 AND subject = $2 AND predicate = $3
-             ORDER BY tx_time ASC"
-        );
-        let rows = conn.query(
-            &sql,
-            &[&agent_id.0.as_str(), &subject, &predicate],
-        )?;
-        rows.iter().map(row_to_claim).collect()
+        if let Some(cutoff) = as_of_tx_time {
+            let sql = format!(
+                "SELECT {CLAIM_SELECT_COLS} FROM claims
+                 WHERE agent_id = $1 AND subject = $2 AND predicate = $3
+                   AND tx_time <= $4
+                 ORDER BY tx_time ASC"
+            );
+            let rows = conn.query(
+                &sql,
+                &[&agent_id.0.as_str(), &subject, &predicate, &cutoff],
+            )?;
+            rows.iter().map(row_to_claim).collect()
+        } else {
+            let sql = format!(
+                "SELECT {CLAIM_SELECT_COLS} FROM claims
+                 WHERE agent_id = $1 AND subject = $2 AND predicate = $3
+                 ORDER BY tx_time ASC"
+            );
+            let rows = conn.query(
+                &sql,
+                &[&agent_id.0.as_str(), &subject, &predicate],
+            )?;
+            rows.iter().map(row_to_claim).collect()
+        }
     }
 
     /// Load a single claim by `ClaimRef`. Returns `None` if not found.

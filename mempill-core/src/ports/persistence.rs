@@ -53,11 +53,26 @@ pub trait PersistencePort: Send + Sync + 'static {
 
     // ── Read operations (non-mutating w.r.t. belief and history — I1, I3) ──
 
+    /// Load all claims on the given (agent_id, subject, predicate) subject-line,
+    /// ordered by `tx_time ASC` (oldest first — callers fold in tx_time order).
+    ///
+    /// # Transaction-time cutoff (`as_of_tx_time`)
+    ///
+    /// When `as_of_tx_time` is `Some(T)`, only claims with `transaction_time <= T`
+    /// are returned. This enforces correct bi-temporal tx-time semantics: a claim
+    /// ingested after the query's as-of point did not exist at that point and must
+    /// not be visible to the fold.
+    ///
+    /// When `as_of_tx_time` is `None`, all claims are returned (current view). Use
+    /// `None` on all **write-path** callers (ingest, reconcile, adjudication) so
+    /// that incumbent detection always sees the full current state; passing `Some`
+    /// there would break conflict detection and succession.
     fn load_subject_line(
         &self,
         agent_id: &AgentId,
         subject: &str,
         predicate: &str,
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<Claim>, Self::Error>;
 
     fn load_claim(

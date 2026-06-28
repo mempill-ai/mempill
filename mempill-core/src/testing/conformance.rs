@@ -374,7 +374,7 @@ where
     store.commit(txn).expect("conformance[t4]: commit");
 
     let line = store
-        .load_subject_line(&agent, "user", "job")
+        .load_subject_line(&agent, "user", "job", None)
         .expect("conformance[t4]: load_subject_line must not error");
 
     assert_eq!(line.len(), 2, "conformance[t4]: must have 2 claims on subject line");
@@ -827,7 +827,7 @@ where
 {
     let agent = AgentId("conformance-hist-t1".into());
     let claims = store
-        .load_subject_line(&agent, "hist-nobody", "hist-nothing")
+        .load_subject_line(&agent, "hist-nobody", "hist-nothing", None)
         .expect("conformance[hist-t1]: load_subject_line must not error");
     assert!(
         claims.is_empty(),
@@ -868,7 +868,7 @@ where
     store.commit(txn).expect("conformance[hist-t2]: commit");
 
     let claims = store
-        .load_subject_line(&agent, "hist-acme", "ceo")
+        .load_subject_line(&agent, "hist-acme", "ceo", None)
         .expect("conformance[hist-t2]: load_subject_line must not error");
     assert_eq!(claims.len(), 1, "conformance[hist-t2]: must have 1 claim");
 
@@ -925,7 +925,7 @@ where
     store.commit(txn).expect("conformance[hist-t3]: commit");
 
     let mut claims = store
-        .load_subject_line(&agent, "hist-corp", "ceo")
+        .load_subject_line(&agent, "hist-corp", "ceo", None)
         .expect("conformance[hist-t3]: load_subject_line must not error");
     assert_eq!(claims.len(), 3, "conformance[hist-t3]: must have 3 claims (Alice, John, Bob)");
 
@@ -988,7 +988,7 @@ where
     store.commit(txn).expect("conformance[hist-t4]: commit");
 
     let claims = store
-        .load_subject_line(&agent, "hist-org", "lead")
+        .load_subject_line(&agent, "hist-org", "lead", None)
         .expect("conformance[hist-t4]: load_subject_line");
     assert_eq!(claims.len(), 1, "conformance[hist-t4]: one claim loaded");
 
@@ -1224,7 +1224,7 @@ where
     use crate::engine::truth_engine;
 
     let subject_claims = store
-        .load_subject_line(&agent, "dscope-org", "ceo")
+        .load_subject_line(&agent, "dscope-org", "ceo", None)
         .expect("dscope[t1]: load_subject_line must not error");
     assert_eq!(subject_claims.len(), 2, "dscope[t1]: must have 2 claims on subject-line");
 
@@ -1408,7 +1408,7 @@ where
     let valid_at = vat_dt("2021-06-01T00:00:00Z"); // inside Alice's window [2020, 2022)
 
     let claims = store
-        .load_subject_line(&agent, "corp", "ceo")
+        .load_subject_line(&agent, "corp", "ceo", None)
         .expect("va1: load_subject_line");
     assert_eq!(claims.len(), 3, "va1: must have 3 claims");
 
@@ -1453,7 +1453,7 @@ where
     let as_of    = vat_dt("2026-01-01T00:00:00Z");
     let valid_at = vat_dt("2023-01-01T00:00:00Z"); // inside Bob's window [2022, 2024)
 
-    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va2: load");
+    let claims = store.load_subject_line(&agent, "corp", "ceo", None).expect("va2: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
     let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va2: ledger");
     let disp = build_latest_disposition_map(&ledger);
@@ -1487,7 +1487,7 @@ where
     let as_of    = vat_dt("2026-01-01T00:00:00Z");
     let valid_at = vat_dt("2025-06-01T00:00:00Z"); // inside Carol's open window [2024, ∞)
 
-    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va3: load");
+    let claims = store.load_subject_line(&agent, "corp", "ceo", None).expect("va3: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
     let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va3: ledger");
     let disp = build_latest_disposition_map(&ledger);
@@ -1521,7 +1521,7 @@ where
     let as_of    = vat_dt("2026-01-01T00:00:00Z");
     let valid_at = vat_dt("2019-01-01T00:00:00Z"); // before Alice's window start 2020-01-01
 
-    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va4: load");
+    let claims = store.load_subject_line(&agent, "corp", "ceo", None).expect("va4: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
     let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va4: ledger");
     let disp = build_latest_disposition_map(&ledger);
@@ -1612,7 +1612,7 @@ where
     store.append_validity_assertion(&mut txn, &bound).expect("va5: append bound");
     store.commit(txn).expect("va5: commit");
 
-    let claims = store.load_subject_line(&agent, "va5-corp", "ceo").expect("va5: load");
+    let claims = store.load_subject_line(&agent, "va5-corp", "ceo", None).expect("va5: load");
     assert_eq!(claims.len(), 2, "va5: must have 2 claims");
 
     let refs: Vec<ClaimRef> = vec![alice_ref.clone(), bob_ref.clone()];
@@ -1702,7 +1702,7 @@ where
 
     let as_of = vat_dt("2026-06-01T00:00:00Z"); // both tx-visible and vt-instant = 2026
 
-    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va6: load");
+    let claims = store.load_subject_line(&agent, "corp", "ceo", None).expect("va6: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
     let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va6: ledger");
     let disp = build_latest_disposition_map(&ledger);
