@@ -328,7 +328,7 @@ fn row_to_claim(row: &postgres::Row) -> Result<Claim, PostgresStoreError> {
             start: valid_time_start,
             end: valid_time_end,
             valid_time_confidence: valid_time_confidence as f32,
-            granularity: None,
+            start_granularity: None, end_granularity: None,
         },
         Confidence {
             value_confidence: value_confidence as f32,

@@ -67,7 +67,7 @@ async fn test1_temporal_succession_non_overlapping_valid_time() {
             start: Some(alice_start),
             end: Some(alice_end),
             valid_time_confidence: 0.9,
-            granularity: None,
+            start_granularity: None, end_granularity: None,
         }),
         confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
         criticality: Criticality::Medium,
@@ -103,7 +103,7 @@ async fn test1_temporal_succession_non_overlapping_valid_time() {
             start: Some(bob_start),
             end: None, // open-ended: Bob is current CEO
             valid_time_confidence: 0.9,
-            granularity: None,
+            start_granularity: None, end_granularity: None,
         }),
         confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
         criticality: Criticality::Medium,

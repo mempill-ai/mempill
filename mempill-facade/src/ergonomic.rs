@@ -19,9 +19,8 @@ use mempill_core::{IngestClaimRequest, MemError, QueryHistoryRequest, QueryMemor
 use mempill_types::{
     AgentId, BeliefStatus, Cardinality, ClaimRef, Confidence, Criticality, Disposition,
     ExternalKind, ProvenanceLabel, ValidTime,
+    time::parse_valid_time_date,
 };
-
-use crate::date::parse_lenient_date;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -479,8 +478,31 @@ impl IngestClaimRequestBuilder {
         let has_dates = self.valid_from.is_some() || self.valid_until.is_some();
         let vtc = if has_dates { value_confidence } else { 0.0 };
 
-        let start = self.valid_from.as_deref().map(parse_lenient_date).transpose()?;
-        let end = self.valid_until.as_deref().map(parse_lenient_date).transpose()?;
+        // Parse each endpoint individually via parse_valid_time_date so granularity is captured.
+        // parse_lenient_date is kept as a shim for non-granularity callers; here we call the
+        // granularity-aware version directly and map the error to MempillDxError.
+        let (start, start_granularity) = match self.valid_from.as_deref() {
+            None => (None, None),
+            Some(s) => {
+                let (dt, gran) = parse_valid_time_date(s).ok_or_else(|| MempillDxError::UnparsableDate {
+                    input: s.to_string(),
+                    hint: "Use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339 (e.g. 2026-01-01T00:00:00Z). \
+                           Natural-language dates must be resolved by the caller before passing to remember().",
+                })?;
+                (Some(dt), Some(gran))
+            }
+        };
+        let (end, end_granularity) = match self.valid_until.as_deref() {
+            None => (None, None),
+            Some(s) => {
+                let (dt, gran) = parse_valid_time_date(s).ok_or_else(|| MempillDxError::UnparsableDate {
+                    input: s.to_string(),
+                    hint: "Use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339 (e.g. 2026-01-01T00:00:00Z). \
+                           Natural-language dates must be resolved by the caller before passing to remember().",
+                })?;
+                (Some(dt), Some(gran))
+            }
+        };
 
         if let (Some(s), Some(e)) = (start, end) {
             if s >= e {
@@ -493,7 +515,7 @@ impl IngestClaimRequestBuilder {
         }
 
         let valid_time = if has_dates {
-            Some(ValidTime { start, end, valid_time_confidence: vtc , granularity: None})
+            Some(ValidTime { start, end, valid_time_confidence: vtc, start_granularity, end_granularity })
         } else {
             None
         };
@@ -802,6 +824,76 @@ mod tests {
             }
             other => panic!("expected UnparsableDate, got {other:?}"),
         }
+    }
+
+    // ── W1: per-endpoint granularity capture ─────────────────────────────────
+
+    /// `valid_from("2020-03")` → start_granularity = Month, open end → end_granularity = None.
+    #[test]
+    fn w1_write_path_captures_start_granularity_month() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.expect("ValidTime must be Some when valid_from is set");
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Month),
+            "month-precision start must record Month granularity");
+        assert_eq!(vt.end_granularity, None,
+            "open end must yield None end_granularity");
+    }
+
+    /// `valid_from("2020")` → start_granularity = Year.
+    #[test]
+    fn w1_write_path_captures_start_granularity_year() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Year));
+    }
+
+    /// `valid_from("2020-03-15")` → start_granularity = Day.
+    #[test]
+    fn w1_write_path_captures_start_granularity_day() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03-15")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Day));
+    }
+
+    /// Both endpoints with differing granularities are captured independently.
+    /// e.g. start="2020-03" (Month) / end="2023" (Year).
+    #[test]
+    fn w1_write_path_captures_per_endpoint_granularity() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03")
+            .valid_until("2023")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Month),
+            "start must have Month granularity");
+        assert_eq!(vt.end_granularity, Some(DateGranularity::Year),
+            "end must have Year granularity");
+    }
+
+    /// RFC3339 start → Instant granularity.
+    #[test]
+    fn w1_write_path_rfc3339_yields_instant_granularity() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03-15T10:00:00Z")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Instant));
     }
 
     // ── RecallResult helper methods ───────────────────────────────────────────

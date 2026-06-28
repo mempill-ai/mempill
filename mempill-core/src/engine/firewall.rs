@@ -186,7 +186,7 @@ mod tests {
                 derivation_depth,
             },
             tx(),
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             Criticality::Medium,
             derived_from,
