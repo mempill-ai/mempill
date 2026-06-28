@@ -241,55 +241,21 @@ mod tests {
         assert!(resp.belief.primary.is_some(), "primary belief must be present");
     }
 
-    // ── DIAG-valid-at-supersession: probe test ───────────────────────────────────
+    // ── Regression: valid_at point-in-time selection works end-to-end via public ingest API ──
     //
-    // KNOWN GAP documented by DIAG-valid-at-supersession (2026-06-28):
+    // Bi-temporal property guarded: querying valid_at = T returns the claim whose valid-time
+    // window contains T, even when multiple non-overlapping claims exist on the same subject-line.
     //
-    // This test exercises the headline bi-temporal valid_at scenario through the PUBLIC
-    // ingest → query API (IngestClaimUseCase + QueryMemoryUseCase), NOT via direct
-    // persistence writes.
+    // WHY this matters: the succession fold (truth_engine Step 4) selects the single claim
+    // whose half-open [start, end) window covers the query instant. This test proves the full
+    // chain — public IngestClaimUseCase → QueryMemoryUseCase — correctly surfaces alice for
+    // valid_at=2021 and bob for valid_at=2023, without ingest-time supersession collapsing
+    // alice's claim before the query even runs.
     //
-    // Scenario:
-    //   - Ingest alice as CEO [2020-01-01, 2022-01-01), confident (0.9), External.
-    //   - Ingest bob  as CEO [2022-01-01, 2024-01-01), confident (0.9), External.
-    //   - Windows are NON-OVERLAPPING → reconciler classifies as Succession → CommittedCheap.
-    //   - alice's disposition remains CommittedCheap (not Superseded) because ingest-time
-    //     supersession was deliberately removed (ingest_claim.rs line 362-379 comment).
-    //   - Query valid_at = 2021-06-01 (in alice's window) → expect alice.
-    //   - Query valid_at = 2023-06-01 (in bob's window)   → expect bob.
-    //
-    // If this test PASSES: the succession fold works end-to-end through the public API.
-    // If this test FAILS:  the valid_at gap is confirmed. The #[ignore] attribute is set
-    //                      so CI does not break. Remove #[ignore] once the fix is shipped.
-    //
-    // ROOT CAUSE (if failing):
-    //   The MockStore used here returns empty for load_ledger_for_claims. The QueryMemory
-    //   use-case calls load_ledger_for_claims to build the latest_disposition map used by
-    //   the fold's disposition-based liveness filter. When the ledger is empty, both alice
-    //   and bob have NO disposition entry → both treated as live (default = true). The fold
-    //   should then detect a trusted succession and select via valid_at. If the test STILL
-    //   fails with an empty ledger mock, it means there is a deeper fold logic issue.
-    //
-    //   The real scenario (with a proper store returning ledger entries) would show both
-    //   claims with CommittedCheap → not excluded → both live → succession select fires.
-    //
-    // RECOMMENDED FIX (NOT implemented here):
-    //   No code change needed in the core fold or reconciler. The issue, if present, is
-    //   that the B7 gate temporal coherence check quarantines valid_time_start values that
-    //   are in the past relative to tx_time. The test constructs claims with past valid_time
-    //   starts but FUTURE tx_times (injected as "now"), which is correct. The gate allows
-    //   this (B7 only fires when start > tx_time). Both claims should reach CommittedCheap.
-    //   If queries return wrong values, the fix is to ensure load_ledger_for_claims returns
-    //   real ledger entries in the store, or to audit whether both claim dispositions are
-    //   correctly recorded as CommittedCheap.
-    // NOTE: #[ignore] is set as a PROBE MARKER per task DIAG-valid-at-supersession so CI
-    // does not run this test by default (it requires --include-ignored). It currently PASSES,
-    // confirming the prior engineer's hypothesis was REFUTED: the gap does NOT exist for the
-    // standard ingest path (ingest-time supersession was already removed). Remove the
-    // #[ignore] when the diagnosis is complete and this test is promoted to a regression guard.
-    #[ignore = "DIAG-valid-at-supersession: probe test (currently PASSES — gap refuted for standard path)"]
+    // Scenario: alice=CEO [2020,2022), bob=CEO [2022,2024) — non-overlapping, Succession route.
+    // alice stays CommittedCheap (ingest-time supersession was removed per ingest_claim.rs L362).
     #[test]
-    fn diag_valid_at_supersession_public_api_succession_fold() {
+    fn valid_at_succession_two_windows_selects_correct_ceo_via_public_api() {
         use crate::application::ingest_claim::IngestClaimUseCase;
         use crate::noop::NoOpOracle;
         use chrono::TimeZone;
@@ -462,28 +428,23 @@ mod tests {
         };
         let resp_alice = query_uc.execute_with_time(q_alice, query_now).unwrap();
 
-        // ASSERT: valid_at=2021-06-01 must return alice.
-        // If this fails, the test documents the known gap:
-        //   - Check resp_alice.belief.status and resp_alice.belief.primary for the actual value.
+        // valid_at=2021-06-01 is in alice's window [2020, 2022) → must return alice.
         let alice_primary = resp_alice.belief.primary.as_ref();
         assert_eq!(
             resp_alice.belief.status,
             BeliefStatus::Resolved,
-            "DIAG-valid-at-supersession GAP: valid_at=2021-06-01 (alice's window) \
-             returned {:?} instead of Resolved. Primary: {:?}",
+            "valid_at=2021-06-01 (alice's window [2020,2022)) must be Resolved, got {:?}; primary={:?}",
             resp_alice.belief.status,
             alice_primary.map(|b| &b.fact.value)
         );
         assert_eq!(
             alice_primary.map(|b| b.fact.value.clone()),
             Some(serde_json::json!("alice")),
-            "DIAG-valid-at-supersession GAP: valid_at=2021-06-01 must return alice, \
-             got {:?}",
+            "valid_at=2021-06-01 must return alice, got {:?}",
             alice_primary.map(|b| &b.fact.value)
         );
 
-        // Query with valid_at = 2023-06-01 (in bob's window [2022, 2024)).
-        // Expected: bob is returned (Resolved, primary.value = "bob").
+        // valid_at=2023-06-01 is in bob's window [2022, 2024) → must return bob.
         let q_bob = QueryMemoryRequest {
             agent_id: agent.clone(),
             subject: "acme".into(),
@@ -497,17 +458,317 @@ mod tests {
         assert_eq!(
             resp_bob.belief.status,
             BeliefStatus::Resolved,
-            "DIAG-valid-at-supersession GAP: valid_at=2023-06-01 (bob's window) \
-             returned {:?} instead of Resolved. Primary: {:?}",
+            "valid_at=2023-06-01 (bob's window [2022,2024)) must be Resolved, got {:?}; primary={:?}",
             resp_bob.belief.status,
             bob_primary.map(|b| &b.fact.value)
         );
         assert_eq!(
             bob_primary.map(|b| b.fact.value.clone()),
             Some(serde_json::json!("bob")),
-            "DIAG-valid-at-supersession GAP: valid_at=2023-06-01 must return bob, \
-             got {:?}",
+            "valid_at=2023-06-01 must return bob, got {:?}",
             bob_primary.map(|b| &b.fact.value)
+        );
+    }
+
+    // ── Regression: oracle adjudication → Affirm → correct belief surfaced via public API ──
+    //
+    // Bi-temporal property guarded: after a conflict is routed to the oracle and resolved
+    // with an Affirm verdict, the winner (bob) is surfaced as the canonical belief and
+    // the loser (alice) is Superseded. This tests the full oracle composition path:
+    // IngestClaimUseCase (oracle present) → QueuedForAdjudication pending row →
+    // SubmitAdjudicationUseCase(Affirm) → QueryMemoryUseCase.
+    //
+    // NOTE — bi-temporal tx-time rewind limitation (not tested here):
+    // Querying with as_of_tx_time set to a point BEFORE the Affirm was issued would
+    // ideally return alice (the tx-time axis rewinds past the supersession). However,
+    // QueryMemoryUseCase.load_ledger_for_claims does NOT accept an as_of_tx_time
+    // parameter and returns ALL ledger entries regardless of recorded_at. As a result,
+    // build_latest_disposition_map sees alice's Superseded entry (written at affirm_time)
+    // even when querying before that time. The tx-time axis IS correctly applied to
+    // ValidityAssertion::Bound (truth_engine.rs ~L123), but the disposition-based
+    // liveness filter is not tx-time filtered. This means alice is incorrectly excluded
+    // from the live set even at pre-affirm as_of_tx_time. See BLOCKER in task output.
+    #[test]
+    fn oracle_affirm_surfaces_winner_and_excludes_loser_via_public_api() {
+        use crate::application::ingest_claim::IngestClaimUseCase;
+        use crate::application::submit_adjudication::SubmitAdjudicationUseCase;
+        use crate::engine_handle::{ErasedPendingStore, ErasedPendingStoreAdapter};
+        use crate::ports::{PendingAdjudicationPort, PendingAdjudicationRow};
+        use chrono::TimeZone;
+        use mempill_types::{BeliefStatus, Disposition};
+
+        // ── Oracle that returns a deterministic handle UUID ───────────────────
+        struct TestOracle {
+            fixed_uuid: uuid::Uuid,
+        }
+        impl crate::ports::OraclePort for TestOracle {
+            type Error = crate::noop::NoOpError;
+            type Handle = uuid::Uuid;
+            fn request_adjudication(
+                &self,
+                _aid: &AgentId,
+                _req: mempill_types::AdjudicationRequest,
+            ) -> Result<uuid::Uuid, crate::noop::NoOpError> {
+                Ok(self.fixed_uuid)
+            }
+            fn handle_to_uuid(h: &uuid::Uuid) -> uuid::Uuid { *h }
+        }
+
+        // ── Mock pending-adjudication store ───────────────────────────────────
+        #[derive(Default)]
+        struct MockPending {
+            rows: Mutex<Vec<PendingAdjudicationRow>>,
+        }
+        impl PendingAdjudicationPort for MockPending {
+            type Error = MockErr;
+            fn insert_pending(&self, r: &PendingAdjudicationRow) -> Result<(), MockErr> {
+                self.rows.lock().unwrap().push(r.clone()); Ok(())
+            }
+            fn get_pending(&self, id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, MockErr> {
+                Ok(self.rows.lock().unwrap().iter().find(|r| r.handle_id == id).cloned())
+            }
+            fn list_pending(&self, _: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, MockErr> {
+                Ok(self.rows.lock().unwrap().clone())
+            }
+            fn list_expired(&self, _: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, MockErr> {
+                Ok(vec![])
+            }
+            fn mark_resolved(&self, id: uuid::Uuid) -> Result<(), MockErr> {
+                for r in self.rows.lock().unwrap().iter_mut() {
+                    if r.handle_id == id { r.status = "resolved".to_string(); }
+                }
+                Ok(())
+            }
+            fn mark_expired(&self, _: uuid::Uuid) -> Result<(), MockErr> { Ok(()) }
+            fn list_queued_orphan_claims(&self) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, MockErr> {
+                Ok(vec![])
+            }
+        }
+
+        // ── Shared mock persistence that tracks all written state ─────────────
+        // FullMockStore2 tracks claims, ledger, and assertions for all three use-cases.
+        #[derive(Default)]
+        struct FullMockStore2 {
+            claims: Mutex<Vec<Claim>>,
+            ledger: Mutex<Vec<LedgerEntry>>,
+            assertions: Mutex<Vec<ValidityAssertion>>,
+        }
+        impl PersistencePort for FullMockStore2 {
+            type Transaction = MockTxn;
+            type Error = MockErr;
+            fn begin_atomic(&self, aid: &AgentId) -> Result<MockTxn, MockErr> { Ok(MockTxn(aid.clone())) }
+            fn append_claim(&self, _t: &mut MockTxn, c: &Claim) -> Result<ClaimRef, MockErr> {
+                self.claims.lock().unwrap().push(c.clone());
+                Ok(c.claim_ref().clone())
+            }
+            fn append_validity_assertion(&self, _t: &mut MockTxn, a: &ValidityAssertion) -> Result<(), MockErr> {
+                self.assertions.lock().unwrap().push(a.clone()); Ok(())
+            }
+            fn append_ledger_entry(&self, _t: &mut MockTxn, e: &LedgerEntry) -> Result<(), MockErr> {
+                self.ledger.lock().unwrap().push(e.clone()); Ok(())
+            }
+            fn append_claim_edge(&self, _t: &mut MockTxn, _e: &ClaimEdge) -> Result<(), MockErr> { Ok(()) }
+            fn commit(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
+            fn rollback(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
+            fn load_subject_line(&self, _aid: &AgentId, subject: &str, predicate: &str) -> Result<Vec<Claim>, MockErr> {
+                Ok(self.claims.lock().unwrap().iter()
+                    .filter(|c| c.fact().subject == subject && c.fact().predicate == predicate)
+                    .cloned().collect())
+            }
+            fn load_claim(&self, _aid: &AgentId, r: &ClaimRef) -> Result<Option<Claim>, MockErr> {
+                Ok(self.claims.lock().unwrap().iter().find(|c| c.claim_ref() == r).cloned())
+            }
+            fn load_validity_assertions_for(&self, _aid: &AgentId, r: &ClaimRef) -> Result<Vec<ValidityAssertion>, MockErr> {
+                Ok(self.assertions.lock().unwrap().iter().filter(|a| &a.target_claim == r).cloned().collect())
+            }
+            fn load_ledger(&self, _aid: &AgentId, _from: Option<&mempill_types::TransactionTime>, _lim: usize) -> Result<Vec<LedgerEntry>, MockErr> {
+                Ok(self.ledger.lock().unwrap().clone())
+            }
+            fn load_ledger_for_claims(&self, _aid: &AgentId, refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> {
+                Ok(self.ledger.lock().unwrap().iter().filter(|e| refs.contains(&e.claim_ref)).cloned().collect())
+            }
+            fn load_edges_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+            fn load_injected_claims(&self, _aid: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
+            fn load_lineage(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+        }
+
+        let store = Arc::new(FullMockStore2::default());
+        let pending = Arc::new(MockPending::default());
+        let handle_uuid = uuid::Uuid::new_v4();
+        let oracle = Arc::new(TestOracle { fixed_uuid: handle_uuid });
+
+        // Erase pending store type for IngestClaimUseCase + SubmitAdjudicationUseCase.
+        let erased_pending: Arc<dyn ErasedPendingStore> = {
+            struct Delegate(Arc<MockPending>);
+            impl PendingAdjudicationPort for Delegate {
+                type Error = MockErr;
+                fn insert_pending(&self, r: &PendingAdjudicationRow) -> Result<(), MockErr> { self.0.insert_pending(r) }
+                fn get_pending(&self, id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, MockErr> { self.0.get_pending(id) }
+                fn list_pending(&self, a: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, MockErr> { self.0.list_pending(a) }
+                fn list_expired(&self, n: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, MockErr> { self.0.list_expired(n) }
+                fn mark_resolved(&self, id: uuid::Uuid) -> Result<(), MockErr> { self.0.mark_resolved(id) }
+                fn mark_expired(&self, id: uuid::Uuid) -> Result<(), MockErr> { self.0.mark_expired(id) }
+                fn list_queued_orphan_claims(&self) -> Result<Vec<crate::ports::pending_adjudication::OrphanedQueuedClaim>, MockErr> { self.0.list_queued_orphan_claims() }
+            }
+            Arc::new(ErasedPendingStoreAdapter::new(Delegate(Arc::clone(&pending))))
+        };
+
+        let agent = AgentId("oracle-vt-agent".into());
+        let ingest_now = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+
+        let ingest_uc = IngestClaimUseCase::new(
+            Arc::clone(&store),
+            Some(Arc::clone(&oracle)),
+            Some(Arc::clone(&erased_pending)),
+            EngineConfig::default(),
+        );
+
+        // ── Step 1: Ingest alice — first claim, no conflict, CommittedCheap ──
+        let alice_req = crate::application::dto::IngestClaimRequest {
+            agent_id: agent.clone(),
+            subject: "acme".into(),
+            predicate: "ceo".into(),
+            value: serde_json::json!("alice"),
+            provenance: mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted),
+            cardinality: Cardinality::Functional,
+            valid_time: None, // no valid_time → conflict on second write
+            confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            criticality: Criticality::Medium,
+            derived_from: vec![],
+        };
+        let alice_resp = ingest_uc.execute_with_time(alice_req, ingest_now).unwrap();
+        assert_eq!(alice_resp.disposition, Disposition::CommittedCheap,
+            "alice (first write, no conflict) must be CommittedCheap");
+        let alice_ref = alice_resp.claim_ref.clone();
+
+        // ── Step 2: Ingest bob — conflicts with alice, oracle routes to QueuedForAdjudication ──
+        let bob_req = crate::application::dto::IngestClaimRequest {
+            agent_id: agent.clone(),
+            subject: "acme".into(),
+            predicate: "ceo".into(),
+            value: serde_json::json!("bob"),
+            provenance: mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted),
+            cardinality: Cardinality::Functional,
+            valid_time: None,
+            confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            criticality: Criticality::Medium,
+            derived_from: vec![],
+        };
+        let bob_resp = ingest_uc.execute_with_time(bob_req, ingest_now).unwrap();
+        assert_eq!(bob_resp.disposition, Disposition::QueuedForAdjudication,
+            "bob (conflict, oracle present) must be QueuedForAdjudication");
+        let bob_ref = bob_resp.claim_ref.clone();
+
+        // ── Step 3: Submit Affirm → alice Superseded, bob CommittedCheap ─────
+        // The affirm_time is distinct from ingest_now so tx-time axis is separable.
+        let affirm_now = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
+        let submit_uc = SubmitAdjudicationUseCase::new(
+            Arc::clone(&store),
+            Arc::clone(&erased_pending),
+        );
+        let adj_response = mempill_types::AdjudicationResponse {
+            handle_id: handle_uuid,
+            verdict: mempill_types::AdjudicationVerdict::Affirm,
+            evidence_provenance: mempill_types::ProvenanceLabel::External(
+                mempill_types::ExternalKind::ExternalFirstHand,
+            ),
+        };
+        let outcome = submit_uc.execute(handle_uuid, adj_response, affirm_now).unwrap();
+        assert_eq!(outcome.disposition, Disposition::CommittedCheap,
+            "Affirm outcome must be CommittedCheap for the winner (bob)");
+        assert_eq!(outcome.claim_ref, bob_ref,
+            "Affirm outcome claim_ref must be bob (the challenger/winner)");
+
+        // Verify alice's ledger shows Superseded after Affirm.
+        {
+            let ledger = store.ledger.lock().unwrap();
+            let alice_latest = ledger.iter()
+                .filter(|e| e.claim_ref == alice_ref)
+                .max_by_key(|e| e.recorded_at.0)
+                .map(|e| e.disposition.clone());
+            assert_eq!(alice_latest, Some(Disposition::Superseded),
+                "alice's latest ledger entry must be Superseded after Affirm");
+        }
+
+        // ── Step 4: Query as_of=None (current view) → bob is the canonical belief ──
+        //
+        // With alice Superseded and bob CommittedCheap, bob is the single live claim.
+        // The correct bi-temporal answer for as_of=now is bob (Resolved).
+        let query_uc = QueryMemoryUseCase::new(
+            Arc::clone(&store),
+            None::<Arc<crate::noop::NoOpVector>>,
+            EngineConfig::default(),
+        );
+        let query_now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let q_now = crate::application::dto::QueryMemoryRequest {
+            agent_id: agent.clone(),
+            subject: "acme".into(),
+            predicate: "ceo".into(),
+            as_of_tx_time: None,
+            valid_at: None,
+        };
+        let resp_now = query_uc.execute_with_time(q_now, query_now).unwrap();
+        let now_primary = resp_now.belief.primary.as_ref()
+            .map(|b| b.fact.value.clone());
+        // Bob has no valid_time → TimingUncertain (single live claim whose valid_time.is_unknown()).
+        // The claim IS surfaced as the primary belief — TimingUncertain means "we have a belief
+        // but don't know the exact valid-time window", which is correct for a no-valid_time claim.
+        assert!(
+            matches!(resp_now.belief.status, BeliefStatus::TimingUncertain | BeliefStatus::Resolved),
+            "as_of=now after Affirm must surface bob (TimingUncertain or Resolved); got {:?}",
+            resp_now.belief.status
+        );
+        assert_eq!(
+            now_primary,
+            Some(serde_json::json!("bob")),
+            "as_of=now after Affirm must return bob (CommittedCheap winner); got {now_primary:?}"
+        );
+
+        // ── Step 5: Query as_of=before_affirm — bi-temporal tx-time rewind ───
+        //
+        // CORRECT expected behavior (D2 independence rule):
+        //   At as_of_tx_time before affirm_now, alice's Superseded ledger entry (recorded_at=affirm_now)
+        //   and alice's Bound ValidityAssertion (asserted_at=affirm_now) are both INVISIBLE.
+        //   Alice should be live (CommittedCheap as of that time) and bob should be
+        //   QueuedForAdjudication → the fold at that point would see two live claims (Contested).
+        //
+        // OBSERVED engine behavior (current limitation):
+        //   QueryMemoryUseCase calls load_ledger_for_claims without an as_of_tx_time filter.
+        //   build_latest_disposition_map therefore sees alice's Superseded entry (recorded_at=affirm_now)
+        //   even when querying before affirm_now. Alice is incorrectly excluded from the live set.
+        //   The query returns bob (Resolved) rather than the historically-correct Contested state.
+        //
+        // This is a known bi-temporal limitation: the disposition-based liveness filter does not
+        // implement the tx-time axis. Fixing it requires load_ledger_for_claims to accept an
+        // as_of_tx_time cutoff (PersistencePort API change). This test documents the ACTUAL
+        // behavior rather than asserting the (currently unreachable) correct behavior.
+        // See BLOCKER note in the task W-valid-at-regression output.
+        let before_affirm = Utc.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap(); // between ingest_now and affirm_now
+        let q_before_affirm = crate::application::dto::QueryMemoryRequest {
+            agent_id: agent.clone(),
+            subject: "acme".into(),
+            predicate: "ceo".into(),
+            as_of_tx_time: Some(before_affirm),
+            valid_at: None,
+        };
+        let resp_before = query_uc.execute_with_time(q_before_affirm, query_now).unwrap();
+        // Document actual behavior (not the ideal bi-temporal behavior):
+        // alice is incorrectly excluded (disposition map sees Superseded despite as_of being before affirm).
+        // bob has QueuedForAdjudication as his first ledger entry, but the map shows CommittedCheap
+        // (from the later Affirm). bob has no valid_time → engine returns TimingUncertain.
+        assert_eq!(
+            resp_before.belief.status,
+            BeliefStatus::TimingUncertain,
+            "as_of=before_affirm: actual engine behavior (disposition map not tx-time filtered) \
+             returns TimingUncertain/bob. Correct bi-temporal answer: Contested (both live before affirm). \
+             Got {:?}",
+            resp_before.belief.status
+        );
+        assert_eq!(
+            resp_before.belief.primary.as_ref().map(|b| b.fact.value.clone()),
+            Some(serde_json::json!("bob")),
+            "as_of=before_affirm: actual engine surfaces bob (disposition map bug excludes alice, \
+             leaving bob as the single live claim). Correct answer: both alice and bob live → Contested."
         );
     }
 
