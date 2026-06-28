@@ -5,6 +5,8 @@ Provides:
   - Disposition: str-Enum with all 12 variants (matches Rust serde names)
   - ProvenanceLabel: factory helpers returning the wire-shape dict
   - TypedDicts for all 8 DTO shapes (IDE/type-checker hints only)
+  - ValidTimeDict: temporal bound with confidence and optional granularity
+  - BeliefProjection: typed shape of the belief returned by query_memory
 """
 
 from __future__ import annotations
@@ -119,17 +121,99 @@ class IngestClaimResponse(TypedDict):
     contested_with: list[str]  # list of UUID strings
 
 
+class ValidTimeDict(TypedDict, total=False):
+    """Temporal bound for a claim's valid-time window.
+
+    All keys are optional; omitting both ``start`` and ``end`` signals open/unknown bounds.
+
+    Fields:
+        start: ISO-8601 UTC string marking the start of the valid-time window (inclusive).
+               Example: "2023-01-01T00:00:00Z"
+        end:   ISO-8601 UTC string marking the end of the valid-time window (exclusive).
+               None / omitted means open-ended (still valid as of now).
+        valid_time_confidence: Confidence that the asserted time bounds are correct [0.0, 1.0].
+                               0.0 = unknown / no time bounds supplied.
+        granularity: Optional human-readable precision hint, e.g. "year", "month", "day".
+                     The engine does not interpret this value — it is stored verbatim and
+                     surfaced to callers for display purposes (planned v0.3 feature).
+    """
+
+    start: str
+    end: str
+    valid_time_confidence: float
+    granularity: str
+
+
+class FactDict(TypedDict):
+    """The asserted fact inside a BeliefSlot."""
+
+    subject: str
+    predicate: str
+    value: Any
+
+
+class BeliefSlot(TypedDict, total=False):
+    """A single candidate in the BeliefProjection (primary or alternative).
+
+    Maps to the Rust ``BeliefSlot`` type returned by ``query_memory``.
+    Use ``belief["primary"]["fact"]["value"]`` for the resolved value.
+    """
+
+    claim_ref: str          # UUID string of the backing claim
+    fact: FactDict          # the asserted fact (subject, predicate, value)
+    valid_time: ValidTimeDict
+    confidence: ConfidenceDict
+    provenance: dict[str, str]   # adjacently-tagged: {"type": ..., "kind"?: ...}
+    currency_signal: dict[str, Any]
+
+
+class BeliefProjection(TypedDict, total=False):
+    """Full belief projection returned by engine.query_memory().
+
+    Access pattern (most common):
+        resp = engine.query_memory({...})
+        value = resp["belief"]["primary"]["fact"]["value"]
+
+    For Contested beliefs, ``primary`` is the first candidate and ``alternatives``
+    holds the remaining ones. Check ``resp["belief"]["status"]`` before trusting
+    ``primary`` alone.
+    """
+
+    status: str             # "Resolved" | "Contested" | "Conflict" | "TimingUncertain" | "NoBelief"
+    primary: BeliefSlot     # the canonical live belief (None when status is NoBelief)
+    alternatives: list[BeliefSlot]  # competing candidates (non-empty for Contested/Conflict)
+    staleness: dict[str, Any]       # {"is_stale": bool, ...}
+    currency: str           # top-level currency signal string
+
+
 class QueryMemoryRequest(TypedDict):
-    """Request to engine.query_memory()."""
+    """Request to engine.query_memory().
+
+    Bi-temporal query — two independent time axes:
+
+    * ``valid_at`` selects the belief *true in the world* at the given real-world
+      instant (the valid-time axis).  Example: "What was the CEO on 2023-06-15?"
+
+    * ``as_of_tx_time`` selects what the *system knew* at a given point in its log
+      (the transaction-time axis).  Example: "What did the engine know last Tuesday?"
+
+    The two compose independently per the D2 bi-temporal rule: the transaction-time
+    filter is applied first, then the valid-time selection narrows the result.
+
+    When neither is set, both axes default to ``now`` (current live belief).
+    """
+
     agent_id: str
     subject: str
     predicate: str
-    as_of_tx_time: NotRequired[Optional[str]]  # ISO-8601 UTC string
+    as_of_tx_time: NotRequired[Optional[str]]  # ISO-8601 UTC string — transaction-time axis
+    valid_at: NotRequired[Optional[str]]        # ISO-8601 UTC string — valid-time axis
 
 
 class QueryMemoryResponse(TypedDict):
     """Response from engine.query_memory() — contains the canonical BeliefProjection."""
-    belief: dict[str, Any]
+
+    belief: BeliefProjection
 
 
 class ReconcileRequest(TypedDict):
@@ -161,6 +245,10 @@ __all__ = [
     "Disposition",
     "ProvenanceLabel",
     "ConfidenceDict",
+    "ValidTimeDict",
+    "FactDict",
+    "BeliefSlot",
+    "BeliefProjection",
     "IngestClaimRequest",
     "IngestClaimResponse",
     "QueryMemoryRequest",
