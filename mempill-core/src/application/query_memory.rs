@@ -49,14 +49,17 @@ where
         req: QueryMemoryRequest,
         now: DateTime<Utc>,
     ) -> Result<QueryMemoryResponse, MemError> {
-        // Load all claims for the subject-line.
-        let claims = self.persistence
-            .load_subject_line(&req.agent_id, &req.subject, &req.predicate)
-            .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
-
         // Determine the bi-temporal as-of point: use the request's as_of_tx_time if supplied,
         // otherwise use the injected `now`.
         let as_of = req.as_of_tx_time.unwrap_or(now);
+
+        // Load claims for the subject-line scoped to the tx-time as-of point.
+        // Passing `Some(as_of)` enforces the claim-level tx-time cutoff: claims ingested
+        // after `as_of` are excluded at the DB layer. This is the correct bi-temporal
+        // behavior — a claim that did not exist at `as_of` must not be visible to the fold.
+        let claims = self.persistence
+            .load_subject_line(&req.agent_id, &req.subject, &req.predicate, Some(as_of))
+            .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         // Load ledger for the disposition-based liveness filter — scoped to exactly the
         // claims on this subject-line (no agent-wide cap; always complete regardless of
@@ -159,7 +162,7 @@ mod tests {
         fn append_claim_edge(&self, _t: &mut MockTxn, _e: &ClaimEdge) -> Result<(), MockErr> { Ok(()) }
         fn commit(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
         fn rollback(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
-        fn load_subject_line(&self, _aid: &AgentId, subject: &str, predicate: &str) -> Result<Vec<Claim>, MockErr> {
+        fn load_subject_line(&self, _aid: &AgentId, subject: &str, predicate: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> {
             let claims = self.claims.lock().unwrap();
             Ok(claims.iter()
                 .filter(|c| c.fact().subject == subject && c.fact().predicate == predicate)
@@ -295,7 +298,7 @@ mod tests {
             fn append_claim_edge(&self, _t: &mut MockTxn, _e: &ClaimEdge) -> Result<(), MockErr> { Ok(()) }
             fn commit(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
             fn rollback(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
-            fn load_subject_line(&self, _aid: &AgentId, subject: &str, predicate: &str) -> Result<Vec<Claim>, MockErr> {
+            fn load_subject_line(&self, _aid: &AgentId, subject: &str, predicate: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> {
                 let claims = self.claims.lock().unwrap();
                 Ok(claims.iter()
                     .filter(|c| c.fact().subject == subject && c.fact().predicate == predicate)
@@ -572,7 +575,7 @@ mod tests {
             fn append_claim_edge(&self, _t: &mut MockTxn, _e: &ClaimEdge) -> Result<(), MockErr> { Ok(()) }
             fn commit(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
             fn rollback(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
-            fn load_subject_line(&self, _aid: &AgentId, subject: &str, predicate: &str) -> Result<Vec<Claim>, MockErr> {
+            fn load_subject_line(&self, _aid: &AgentId, subject: &str, predicate: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> {
                 Ok(self.claims.lock().unwrap().iter()
                     .filter(|c| c.fact().subject == subject && c.fact().predicate == predicate)
                     .cloned().collect())

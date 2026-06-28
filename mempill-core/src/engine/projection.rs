@@ -324,7 +324,7 @@ mod tests {
         fn commit(&self, _: MockTxn) -> Result<(), MockErr> { Ok(()) }
         fn rollback(&self, _: MockTxn) -> Result<(), MockErr> { Ok(()) }
 
-        fn load_subject_line(&self, _: &AgentId, _: &str, _: &str) -> Result<Vec<Claim>, MockErr> { Ok(vec![]) }
+        fn load_subject_line(&self, _: &AgentId, _: &str, _: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> { Ok(vec![]) }
         fn load_claim(&self, _: &AgentId, _: &ClaimRef) -> Result<Option<Claim>, MockErr> { Ok(None) }
         fn load_validity_assertions_for(&self, _: &AgentId, _: &ClaimRef) -> Result<Vec<ValidityAssertion>, MockErr> { Ok(vec![]) }
         fn load_ledger(&self, _: &AgentId, _: Option<&TransactionTime>, _: usize) -> Result<Vec<LedgerEntry>, MockErr> {

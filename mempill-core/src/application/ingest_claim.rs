@@ -133,8 +133,11 @@ where
         }
 
         // ── Step 3: C3 reconciler — load incumbent + classify conflict ────────────
+        // WRITE path: pass None so incumbent detection sees the full current state.
+        // A tx-time cutoff here would break conflict detection and succession
+        // (a post-cutoff supersession would appear absent, causing duplicate live claims).
         let incumbent_claims = self.persistence
-            .load_subject_line(&req.agent_id, &req.subject, &req.predicate)
+            .load_subject_line(&req.agent_id, &req.subject, &req.predicate, None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         // Load ledger for disposition-based filtering (excludes non-live dispositions from fold).
@@ -504,6 +507,7 @@ mod tests {
             _agent_id: &AgentId,
             _subject: &str,
             _predicate: &str,
+            _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
         ) -> Result<Vec<Claim>, MockErr> { Ok(vec![]) }
 
         fn load_claim(&self, _agent_id: &AgentId, _ref: &ClaimRef) -> Result<Option<Claim>, MockErr> {
@@ -668,7 +672,7 @@ mod tests {
         fn commit(&self, _: MockTxn) -> Result<(), MockErr> { Ok(()) }
         fn rollback(&self, _: MockTxn) -> Result<(), MockErr> { Ok(()) }
 
-        fn load_subject_line(&self, _agent_id: &AgentId, _subject: &str, _predicate: &str) -> Result<Vec<Claim>, MockErr> {
+        fn load_subject_line(&self, _agent_id: &AgentId, _subject: &str, _predicate: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> {
             // Return stored claims so gate sees the incumbent.
             Ok(self.claims.lock().unwrap().clone())
         }

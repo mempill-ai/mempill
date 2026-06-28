@@ -124,8 +124,11 @@ where
         now: DateTime<Utc>,
     ) -> Result<QueryHistoryResponse, MemError> {
         // Load all claims for the subject-line (including superseded ones).
+        // AUDIT path: pass None to return the full claim history regardless of tx-time.
+        // query_history is a historical audit view — it must show every claim ever ingested,
+        // not just those visible at a particular tx-time point.
         let claims = self.persistence
-            .load_subject_line(&req.agent_id, &req.subject, &req.predicate)
+            .load_subject_line(&req.agent_id, &req.subject, &req.predicate, None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         if claims.is_empty() {
@@ -281,6 +284,7 @@ mod tests {
             _aid: &AgentId,
             subject: &str,
             predicate: &str,
+            _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
         ) -> Result<Vec<Claim>, MockErr> {
             let claims = self.claims.lock().unwrap();
             Ok(claims

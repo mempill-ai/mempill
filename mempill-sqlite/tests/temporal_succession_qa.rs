@@ -158,43 +158,59 @@ async fn test1_temporal_succession_non_overlapping_valid_time() {
         qr_now.belief.alternatives
     );
 
-    // Query as-of 2022-02-01 (in Alice's window [2020-01-01, 2024-03-01)) → single belief Alice.
-    let past_instant = chrono::DateTime::parse_from_rfc3339("2022-02-01T00:00:00Z")
+    // Query with valid_at=2022-02-01 (in Alice's window [2020-01-01, 2024-03-01)).
+    // Both claims were ingested "now" (tx_time ≈ current run time, well after 2022).
+    // Using valid_at (independent valid-time axis) selects Alice without requiring tx-time travel.
+    // Using as_of_tx_time=2022 would correctly return NoBelief because both claims
+    // have tx_time > 2022 (the claim-level tx-time cutoff now filters them out).
+    let alice_instant = chrono::DateTime::parse_from_rfc3339("2022-02-01T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
 
-    let qr_past = engine.query_memory(QueryMemoryRequest {
+    let qr_alice = engine.query_memory(QueryMemoryRequest {
         agent_id: agent.clone(),
         subject: "acme".into(),
         predicate: "ceo".into(),
-        as_of_tx_time: Some(past_instant),
-        valid_at: None,
-    }).await.expect("past query must succeed");
+        as_of_tx_time: None, // current tx-time view: both claims visible
+        valid_at: Some(alice_instant), // D2 valid-time axis: select Alice's window
+    }).await.expect("valid_at=2022 query must succeed");
 
     println!(
-        "[TEST1] query as-of 2022-02-01 → status={:?}, primary={:?}",
-        qr_past.belief.status,
-        qr_past.belief.primary.as_ref().map(|b| &b.fact.value)
+        "[TEST1] query valid_at=2022-02-01 (as_of=None) → status={:?}, primary={:?}",
+        qr_alice.belief.status,
+        qr_alice.belief.primary.as_ref().map(|b| &b.fact.value)
     );
 
-    // TASK-11: at as_of=2022-02-01 (in Alice's window), instant-selection returns Alice.
-    // NOTE: The fold receives both claims (both were tx'd before this as_of point in terms
-    // of Assertion visibility — as_of controls which ValidityAssertions are visible, but
-    // claims themselves are always visible once committed). The instant-selection on
-    // valid_time windows returns Alice since 2022-02-01 ∈ [2020-01-01, 2024-03-01).
-    // However: Bob's tx_time is "now" (~2026). The fold as_of=2022-02-01 means:
-    // "what assertions existed at 2022-02-01?" — but the claims (committed at ~2026)
-    // have tx_time > as_of, so they may not be visible at that bi-temporal as_of point.
-    // The fold correctly sees only Alice at that point (Bob not yet committed at 2022).
-    // Result: single live claim Alice → Resolved.
+    // With as_of=None (both claims visible) and valid_at=2022-02-01 (Alice's window),
+    // the fold's instant-selection picks Alice: 2022-02-01 ∈ [2020-01-01, 2024-03-01).
     assert!(
-        matches!(qr_past.belief.status, BeliefStatus::Resolved | BeliefStatus::TimingUncertain),
-        "TEST1 (TASK-11): past query must be Resolved or TimingUncertain (Alice visible). Got {:?}",
-        qr_past.belief.status
+        matches!(qr_alice.belief.status, BeliefStatus::Resolved | BeliefStatus::TimingUncertain),
+        "TEST1 (TASK-11): valid_at=2022-02 in Alice's window must yield Resolved or TimingUncertain. Got {:?}",
+        qr_alice.belief.status
+    );
+    assert_eq!(
+        qr_alice.belief.primary.as_ref().map(|b| &b.fact.value),
+        Some(&serde_json::json!("alice")),
+        "TEST1: valid_at=2022-02 must select Alice (her window [2020, 2024))"
+    );
+
+    // Confirm correct claim-level tx-time cutoff: querying as_of=2022 with both claims
+    // tx'd at ~NOW (>2022) correctly returns NoBelief (neither claim existed at 2022).
+    let qr_tx_past = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        as_of_tx_time: Some(alice_instant), // tx-time travel to 2022
+        valid_at: None,
+    }).await.expect("as_of_tx=2022 query must succeed");
+    assert_eq!(
+        qr_tx_past.belief.status,
+        BeliefStatus::NoBelief,
+        "TEST1: as_of_tx_time=2022 must return NoBelief — both claims were ingested ~now (tx_time > 2022)"
     );
 
     println!("[TEST1] OVERALL (TASK-11): Temporal succession with trusted non-overlapping windows \
-              → CommittedCheap at ingest; Resolved (Bob) at NOW; Resolved (Alice) at past instant. \
+              → CommittedCheap at ingest; Resolved (Bob) at NOW; valid_at selects Alice correctly. \
               No Contested state. PASS.");
 }
 

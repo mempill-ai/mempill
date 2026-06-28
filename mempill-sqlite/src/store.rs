@@ -700,32 +700,54 @@ impl PersistencePort for SqlitePersistenceStore {
     /// Load all claims on the given (agent_id, subject, predicate) subject-line,
     /// ordered by tx_time ASC (oldest first — callers fold in tx_time order).
     ///
-    /// Uses `idx_claims_subject_line` covering index (§5).
+    /// When `as_of_tx_time` is `Some(T)`, only claims with `tx_time <= T` are
+    /// returned, enforcing bi-temporal tx-time visibility. When `None`, all claims
+    /// are returned (current view). Uses `idx_claims_subject_line` covering index (§5).
     fn load_subject_line(
         &self,
         agent_id: &AgentId,
         subject: &str,
         predicate: &str,
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<Claim>, SqliteStoreError> {
         let slot = self.conn.lock().expect("mutex poisoned");
         let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
 
-        let sql = format!(
-            "SELECT {CLAIM_SELECT_COLS} FROM claims
-             WHERE agent_id = ?1 AND subject = ?2 AND predicate = ?3
-             ORDER BY tx_time ASC"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            rusqlite::params![agent_id.0.as_str(), subject, predicate],
-            row_to_claim,
-        )?;
-
-        let mut claims = Vec::new();
-        for row in rows {
-            claims.push(row?);
+        if let Some(cutoff) = as_of_tx_time {
+            let sql = format!(
+                "SELECT {CLAIM_SELECT_COLS} FROM claims
+                 WHERE agent_id = ?1 AND subject = ?2 AND predicate = ?3
+                   AND tx_time <= ?4
+                 ORDER BY tx_time ASC"
+            );
+            let cutoff_str = cutoff.to_rfc3339();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![agent_id.0.as_str(), subject, predicate, cutoff_str],
+                row_to_claim,
+            )?;
+            let mut claims = Vec::new();
+            for row in rows {
+                claims.push(row?);
+            }
+            Ok(claims)
+        } else {
+            let sql = format!(
+                "SELECT {CLAIM_SELECT_COLS} FROM claims
+                 WHERE agent_id = ?1 AND subject = ?2 AND predicate = ?3
+                 ORDER BY tx_time ASC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params![agent_id.0.as_str(), subject, predicate],
+                row_to_claim,
+            )?;
+            let mut claims = Vec::new();
+            for row in rows {
+                claims.push(row?);
+            }
+            Ok(claims)
         }
-        Ok(claims)
     }
 
     /// Load a single claim by its `ClaimRef`. Returns `None` if not found.
@@ -1917,7 +1939,7 @@ mod tests {
         store.append_claim(&mut txn, &claim).unwrap();
         store.commit(txn).unwrap();
 
-        let claims = store.load_subject_line(&agent, "user", "favourite_colour").unwrap();
+        let claims = store.load_subject_line(&agent, "user", "favourite_colour", None).unwrap();
         assert_eq!(claims.len(), 1, "load_subject_line must return the single written claim");
         assert_eq!(claims[0].claim_ref(), &claim_ref);
     }
@@ -1927,7 +1949,7 @@ mod tests {
     fn read_load_subject_line_empty_when_no_match() {
         let store = make_store();
         let agent = make_agent();
-        let claims = store.load_subject_line(&agent, "nonexistent", "pred").unwrap();
+        let claims = store.load_subject_line(&agent, "nonexistent", "pred", None).unwrap();
         assert!(claims.is_empty(), "load_subject_line must return empty vec for unknown subject-line");
     }
 

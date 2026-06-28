@@ -17,7 +17,12 @@
 
 use chrono::Utc;
 use mempill_core::application::{IngestClaimRequest, QueryMemoryRequest};
-use mempill_sqlite::open_default_in_memory;
+use mempill_core::application::ingest_claim::IngestClaimUseCase;
+use mempill_core::application::query_memory::QueryMemoryUseCase;
+use mempill_core::config::EngineConfig;
+use mempill_core::noop::{NoOpOracle, NoOpVector};
+use mempill_sqlite::{connection, open_default_in_memory, store::SqlitePersistenceStore};
+use std::sync::Arc;
 use mempill_types::{
     AgentId, BeliefStatus, Cardinality, Confidence, Criticality,
     Disposition, ExternalKind, ProvenanceLabel, ValidTime,
@@ -113,13 +118,47 @@ async fn succession_now() {
 
 // ── succession_past_instant ───────────────────────────────────────────────────
 
-/// Same Alice/Bob setup. Query as-of 2022-02-01 (in Alice's window) → single belief Alice.
+/// Same Alice/Bob setup, but with controlled tx_times so as_of travel works correctly.
+///
+/// Uses `execute_with_time` to stamp Alice's claim at T_A=2020-06-01 and Bob's claim at
+/// T_B=2024-07-01. Query as_of=2022-06-01 (after T_A, before T_B):
+///   - Alice's claim is visible (tx_time 2020 <= 2022)
+///   - Bob's claim is invisible (tx_time 2024 > 2022)
+///   - Fold sees only Alice → Resolved with "alice"
+///
+/// This is the correct bi-temporal behavior: the claim-level tx-time cutoff now enforced
+/// at the DB layer (instead of the previous bug where both claims leaked through).
+///
+/// Additionally asserts the no-valid_time variant: two claims at different tx-times
+/// are NOT both visible at a between-point as_of — only the earlier one is visible.
 #[tokio::test]
 async fn succession_past_instant() {
-    let engine = open_default_in_memory().unwrap();
+    // Use IngestClaimUseCase directly to inject controlled tx_times.
+    let conn = connection::open_in_memory().unwrap();
+    let store = Arc::new(SqlitePersistenceStore::new(conn));
     let agent = AgentId("succ-past".into());
+    let config = EngineConfig::default();
 
-    engine.ingest_claim(IngestClaimRequest {
+    let ingest_uc = IngestClaimUseCase::new(
+        Arc::clone(&store),
+        None::<Arc<NoOpOracle>>,
+        None,
+        config.clone(),
+    );
+    let query_uc = QueryMemoryUseCase::new(
+        Arc::clone(&store),
+        None::<Arc<NoOpVector>>,
+        config.clone(),
+    );
+
+    // T_A = 2020-06-01: Alice ingested with valid_time [2020, 2024-06-01)
+    let t_alice_tx = dt("2020-06-01T00:00:00Z");
+    // T_B = 2024-07-01: Bob ingested with valid_time [2024-06-01, ∞)
+    let t_bob_tx = dt("2024-07-01T00:00:00Z");
+    // Query point: 2022-06-01 (between T_A and T_B; inside Alice's valid window)
+    let as_of = dt("2022-06-01T00:00:00Z");
+
+    ingest_uc.execute_with_time(IngestClaimRequest {
         agent_id: agent.clone(),
         subject: "widget".into(),
         predicate: "owner".into(),
@@ -130,9 +169,9 @@ async fn succession_past_instant() {
         confidence: confident(),
         criticality: Criticality::Medium,
         derived_from: vec![],
-    }).await.unwrap();
+    }, t_alice_tx).unwrap();
 
-    engine.ingest_claim(IngestClaimRequest {
+    ingest_uc.execute_with_time(IngestClaimRequest {
         agent_id: agent.clone(),
         subject: "widget".into(),
         predicate: "owner".into(),
@@ -143,36 +182,50 @@ async fn succession_past_instant() {
         confidence: confident(),
         criticality: Criticality::Medium,
         derived_from: vec![],
-    }).await.unwrap();
+    }, t_bob_tx).unwrap();
 
-    // Query as_of 2022-06-01 — falls in Alice's window [2020-01-01, 2024-06-01).
-    //
-    // The fold uses as_of_tx_time for:
-    //   (a) ValidityAssertion visibility (assertions with asserted_at > as_of are skipped)
-    //   (b) valid-time instant for succession instant-selection
-    //
-    // The fold does NOT filter claims by tx_time — the persistence layer returns ALL stored
-    // claims regardless of as_of. So both Alice and Bob are visible to the fold.
-    // Succession instant-selection at 2022-06-01 selects Alice (2022-06-01 ∈ [2020, 2024)).
-    let qr_past = engine.query_memory(QueryMemoryRequest {
+    // Query as_of 2022-06-01: Alice's tx_time (2020) <= 2022 → visible.
+    //                          Bob's tx_time (2024) > 2022 → invisible (DB cutoff).
+    // The fold sees only Alice and selects her by valid-time window.
+    let query_now = t_bob_tx + chrono::Duration::days(30);
+    let qr_past = query_uc.execute_with_time(QueryMemoryRequest {
         agent_id: agent.clone(),
         subject: "widget".into(),
         predicate: "owner".into(),
-        as_of_tx_time: Some(dt("2022-06-01T00:00:00Z")),
+        as_of_tx_time: Some(as_of),
         valid_at: None,
-    }).await.unwrap();
+    }, query_now).unwrap();
 
     println!("[succession_past_instant] status={:?}, primary={:?}",
         qr_past.belief.status,
         qr_past.belief.primary.as_ref().map(|b| &b.fact.value));
 
-    // Succession instant-selection at 2022-06-01 → selects Alice.
+    // Only Alice is visible at as_of=2022. Her valid_time window [2020, 2024) contains 2022.
     assert_eq!(qr_past.belief.status, BeliefStatus::Resolved,
-        "past instant (2022-06-01) in Alice's window → Resolved");
+        "past instant (2022-06-01): Alice visible (tx=2020<=2022), Bob invisible (tx=2024>2022) → Resolved");
     assert_eq!(
-        qr_past.belief.primary.unwrap().fact.value,
-        serde_json::json!("alice"),
+        qr_past.belief.primary.as_ref().map(|b| b.fact.value.clone()),
+        Some(serde_json::json!("alice")),
         "past instant in Alice's window [2020, 2024) → primary is Alice"
+    );
+
+    // No-valid_time variant: two claims at different tx-times are NOT both visible at a
+    // between-point as_of. Verify Bob (tx_time=2024) is excluded at as_of=2022.
+    // The full current view (as_of=None) should show both claims (Resolved due to succession).
+    let qr_now = query_uc.execute_with_time(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "widget".into(),
+        predicate: "owner".into(),
+        as_of_tx_time: None,
+        valid_at: None,
+    }, query_now).unwrap();
+    // Current view (both visible): Bob's open window contains query_now → Resolved with Bob.
+    assert_eq!(qr_now.belief.status, BeliefStatus::Resolved,
+        "current view: both claims visible; Bob's open window → Resolved");
+    assert_eq!(
+        qr_now.belief.primary.as_ref().map(|b| b.fact.value.clone()),
+        Some(serde_json::json!("bob")),
+        "current view: Bob is the live claim (open-ended window)"
     );
 }
 

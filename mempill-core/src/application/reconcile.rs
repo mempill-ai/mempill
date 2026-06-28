@@ -81,8 +81,11 @@ where
         let mut subject_line_data: Vec<SubjectLineData> = Vec::new();
 
         for (subject, predicate) in &req.subject_lines {
+            // WRITE path: pass None so reconcile sees the full current state.
+            // A tx-time cutoff here would break conflict detection (post-cutoff claims
+            // would appear absent, allowing erroneous re-ingestion of conflicting claims).
             let claims = self.persistence
-                .load_subject_line(&req.agent_id, subject, predicate)
+                .load_subject_line(&req.agent_id, subject, predicate, None)
                 .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
             let fold = truth_engine::fold(
@@ -243,7 +246,7 @@ mod tests {
         fn append_claim_edge(&self, _t: &mut MockTxn, _e: &ClaimEdge) -> Result<(), MockErr> { Ok(()) }
         fn commit(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
         fn rollback(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
-        fn load_subject_line(&self, _a: &AgentId, _s: &str, _p: &str) -> Result<Vec<Claim>, MockErr> { Ok(vec![]) }
+        fn load_subject_line(&self, _a: &AgentId, _s: &str, _p: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> { Ok(vec![]) }
         fn load_claim(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Option<Claim>, MockErr> { Ok(None) }
         fn load_validity_assertions_for(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ValidityAssertion>, MockErr> { Ok(vec![]) }
         fn load_ledger(&self, _a: &AgentId, _f: Option<&TransactionTime>, _l: usize) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
