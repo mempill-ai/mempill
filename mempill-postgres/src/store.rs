@@ -817,6 +817,7 @@ impl PersistencePort for PostgresPersistenceStore {
         &self,
         agent_id: &AgentId,
         claim_refs: &[ClaimRef],
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<LedgerEntry>, PostgresStoreError> {
         if claim_refs.is_empty() {
             return Ok(vec![]);
@@ -865,13 +866,26 @@ impl PersistencePort for PostgresPersistenceStore {
         let id_strings: Vec<String> = claim_refs.iter().map(|r| r.0.to_string()).collect();
         let ids_ref: Vec<&str> = id_strings.iter().map(|s| s.as_str()).collect();
 
-        let rows = conn.query(
-            "SELECT entry_id, agent_id, claim_id, event_kind, disposition, rationale::text, recorded_at
-             FROM ledger_entries
-             WHERE agent_id = $1 AND claim_id = ANY($2)
-             ORDER BY recorded_at ASC",
-            &[&agent_id.0.as_str(), &ids_ref.as_slice()],
-        )?;
+        // When as_of_tx_time is Some(T), add AND recorded_at <= $3 to filter out entries
+        // recorded after T (bi-temporal tx-time travel on the disposition axis).
+        let rows = if let Some(as_of) = as_of_tx_time {
+            let as_of_str = as_of.to_rfc3339();
+            conn.query(
+                "SELECT entry_id, agent_id, claim_id, event_kind, disposition, rationale::text, recorded_at
+                 FROM ledger_entries
+                 WHERE agent_id = $1 AND claim_id = ANY($2) AND recorded_at <= $3
+                 ORDER BY recorded_at ASC",
+                &[&agent_id.0.as_str(), &ids_ref.as_slice(), &as_of_str.as_str()],
+            )?
+        } else {
+            conn.query(
+                "SELECT entry_id, agent_id, claim_id, event_kind, disposition, rationale::text, recorded_at
+                 FROM ledger_entries
+                 WHERE agent_id = $1 AND claim_id = ANY($2)
+                 ORDER BY recorded_at ASC",
+                &[&agent_id.0.as_str(), &ids_ref.as_slice()],
+            )?
+        };
 
         rows.iter().map(map_row).collect()
     }

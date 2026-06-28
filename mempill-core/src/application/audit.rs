@@ -100,7 +100,7 @@ mod tests {
             entries.truncate(limit);
             Ok(entries)
         }
-        fn load_ledger_for_claims(&self, _a: &AgentId, _refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
+        fn load_ledger_for_claims(&self, _a: &AgentId, _refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
         fn load_edges_for(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
         fn load_injected_claims(&self, _a: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
         fn load_lineage(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
