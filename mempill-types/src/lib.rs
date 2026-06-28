@@ -46,5 +46,8 @@ pub use proposal::{
     ClaimProposal, OverturnReason,
 };
 pub use provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel};
-pub use time::{parse_valid_time_date, DateGranularity, TransactionTime, ValidTime};
+pub use time::{
+    date_granularity_to_str, parse_valid_time_date, str_to_date_granularity, DateGranularity,
+    TransactionTime, ValidTime,
+};
 pub use validity::{AssertionKind, ValidityAssertion};

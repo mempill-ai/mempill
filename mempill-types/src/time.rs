@@ -58,6 +58,37 @@ pub struct ValidTime {
     pub end_granularity: Option<DateGranularity>,
 }
 
+/// Convert a [`DateGranularity`] to its canonical TEXT representation used in both
+/// the SQLite and Postgres persistence adapters.
+///
+/// The strings are identical to the serde snake_case serialisation so that TEXT stored in
+/// the database matches JSON round-trips: `"year"`, `"month"`, `"day"`, `"instant"`.
+///
+/// Both adapters MUST use this function (not hand-rolled `match` arms) to guarantee
+/// cross-adapter encoding consistency.
+pub fn date_granularity_to_str(g: DateGranularity) -> &'static str {
+    match g {
+        DateGranularity::Year => "year",
+        DateGranularity::Month => "month",
+        DateGranularity::Day => "day",
+        DateGranularity::Instant => "instant",
+    }
+}
+
+/// Parse the TEXT column value back to [`DateGranularity`].
+///
+/// Returns `None` for `NULL` (old rows without granularity) and errors on unknown strings.
+/// Both adapters MUST use this function for decode symmetry with [`date_granularity_to_str`].
+pub fn str_to_date_granularity(s: &str) -> Option<DateGranularity> {
+    match s {
+        "year" => Some(DateGranularity::Year),
+        "month" => Some(DateGranularity::Month),
+        "day" => Some(DateGranularity::Day),
+        "instant" => Some(DateGranularity::Instant),
+        _ => None,
+    }
+}
+
 /// Parse a lenient date string into a UTC `DateTime` start-of-period and its [`DateGranularity`].
 ///
 /// Accepted formats (in order):
