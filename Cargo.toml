@@ -30,3 +30,4 @@ futures = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 mempill-types = { path = "mempill-types", version = "0.2.0" }
 mempill-core  = { path = "mempill-core",  version = "0.2.0" }
+criterion = { version = "0.5", features = ["html_reports"] }

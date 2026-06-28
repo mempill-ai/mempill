@@ -25,3 +25,8 @@ chrono = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }
 mempill-core = { path = "../mempill-core", version = "0.2.0", features = ["test-support"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "bitemporal_as_of"
+harness = false
