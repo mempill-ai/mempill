@@ -386,7 +386,7 @@ mod tests {
         }
 
         fn load_ledger_for_claims(
-            &self, _: &AgentId, _refs: &[ClaimRef],
+            &self, _: &AgentId, _refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>,
         ) -> Result<Vec<LedgerEntry>, MockError> {
             if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])

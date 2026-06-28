@@ -1044,7 +1044,7 @@ where
 
     // Query for only claim_a — must not return claim_b's entry.
     let result = store
-        .load_ledger_for_claims(&agent, &[ref_a.clone()])
+        .load_ledger_for_claims(&agent, &[ref_a.clone()], None)
         .expect("conformance[lfc-t1]: load_ledger_for_claims must not error");
 
     assert_eq!(result.len(), 1, "conformance[lfc-t1]: exactly one entry for claim_a");
@@ -1052,7 +1052,7 @@ where
 
     // Empty input → empty result (no IN () SQL emitted).
     let empty = store
-        .load_ledger_for_claims(&agent, &[])
+        .load_ledger_for_claims(&agent, &[], None)
         .expect("conformance[lfc-t1]: empty input must not error");
     assert!(empty.is_empty(), "conformance[lfc-t1]: empty input must return empty vec");
 }
@@ -1209,7 +1209,7 @@ where
 
     // ── 4. Verify load_ledger_for_claims returns both entries for both refs ───
     let scoped = store
-        .load_ledger_for_claims(&agent, &[ref_a.clone(), ref_b.clone()])
+        .load_ledger_for_claims(&agent, &[ref_a.clone(), ref_b.clone()], None)
         .expect("dscope[t1]: load_ledger_for_claims must not error");
     // Expect: ledger_a_committed + ledger_a_superseded + ledger_b_committed = 3 entries.
     assert_eq!(
@@ -1230,7 +1230,7 @@ where
 
     let subject_refs: Vec<ClaimRef> = subject_claims.iter().map(|c| c.claim_ref().clone()).collect();
     let scoped_ledger = store
-        .load_ledger_for_claims(&agent, &subject_refs)
+        .load_ledger_for_claims(&agent, &subject_refs, None)
         .expect("dscope[t1]: load_ledger_for_claims must not error after B committed");
     let latest_disposition = build_latest_disposition_map(&scoped_ledger);
 
@@ -1413,7 +1413,7 @@ where
     assert_eq!(claims.len(), 3, "va1: must have 3 claims");
 
     let claim_refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
-    let ledger = store.load_ledger_for_claims(&agent, &claim_refs).expect("va1: load_ledger");
+    let ledger = store.load_ledger_for_claims(&agent, &claim_refs, None).expect("va1: load_ledger");
     let latest_disposition = build_latest_disposition_map(&ledger);
 
     let config = EngineConfig::default();
@@ -1455,7 +1455,7 @@ where
 
     let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va2: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
-    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va2: ledger");
+    let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va2: ledger");
     let disp = build_latest_disposition_map(&ledger);
 
     let fold = truth_engine::fold(
@@ -1489,7 +1489,7 @@ where
 
     let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va3: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
-    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va3: ledger");
+    let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va3: ledger");
     let disp = build_latest_disposition_map(&ledger);
 
     let fold = truth_engine::fold(
@@ -1523,7 +1523,7 @@ where
 
     let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va4: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
-    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va4: ledger");
+    let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va4: ledger");
     let disp = build_latest_disposition_map(&ledger);
 
     let fold = truth_engine::fold(
@@ -1616,7 +1616,7 @@ where
     assert_eq!(claims.len(), 2, "va5: must have 2 claims");
 
     let refs: Vec<ClaimRef> = vec![alice_ref.clone(), bob_ref.clone()];
-    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va5: ledger");
+    let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va5: ledger");
     let disp = build_latest_disposition_map(&ledger);
     let config = EngineConfig::default();
 
@@ -1704,7 +1704,7 @@ where
 
     let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va6: load");
     let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
-    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va6: ledger");
+    let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va6: ledger");
     let disp = build_latest_disposition_map(&ledger);
 
     let fold = truth_engine::fold(

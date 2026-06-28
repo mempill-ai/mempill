@@ -62,8 +62,10 @@ where
         // claims on this subject-line (no agent-wide cap; always complete regardless of
         // total agent ledger size — fixes the silent-wrong-belief-at-scale bug).
         let claim_refs: Vec<_> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+        // Pass the same as_of cutoff to the ledger load so that post-T supersession
+        // entries are excluded, preserving correct bi-temporal tx-time travel.
         let all_ledger = self.persistence
-            .load_ledger_for_claims(&req.agent_id, &claim_refs)
+            .load_ledger_for_claims(&req.agent_id, &claim_refs, Some(as_of))
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
 
@@ -167,7 +169,7 @@ mod tests {
         fn load_claim(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Option<Claim>, MockErr> { Ok(None) }
         fn load_validity_assertions_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ValidityAssertion>, MockErr> { Ok(vec![]) }
         fn load_ledger(&self, _aid: &AgentId, _from: Option<&mempill_types::TransactionTime>, _lim: usize) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
-        fn load_ledger_for_claims(&self, _aid: &AgentId, _refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
+        fn load_ledger_for_claims(&self, _aid: &AgentId, _refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
         fn load_edges_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
         fn load_injected_claims(&self, _aid: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
         fn load_lineage(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
@@ -311,7 +313,7 @@ mod tests {
             fn load_ledger(&self, _aid: &AgentId, _from: Option<&mempill_types::TransactionTime>, _lim: usize) -> Result<Vec<LedgerEntry>, MockErr> {
                 Ok(self.ledger.lock().unwrap().clone())
             }
-            fn load_ledger_for_claims(&self, _aid: &AgentId, refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> {
+            fn load_ledger_for_claims(&self, _aid: &AgentId, refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> {
                 let ledger = self.ledger.lock().unwrap();
                 Ok(ledger.iter().filter(|e| refs.contains(&e.claim_ref)).cloned().collect())
             }
@@ -584,8 +586,12 @@ mod tests {
             fn load_ledger(&self, _aid: &AgentId, _from: Option<&mempill_types::TransactionTime>, _lim: usize) -> Result<Vec<LedgerEntry>, MockErr> {
                 Ok(self.ledger.lock().unwrap().clone())
             }
-            fn load_ledger_for_claims(&self, _aid: &AgentId, refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> {
-                Ok(self.ledger.lock().unwrap().iter().filter(|e| refs.contains(&e.claim_ref)).cloned().collect())
+            fn load_ledger_for_claims(&self, _aid: &AgentId, refs: &[ClaimRef], as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> {
+                Ok(self.ledger.lock().unwrap().iter()
+                    .filter(|e| refs.contains(&e.claim_ref))
+                    .filter(|e| as_of.is_none_or(|t| e.recorded_at.0 <= t))
+                    .cloned()
+                    .collect())
             }
             fn load_edges_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
             fn load_injected_claims(&self, _aid: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
@@ -726,23 +732,15 @@ mod tests {
 
         // ── Step 5: Query as_of=before_affirm — bi-temporal tx-time rewind ───
         //
-        // CORRECT expected behavior (D2 independence rule):
+        // Correct bi-temporal behavior (D2 independence rule):
         //   At as_of_tx_time before affirm_now, alice's Superseded ledger entry (recorded_at=affirm_now)
-        //   and alice's Bound ValidityAssertion (asserted_at=affirm_now) are both INVISIBLE.
-        //   Alice should be live (CommittedCheap as of that time) and bob should be
-        //   QueuedForAdjudication → the fold at that point would see two live claims (Contested).
+        //   and any Bound ValidityAssertion from the Affirm are INVISIBLE (recorded_at > as_of).
+        //   Alice is live (CommittedCheap as of that tx-time) and bob is QueuedForAdjudication.
+        //   The fold sees two non-superseded claims → Contested.
         //
-        // OBSERVED engine behavior (current limitation):
-        //   QueryMemoryUseCase calls load_ledger_for_claims without an as_of_tx_time filter.
-        //   build_latest_disposition_map therefore sees alice's Superseded entry (recorded_at=affirm_now)
-        //   even when querying before affirm_now. Alice is incorrectly excluded from the live set.
-        //   The query returns bob (Resolved) rather than the historically-correct Contested state.
-        //
-        // This is a known bi-temporal limitation: the disposition-based liveness filter does not
-        // implement the tx-time axis. Fixing it requires load_ledger_for_claims to accept an
-        // as_of_tx_time cutoff (PersistencePort API change). This test documents the ACTUAL
-        // behavior rather than asserting the (currently unreachable) correct behavior.
-        // See BLOCKER note in the task W-valid-at-regression output.
+        // Implementation: load_ledger_for_claims now accepts as_of_tx_time and filters
+        //   recorded_at <= T, so the disposition map correctly excludes the post-affirm
+        //   Superseded entry for alice.
         let before_affirm = Utc.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap(); // between ingest_now and affirm_now
         let q_before_affirm = crate::application::dto::QueryMemoryRequest {
             agent_id: agent.clone(),
@@ -752,23 +750,14 @@ mod tests {
             valid_at: None,
         };
         let resp_before = query_uc.execute_with_time(q_before_affirm, query_now).unwrap();
-        // Document actual behavior (not the ideal bi-temporal behavior):
-        // alice is incorrectly excluded (disposition map sees Superseded despite as_of being before affirm).
-        // bob has QueuedForAdjudication as his first ledger entry, but the map shows CommittedCheap
-        // (from the later Affirm). bob has no valid_time → engine returns TimingUncertain.
+        // At as_of=before_affirm both alice (CommittedCheap) and bob (QueuedForAdjudication) are
+        // visible and neither is superseded → Contested is the correct bi-temporal answer.
         assert_eq!(
             resp_before.belief.status,
-            BeliefStatus::TimingUncertain,
-            "as_of=before_affirm: actual engine behavior (disposition map not tx-time filtered) \
-             returns TimingUncertain/bob. Correct bi-temporal answer: Contested (both live before affirm). \
-             Got {:?}",
+            BeliefStatus::Contested,
+            "as_of=before_affirm: bi-temporal tx-time rewind must return Contested \
+             (both alice and bob live before affirm). Got {:?}",
             resp_before.belief.status
-        );
-        assert_eq!(
-            resp_before.belief.primary.as_ref().map(|b| b.fact.value.clone()),
-            Some(serde_json::json!("bob")),
-            "as_of=before_affirm: actual engine surfaces bob (disposition map bug excludes alice, \
-             leaving bob as the single live claim). Correct answer: both alice and bob live → Contested."
         );
     }
 

@@ -95,10 +95,22 @@ pub trait PersistencePort: Send + Sync + 'static {
     ///
     /// Unlike `load_ledger`, this method applies no `LIMIT`. Subject-lines are
     /// small (typically 1–100 claims), so the result set is bounded naturally.
+    ///
+    /// # Transaction-time cutoff (`as_of_tx_time`)
+    ///
+    /// When `as_of_tx_time` is `Some(T)`, only ledger entries with
+    /// `recorded_at <= T` are returned. This is required for correct bi-temporal
+    /// tx-time travel: the disposition map must not see entries recorded after the
+    /// query's as-of point, otherwise a post-T supersession would incorrectly exclude
+    /// a claim that was still live at T.
+    ///
+    /// When `as_of_tx_time` is `None`, all entries are returned (preserves the
+    /// current behaviour for callers that want the full history or the latest view).
     fn load_ledger_for_claims(
         &self,
         agent_id: &AgentId,
         claim_refs: &[ClaimRef],
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<LedgerEntry>, Self::Error>;
 
     fn load_edges_for(

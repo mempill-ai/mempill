@@ -144,7 +144,7 @@ mod tests {
             Ok(entries)
         }
 
-        fn load_ledger_for_claims(&self, _: &AgentId, _refs: &[ClaimRef]) -> Result<Vec<LedgerEntry>, MockErr> {
+        fn load_ledger_for_claims(&self, _: &AgentId, _refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> {
             Ok(vec![])
         }
 

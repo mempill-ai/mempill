@@ -944,6 +944,7 @@ impl PersistencePort for SqlitePersistenceStore {
         &self,
         agent_id: &AgentId,
         claim_refs: &[ClaimRef],
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<LedgerEntry>, SqliteStoreError> {
         if claim_refs.is_empty() {
             return Ok(vec![]);
@@ -994,30 +995,46 @@ impl PersistencePort for SqlitePersistenceStore {
 
         let mut all_entries = Vec::new();
         // SQLite's default SQLITE_LIMIT_VARIABLE_NUMBER is 999; use 900 to leave headroom
-        // for the agent_id parameter.
+        // for the agent_id parameter (and the optional as_of_tx_time param).
         const CHUNK: usize = 900;
 
+        // Serialize as_of_tx_time once outside the chunk loop.
+        let as_of_str: Option<String> = as_of_tx_time.map(|t| t.to_rfc3339());
+
         for chunk in claim_refs.chunks(CHUNK) {
-            let placeholders: Vec<String> = (2..=chunk.len() + 1)
+            // Placeholders are positional: ?1 = agent_id, ?2..?N+1 = claim_ids,
+            // ?N+2 = as_of_tx_time (only present when Some).
+            let id_start = 2usize;
+            let placeholders: Vec<String> = (id_start..=chunk.len() + id_start - 1)
                 .map(|i| format!("?{i}"))
                 .collect();
+            let as_of_clause = if as_of_str.is_some() {
+                format!(" AND recorded_at <= ?{}", chunk.len() + id_start)
+            } else {
+                String::new()
+            };
             let sql = format!(
                 "SELECT entry_id, agent_id, claim_id, event_kind, disposition, rationale, recorded_at
                  FROM ledger_entries
-                 WHERE agent_id = ?1 AND claim_id IN ({})
+                 WHERE agent_id = ?1 AND claim_id IN ({}){}
                  ORDER BY recorded_at ASC",
-                placeholders.join(", ")
+                placeholders.join(", "),
+                as_of_clause
             );
 
             let mut stmt = conn.prepare(&sql)?;
-            // Build params: agent_id first, then each claim_ref UUID string.
+            // Build params: ?1=agent_id, ?2..?N+1=claim_ids, ?N+2=as_of (when Some).
             let agent_str = agent_id.0.as_str();
             let id_strings: Vec<String> = chunk.iter().map(|r| r.0.to_string()).collect();
 
             // rusqlite requires a Vec<&dyn ToSql> when params are heterogeneous.
-            let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(1 + id_strings.len());
+            let mut params: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(1 + id_strings.len() + usize::from(as_of_str.is_some()));
             params.push(&agent_str);
             for s in &id_strings {
+                params.push(s);
+            }
+            if let Some(ref s) = as_of_str {
                 params.push(s);
             }
 

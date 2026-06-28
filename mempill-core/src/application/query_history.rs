@@ -135,8 +135,11 @@ where
         // Load ledger scoped to the claims on this subject-line — no agent-wide cap,
         // always complete regardless of total agent ledger size.
         let claim_refs: Vec<_> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+        // query_history shows the full ledger history for a subject-line — no tx-time cutoff.
+        // Passing None preserves the existing behaviour: all entries visible regardless of
+        // recorded_at, which is correct for the audit/history use-case.
         let all_ledger = self.persistence
-            .load_ledger_for_claims(&req.agent_id, &claim_refs)
+            .load_ledger_for_claims(&req.agent_id, &claim_refs, None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
 
@@ -320,6 +323,7 @@ mod tests {
             &self,
             _aid: &AgentId,
             _refs: &[ClaimRef],
+            _as_of: Option<chrono::DateTime<chrono::Utc>>,
         ) -> Result<Vec<LedgerEntry>, MockErr> {
             Ok(vec![])
         }
