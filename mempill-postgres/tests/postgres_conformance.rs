@@ -10,8 +10,8 @@
 mod common;
 
 use mempill_core::testing::conformance::{
-    run_disposition_scope_conformance, run_history_conformance, run_persistence_conformance,
-    run_valid_at_conformance,
+    run_disposition_scope_conformance, run_granularity_conformance, run_history_conformance,
+    run_persistence_conformance, run_valid_at_conformance,
 };
 
 /// Conformance suite against postgres:16.
@@ -87,5 +87,28 @@ fn postgres_valid_at_conformance_pg16() {
 fn postgres_valid_at_conformance_pg18() {
     common::with_pg("18", |store| {
         run_valid_at_conformance(&*store);
+    });
+}
+
+/// `DateGranularity` persistence conformance suite against postgres:16.
+///
+/// Proves that `start_granularity` and `end_granularity` round-trip identically
+/// on the Postgres adapter — confirming cross-adapter parity with SQLite for the
+/// three conformance scenarios: Month/open, Day/Year, and None/None.
+#[test]
+fn postgres_granularity_conformance_pg16() {
+    common::with_pg("16", |store| {
+        run_granularity_conformance(&*store);
+    });
+}
+
+/// `DateGranularity` persistence conformance suite against postgres:18.
+///
+/// Mirrors `postgres_granularity_conformance_pg16` on Postgres 18 to confirm
+/// there is no version-specific regression in granularity column handling.
+#[test]
+fn postgres_granularity_conformance_pg18() {
+    common::with_pg("18", |store| {
+        run_granularity_conformance(&*store);
     });
 }
