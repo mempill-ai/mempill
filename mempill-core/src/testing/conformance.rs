@@ -1258,3 +1258,465 @@ where
         "dscope[t1]: the live claim must be Bob (B), not Alice (A — superseded)"
     );
 }
+
+// ── valid_at conformance harness ──────────────────────────────────────────────
+
+/// Run the `valid_at` point-in-time query conformance suite against `store`.
+///
+/// Proves that both adapters return identical `BeliefProjection` results when
+/// `valid_at` is set, and that the two bi-temporal axes compose per D2.
+///
+/// Scenario: CEO succession timeline with three slots —
+///   Alice  CEO: valid [2020-01-01, 2022-01-01)  confidence=0.9
+///   Bob    CEO: valid [2022-01-01, 2024-01-01)  confidence=0.9
+///   Carol  CEO: valid [2024-01-01, ∞)            confidence=0.9
+///
+/// All claims are written with tx_time in the past so they are always
+/// tx-visible for any as_of >= tx_time used in the tests.
+///
+/// Sub-tests:
+///   va1: valid_at in Alice's window → returns Alice
+///   va2: valid_at in Bob's window   → returns Bob
+///   va3: valid_at in Carol's window → returns Carol
+///   va4: valid_at in gap before window start → NoBelief (pre-history)
+///   va5: D2 independence: as_of_tx_time=t_alice_tx (only Alice tx-visible), valid_at in Bob's
+///        window → fold sees only Alice (tx filter) → window mismatch → NoBelief (gap)
+///   va6: valid_at=None backward compat: as_of=now → selects Carol (open window)
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_valid_at_conformance<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    valid_at_alice_window(store);
+    valid_at_bob_window(store);
+    valid_at_carol_window(store);
+    valid_at_pre_history_gap(store);
+    valid_at_d2_tx_filters_before_vt(store);
+    valid_at_none_backward_compat(store);
+}
+
+/// Build a trusted high-confidence Claim with a specific valid-time window.
+///
+/// All claims in the valid_at harness use confidence=0.9 (above the 0.7 threshold)
+/// so they qualify for succession instant-selection.
+#[cfg(any(test, feature = "test-support"))]
+fn make_vt_claim_for_conformance(
+    agent: &AgentId,
+    subject: &str,
+    predicate: &str,
+    value: serde_json::Value,
+    tx_time: chrono::DateTime<Utc>,
+    vt_start: chrono::DateTime<Utc>,
+    vt_end: Option<chrono::DateTime<Utc>>,
+) -> Claim {
+    use mempill_types::claim::Criticality;
+    Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact {
+            subject: subject.to_owned(),
+            predicate: predicate.to_owned(),
+            value,
+        },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx_time),
+        ValidTime {
+            start: Some(vt_start),
+            end: vt_end,
+            valid_time_confidence: 0.9,
+            granularity: None,
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    )
+}
+
+/// Helper: parse an RFC3339 string into a `DateTime<Utc>` — panics on bad input.
+#[cfg(any(test, feature = "test-support"))]
+fn vat_dt(rfc3339: &str) -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .unwrap_or_else(|e| panic!("vat_dt parse failed for '{rfc3339}': {e}"))
+        .with_timezone(&Utc)
+}
+
+/// Helper: commit the three-slot CEO succession to the store and return the tx_time
+/// used for Alice (earliest) so sub-tests can use it for D2 testing.
+///
+/// Returns `(t_alice, t_bob, t_carol)` tx-times written to the store.
+#[cfg(any(test, feature = "test-support"))]
+fn write_ceo_succession<P>(store: &P, agent: &AgentId) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>, chrono::DateTime<Utc>)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    // Use fixed, well-separated tx_times far in the past so they are always
+    // tx-visible for the instants used in the tests.
+    let t_alice = vat_dt("2019-06-01T00:00:00Z"); // written well before her valid window
+    let t_bob   = vat_dt("2019-06-02T00:00:00Z"); // written a day later (still before any query)
+    let t_carol = vat_dt("2019-06-03T00:00:00Z");
+
+    let alice = make_vt_claim_for_conformance(
+        agent, "corp", "ceo", serde_json::json!("alice"),
+        t_alice,
+        vat_dt("2020-01-01T00:00:00Z"),
+        Some(vat_dt("2022-01-01T00:00:00Z")),
+    );
+    let bob = make_vt_claim_for_conformance(
+        agent, "corp", "ceo", serde_json::json!("bob"),
+        t_bob,
+        vat_dt("2022-01-01T00:00:00Z"),
+        Some(vat_dt("2024-01-01T00:00:00Z")),
+    );
+    let carol = make_vt_claim_for_conformance(
+        agent, "corp", "ceo", serde_json::json!("carol"),
+        t_carol,
+        vat_dt("2024-01-01T00:00:00Z"),
+        None, // open-ended: Carol → now
+    );
+
+    let mut txn = store.begin_atomic(agent).expect("valid_at[setup]: begin_atomic");
+    store.append_claim(&mut txn, &alice).expect("valid_at[setup]: append alice");
+    store.append_claim(&mut txn, &bob).expect("valid_at[setup]: append bob");
+    store.append_claim(&mut txn, &carol).expect("valid_at[setup]: append carol");
+    store.commit(txn).expect("valid_at[setup]: commit");
+
+    (t_alice, t_bob, t_carol)
+}
+
+/// Sub-test va1: valid_at=2021-06-01 → in Alice's window [2020, 2022) → returns "alice".
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_alice_window<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::build_latest_disposition_map;
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use std::collections::HashMap;
+
+    let agent = AgentId("valid-at-va1".into());
+    write_ceo_succession(store, &agent);
+
+    let as_of = vat_dt("2026-01-01T00:00:00Z"); // well after all tx_times
+    let valid_at = vat_dt("2021-06-01T00:00:00Z"); // inside Alice's window [2020, 2022)
+
+    let claims = store
+        .load_subject_line(&agent, "corp", "ceo")
+        .expect("va1: load_subject_line");
+    assert_eq!(claims.len(), 3, "va1: must have 3 claims");
+
+    let claim_refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let ledger = store.load_ledger_for_claims(&agent, &claim_refs).expect("va1: load_ledger");
+    let latest_disposition = build_latest_disposition_map(&ledger);
+
+    let config = EngineConfig::default();
+    let fold = truth_engine::fold(
+        claims,
+        |_| vec![],
+        as_of,
+        Some(valid_at),
+        &config,
+        &latest_disposition,
+    );
+
+    assert!(fold.succession_selected, "va1: trusted succession must be detected");
+    assert_eq!(fold.live_claims.len(), 1, "va1: valid_at=2021-06 must select exactly 1 claim");
+    assert_eq!(
+        fold.live_claims[0].claim.fact().value,
+        serde_json::json!("alice"),
+        "va1: valid_at=2021-06 is in Alice's window [2020, 2022) → must return alice"
+    );
+    let _ = HashMap::<String, ()>::new(); // suppress unused import warning
+}
+
+/// Sub-test va2: valid_at=2023-01-01 → in Bob's window [2022, 2024) → returns "bob".
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_bob_window<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::build_latest_disposition_map;
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let agent = AgentId("valid-at-va2".into());
+    write_ceo_succession(store, &agent);
+
+    let as_of    = vat_dt("2026-01-01T00:00:00Z");
+    let valid_at = vat_dt("2023-01-01T00:00:00Z"); // inside Bob's window [2022, 2024)
+
+    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va2: load");
+    let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va2: ledger");
+    let disp = build_latest_disposition_map(&ledger);
+
+    let fold = truth_engine::fold(
+        claims, |_| vec![], as_of, Some(valid_at), &EngineConfig::default(), &disp,
+    );
+
+    assert_eq!(fold.live_claims.len(), 1, "va2: valid_at=2023-01 selects 1 claim");
+    assert_eq!(
+        fold.live_claims[0].claim.fact().value,
+        serde_json::json!("bob"),
+        "va2: valid_at=2023-01 is in Bob's window [2022, 2024)"
+    );
+}
+
+/// Sub-test va3: valid_at=2025-06-01 → in Carol's open window [2024, ∞) → returns "carol".
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_carol_window<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::build_latest_disposition_map;
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let agent = AgentId("valid-at-va3".into());
+    write_ceo_succession(store, &agent);
+
+    let as_of    = vat_dt("2026-01-01T00:00:00Z");
+    let valid_at = vat_dt("2025-06-01T00:00:00Z"); // inside Carol's open window [2024, ∞)
+
+    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va3: load");
+    let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va3: ledger");
+    let disp = build_latest_disposition_map(&ledger);
+
+    let fold = truth_engine::fold(
+        claims, |_| vec![], as_of, Some(valid_at), &EngineConfig::default(), &disp,
+    );
+
+    assert_eq!(fold.live_claims.len(), 1, "va3: valid_at=2025-06 selects 1 claim");
+    assert_eq!(
+        fold.live_claims[0].claim.fact().value,
+        serde_json::json!("carol"),
+        "va3: valid_at=2025-06 is in Carol's open window [2024, ∞)"
+    );
+}
+
+/// Sub-test va4: valid_at=2019-01-01 → before all valid windows → NoBelief (gap/pre-history).
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_pre_history_gap<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::build_latest_disposition_map;
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let agent = AgentId("valid-at-va4".into());
+    write_ceo_succession(store, &agent);
+
+    let as_of    = vat_dt("2026-01-01T00:00:00Z");
+    let valid_at = vat_dt("2019-01-01T00:00:00Z"); // before Alice's window start 2020-01-01
+
+    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va4: load");
+    let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va4: ledger");
+    let disp = build_latest_disposition_map(&ledger);
+
+    let fold = truth_engine::fold(
+        claims, |_| vec![], as_of, Some(valid_at), &EngineConfig::default(), &disp,
+    );
+
+    // valid_at is before any window → gap → NoBelief (empty live_claims).
+    assert!(
+        fold.succession_selected,
+        "va4: succession detection fires even when instant is pre-history"
+    );
+    assert_eq!(
+        fold.live_claims.len(), 0,
+        "va4: valid_at=2019-01 is before all windows → NoBelief (empty live_claims)"
+    );
+    assert!(!fold.has_conflict, "va4: gap must not produce has_conflict");
+}
+
+/// Sub-test va5 (D2 independence): `as_of_tx_time` governs ValidityAssertion visibility
+/// independently of `valid_at` which governs instant-selection.
+///
+/// Scenario: two-claim succession: Alice [2020, 2022) + Bob [2022, ∞).
+/// A Bound assertion is appended for Alice, with `asserted_at = 2030-01-01` (far future).
+///
+/// Query A: as_of = 2026-01-01 (before the 2030 Bound assertion) → Bound NOT visible →
+///          Alice remains live. Succession: Alice [2020,2022) + Bob [2022,∞).
+///          valid_at = 2021-01-01 (in Alice's window) → selects Alice.
+///
+/// Query B: as_of = 2031-01-01 (after the 2030 Bound assertion) → Bound IS visible →
+///          Alice is bounded (not live). Only Bob is live.
+///          valid_at = 2021-01-01 (same instant, now in a bounded claim's window) →
+///          only Bob visible → single live claim → no succession selection → Bob returned.
+///
+/// D2 confirmed: the same valid_at value yields DIFFERENT results depending on as_of,
+/// proving the tx-time axis (assertion visibility) composes before valid-time selection.
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_d2_tx_filters_before_vt<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::build_latest_disposition_map;
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use uuid::Uuid;
+
+    let agent = AgentId("valid-at-va5".into());
+
+    // Fixed tx_time for all writes (well in the past so always tx-visible at any as_of we use).
+    let tx = vat_dt("2019-06-01T00:00:00Z");
+
+    // Alice: valid [2020, 2022), Bob: valid [2022, ∞).
+    let alice = make_vt_claim_for_conformance(
+        &agent, "va5-corp", "ceo", serde_json::json!("alice"),
+        tx,
+        vat_dt("2020-01-01T00:00:00Z"),
+        Some(vat_dt("2022-01-01T00:00:00Z")),
+    );
+    let bob = make_vt_claim_for_conformance(
+        &agent, "va5-corp", "ceo", serde_json::json!("bob"),
+        tx,
+        vat_dt("2022-01-01T00:00:00Z"),
+        None,
+    );
+    let alice_ref = alice.claim_ref().clone();
+    let bob_ref   = bob.claim_ref().clone();
+
+    // Bound assertion for Alice: asserted_at = 2030-01-01 (far future relative to query A).
+    // bound_at = 2030-01-01 (must be <= as_of for the claim to be considered bounded).
+    let bound_at    = vat_dt("2030-01-01T00:00:00Z");
+    let asserted_at = bound_at; // assertion recorded at the same time as the bound
+    let bound = ValidityAssertion {
+        assertion_ref: Uuid::new_v4(),
+        agent_id: agent.clone(),
+        target_claim: alice_ref.clone(),
+        kind: AssertionKind::Bound { bound_at },
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        asserted_at: TransactionTime(asserted_at),
+    };
+
+    // Write claims and the Bound assertion.
+    let mut txn = store.begin_atomic(&agent).expect("va5: begin_atomic");
+    store.append_claim(&mut txn, &alice).expect("va5: append alice");
+    store.append_claim(&mut txn, &bob).expect("va5: append bob");
+    store.append_validity_assertion(&mut txn, &bound).expect("va5: append bound");
+    store.commit(txn).expect("va5: commit");
+
+    let claims = store.load_subject_line(&agent, "va5-corp", "ceo").expect("va5: load");
+    assert_eq!(claims.len(), 2, "va5: must have 2 claims");
+
+    let refs: Vec<ClaimRef> = vec![alice_ref.clone(), bob_ref.clone()];
+    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va5: ledger");
+    let disp = build_latest_disposition_map(&ledger);
+    let config = EngineConfig::default();
+
+    // ── Query A: as_of = 2026-01-01 → Bound(2030) NOT visible → Alice live ────
+    let as_of_a  = vat_dt("2026-01-01T00:00:00Z");
+    let valid_at = vat_dt("2021-01-01T00:00:00Z"); // in Alice's window [2020, 2022)
+
+    let assertions_fn_a = {
+        let alice_ref = alice_ref.clone();
+        let bound = bound.clone();
+        move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if cr == &alice_ref { vec![bound.clone()] } else { vec![] }
+        }
+    };
+
+    let fold_a = truth_engine::fold(
+        claims.clone(), assertions_fn_a, as_of_a, Some(valid_at), &config, &disp,
+    );
+
+    // at as_of=2026: Bound asserted_at=2030 > 2026 → NOT visible → Alice is live.
+    // Succession: Alice [2020,2022) + Bob [2022,∞). valid_at=2021 → Alice selected.
+    assert_eq!(
+        fold_a.live_claims.len(), 1,
+        "va5 Query A: Bound not visible at as_of=2026 → Alice live; valid_at=2021 selects Alice"
+    );
+    assert_eq!(
+        fold_a.live_claims[0].claim.fact().value,
+        serde_json::json!("alice"),
+        "va5 Query A: as_of=2026 (Bound invisible) + valid_at=2021 → Alice"
+    );
+
+    // ── Query B: as_of = 2031-01-01 → Bound(2030) visible → Alice bounded ────
+    let as_of_b = vat_dt("2031-01-01T00:00:00Z");
+
+    let assertions_fn_b = {
+        let alice_ref = alice_ref.clone();
+        move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if cr == &alice_ref { vec![bound.clone()] } else { vec![] }
+        }
+    };
+
+    let fold_b = truth_engine::fold(
+        claims, assertions_fn_b, as_of_b, Some(valid_at), &config, &disp,
+    );
+
+    // at as_of=2031: Bound asserted_at=2030 ≤ 2031 AND bound_at=2030 ≤ 2031 → visible → Alice bounded.
+    // Only Bob is live (single claim, no succession). valid_at=2021 is not relevant to selection
+    // (single-claim path skips instant-selection). Bob is the sole live claim.
+    assert_eq!(
+        fold_b.live_claims.len(), 1,
+        "va5 Query B: Bound visible at as_of=2031 → Alice bounded; Bob is the only live claim"
+    );
+    assert_eq!(
+        fold_b.live_claims[0].claim.fact().value,
+        serde_json::json!("bob"),
+        "va5 Query B: same valid_at=2021 but as_of=2031 makes Alice bounded → Bob returned (D2)"
+    );
+
+    println!(
+        "[va5 D2] Query A (as_of=2026): {:?} | Query B (as_of=2031): {:?}",
+        fold_a.live_claims[0].claim.fact().value,
+        fold_b.live_claims[0].claim.fact().value
+    );
+}
+
+/// Sub-test va6: valid_at=None backward compat.
+///
+/// When valid_at is None, as_of_tx_time (now) is used as the valid-time instant.
+/// Both axes point to 2026 → Carol's open window [2024, ∞) → "carol".
+/// This ensures the None path remains identical to pre-wave-2 behavior.
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_none_backward_compat<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::build_latest_disposition_map;
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let agent = AgentId("valid-at-va6".into());
+    write_ceo_succession(store, &agent);
+
+    let as_of = vat_dt("2026-06-01T00:00:00Z"); // both tx-visible and vt-instant = 2026
+
+    let claims = store.load_subject_line(&agent, "corp", "ceo").expect("va6: load");
+    let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let ledger = store.load_ledger_for_claims(&agent, &refs).expect("va6: ledger");
+    let disp = build_latest_disposition_map(&ledger);
+
+    let fold = truth_engine::fold(
+        claims, |_| vec![], as_of,
+        None, // valid_at=None → backward-compat: as_of is used for both axes
+        &EngineConfig::default(), &disp,
+    );
+
+    assert_eq!(fold.live_claims.len(), 1, "va6: None valid_at selects Carol (as_of=2026 in her window)");
+    assert_eq!(
+        fold.live_claims[0].claim.fact().value,
+        serde_json::json!("carol"),
+        "va6: backward compat — None valid_at with as_of=2026 → Carol's open window [2024, ∞)"
+    );
+}

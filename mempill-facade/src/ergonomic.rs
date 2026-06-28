@@ -613,6 +613,7 @@ pub async fn recall(
         subject: subject.into(),
         predicate: predicate.into(),
         as_of_tx_time: None,
+        valid_at: None,
     };
 
     let resp = engine.query_ergo(req).await?;

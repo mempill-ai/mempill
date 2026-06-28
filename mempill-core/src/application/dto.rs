@@ -61,7 +61,20 @@ pub struct QueryMemoryRequest {
     /// The predicate of the query.
     pub predicate: String,
     /// Optional: query as of a specific transaction time (bi-temporal as-of query).
+    ///
+    /// When set, only claims whose transaction time is at or before this instant are
+    /// considered (the transaction-time axis). Controls assertion visibility as well.
     pub as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional: select the belief valid at this specific valid-time instant (valid-time axis).
+    ///
+    /// When set, after the transaction-time visibility filter is applied, the fold
+    /// narrows the result to the single claim whose valid-time window contains this
+    /// instant (D2 independence rule: tx-time filter first, then valid-time selection).
+    ///
+    /// When `None`, the existing backward-compatible behaviour is preserved: the
+    /// `as_of_tx_time` (or `now`) is used as the valid-time selection instant.
+    #[serde(default)]
+    pub valid_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Response from a memory query — the canonical belief projection.

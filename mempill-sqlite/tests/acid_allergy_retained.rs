@@ -58,6 +58,7 @@ async fn acid_allergy_first_claim_committed_cheap() {
             subject: "patient".into(),
             predicate: "allergy".into(),
             as_of_tx_time: None,
+        valid_at: None,
         })
         .await
         .expect("query must succeed");
@@ -219,6 +220,7 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
         subject: "patient".into(),
         predicate: "allergy".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query must succeed");
 
     assert_eq!(
@@ -418,6 +420,7 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
         subject: "patient".into(),
         predicate: "allergy".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query must succeed");
 
     assert_eq!(

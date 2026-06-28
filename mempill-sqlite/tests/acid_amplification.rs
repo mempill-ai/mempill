@@ -126,6 +126,7 @@ async fn acid_amplification_808_recall_reentries_collapse_to_one_claim() {
             subject: "patient".into(),
             predicate: "recall_test".into(),
             as_of_tx_time: None,
+        valid_at: None,
         })
         .await
         .expect("query must succeed");

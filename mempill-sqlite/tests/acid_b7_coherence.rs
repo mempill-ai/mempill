@@ -209,6 +209,7 @@ async fn acid_b7_quarantined_claim_excluded_from_live_fold() {
             subject: "device".into(),
             predicate: "warranty_start".into(),
             as_of_tx_time: None,
+        valid_at: None,
         })
         .await
         .expect("query must succeed");
@@ -278,6 +279,7 @@ async fn acid_b7_coherent_past_start_is_admitted_as_live_belief() {
             subject: "patient".into(),
             predicate: "treatment_period".into(),
             as_of_tx_time: None,
+        valid_at: None,
         })
         .await
         .expect("query must succeed");

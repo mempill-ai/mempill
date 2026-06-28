@@ -84,6 +84,7 @@ fn query_req(agent: &AgentId) -> QueryMemoryRequest {
         subject: "org".into(),
         predicate: "ceo".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }
 }
 

@@ -1,6 +1,6 @@
 //! Conformance proof: run the shared `PersistencePort` harness against the Postgres adapter.
 //!
-//! Proves behavioral parity with SQLite (A43): the SAME 12 sub-tests that pass against
+//! Proves behavioral parity with SQLite (A43): the SAME sub-tests that pass against
 //! `SqlitePersistenceStore` must also pass against `PostgresPersistenceStore` on real
 //! PG instances started via testcontainers.
 //!
@@ -11,6 +11,7 @@ mod common;
 
 use mempill_core::testing::conformance::{
     run_disposition_scope_conformance, run_history_conformance, run_persistence_conformance,
+    run_valid_at_conformance,
 };
 
 /// Conformance suite against postgres:16.
@@ -63,5 +64,28 @@ fn postgres_disposition_scope_conformance_pg16() {
 fn postgres_disposition_scope_conformance_pg18() {
     common::with_pg("18", |store| {
         run_disposition_scope_conformance(&*store);
+    });
+}
+
+/// valid_at point-in-time query conformance suite against postgres:16.
+///
+/// Mirrors `sqlite_passes_valid_at_conformance` exactly — same scenarios,
+/// different adapter. Proves SQLite and Postgres return identical results
+/// for bi-temporal valid_at queries across the CEO succession timeline.
+#[test]
+fn postgres_valid_at_conformance_pg16() {
+    common::with_pg("16", |store| {
+        run_valid_at_conformance(&*store);
+    });
+}
+
+/// valid_at point-in-time query conformance suite against postgres:18.
+///
+/// Mirrors `sqlite_passes_valid_at_conformance` exactly — same scenarios,
+/// different adapter and Postgres major version.
+#[test]
+fn postgres_valid_at_conformance_pg18() {
+    common::with_pg("18", |store| {
+        run_valid_at_conformance(&*store);
     });
 }

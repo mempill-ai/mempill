@@ -92,6 +92,7 @@ async fn b11_oracle_absent_external_contradiction_resolves_to_contested() {
         subject: "user".into(),
         predicate: "city".into(),
         as_of_tx_time: None,
+        valid_at: None,
     };
     let query_resp = engine.query_memory(query_req).await
         .expect("query must succeed");
@@ -179,6 +180,7 @@ async fn b11_gate_level_oracle_absent_routes_to_contested_disposition() {
         subject: "user".into(),
         predicate: "location".into(),
         as_of_tx_time: None,
+        valid_at: None,
     }).await.expect("query must succeed");
 
     assert!(
