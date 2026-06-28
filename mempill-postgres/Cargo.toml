@@ -69,3 +69,8 @@ required-features = ["postgres-integration"]
 name = "postgres_ttl_orphan"
 path = "tests/postgres_ttl_orphan.rs"
 required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_as_of_query"
+path = "tests/postgres_as_of_query.rs"
+required-features = ["postgres-integration"]
