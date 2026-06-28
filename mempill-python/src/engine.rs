@@ -324,7 +324,7 @@ mod tests {
             py_dict.set_item("predicate", "city").unwrap();
             py_dict.set_item("valid_at", PyString::new(py, "2021-06-01T00:00:00Z")).unwrap();
 
-            let result = depythonize::<QueryMemoryRequest>(&py_dict.as_any());
+            let result = depythonize::<QueryMemoryRequest>(py_dict.as_any());
             match &result {
                 Ok(req) => {
                     assert!(
@@ -392,12 +392,12 @@ mod tests {
             // Ingest Alice valid [2020-01-01, 2022-01-01)
             let alice_dict = make_ingest_dict(py, "test-agent", "x", "y", "Alice",
                 "2020-01-01T00:00:00Z", Some("2022-01-01T00:00:00Z"));
-            engine.ingest_claim(py, &alice_dict.as_any()).expect("ingest Alice");
+            engine.ingest_claim(py, alice_dict.as_any()).expect("ingest Alice");
 
             // Ingest Bob valid [2022-01-01, open)
             let bob_dict = make_ingest_dict(py, "test-agent", "x", "y", "Bob",
                 "2022-01-01T00:00:00Z", None);
-            engine.ingest_claim(py, &bob_dict.as_any()).expect("ingest Bob");
+            engine.ingest_claim(py, bob_dict.as_any()).expect("ingest Bob");
 
             // Query with valid_at=2021-06-01 → should return Alice
             let q_alice = PyDict::new(py);
@@ -406,7 +406,7 @@ mod tests {
             q_alice.set_item("predicate", "y").unwrap();
             q_alice.set_item("valid_at", PyString::new(py, "2021-06-01T00:00:00Z")).unwrap();
 
-            let resp_alice = engine.query_memory(py, &q_alice.as_any()).expect("query Alice");
+            let resp_alice = engine.query_memory(py, q_alice.as_any()).expect("query Alice");
             let resp_json: serde_json::Value = depythonize(&resp_alice).expect("depythonize resp");
             let value_alice = resp_json["belief"]["primary"]["fact"]["value"].as_str();
             eprintln!("valid_at=2021 → {value_alice:?}");
@@ -423,7 +423,7 @@ mod tests {
             q_bob.set_item("predicate", "y").unwrap();
             q_bob.set_item("valid_at", PyString::new(py, "2023-01-01T00:00:00Z")).unwrap();
 
-            let resp_bob = engine.query_memory(py, &q_bob.as_any()).expect("query Bob");
+            let resp_bob = engine.query_memory(py, q_bob.as_any()).expect("query Bob");
             let resp_json_b: serde_json::Value = depythonize(&resp_bob).expect("depythonize resp bob");
             let value_bob = resp_json_b["belief"]["primary"]["fact"]["value"].as_str();
             eprintln!("valid_at=2023 → {value_bob:?}");

@@ -286,6 +286,10 @@ where
 /// Currency decay is NOT computed here — that is the Projection component's responsibility.
 /// The `last_refreshed_at` is set to the claim's transaction_time as the baseline;
 /// projection.rs will compute the actual decay state using `now`.
+///
+/// GRANULARITY NOTE (DISPLAY-ONLY): `valid_time` is cloned verbatim from the claim,
+/// so `start_granularity` and `end_granularity` are preserved here.  Granularity is
+/// purely a display hint — it does NOT influence fold selection, matching, or ordering.
 pub(crate) fn claim_to_belief(cs: &ClaimWithStatus) -> Belief {
     Belief {
         claim_ref: cs.claim.claim_ref().clone(),

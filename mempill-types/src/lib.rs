@@ -47,7 +47,7 @@ pub use proposal::{
 };
 pub use provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel};
 pub use time::{
-    date_granularity_to_str, parse_valid_time_date, str_to_date_granularity, DateGranularity,
-    TransactionTime, ValidTime,
+    date_granularity_to_str, format_valid_time_endpoint, parse_valid_time_date,
+    str_to_date_granularity, DateGranularity, TransactionTime, ValidTime,
 };
 pub use validity::{AssertionKind, ValidityAssertion};

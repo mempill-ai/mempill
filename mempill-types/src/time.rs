@@ -148,6 +148,52 @@ pub fn parse_valid_time_date(
     None
 }
 
+/// Render a valid-time endpoint honestly at its recorded precision.
+///
+/// The granularity governs how many date components are included in the output.
+/// The hard rule: output MUST NOT fabricate finer precision than `granularity`.
+///
+/// | Granularity       | Example output        |
+/// |-------------------|-----------------------|
+/// | `Year`            | `"2020"`              |
+/// | `Month`           | `"2020-03"`           |
+/// | `Day`             | `"2020-03-15"`        |
+/// | `Instant`         | `"2020-03-15"` (day form; sub-day precision is not shown by default) |
+/// | `None` (unknown)  | falls back to `"YYYY-MM-DD"` day form, or `None` when `date` is also `None` |
+///
+/// Returns `None` when `date` is `None` (open / unknown endpoint).
+///
+/// # Example
+///
+/// ```
+/// use chrono::{TimeZone, Utc};
+/// use mempill_types::time::{DateGranularity, format_valid_time_endpoint};
+///
+/// let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+/// assert_eq!(format_valid_time_endpoint(Some(dt), Some(DateGranularity::Month)), Some("2020-03".to_string()));
+/// assert_eq!(format_valid_time_endpoint(Some(dt), Some(DateGranularity::Year)),  Some("2020".to_string()));
+/// assert_eq!(format_valid_time_endpoint(Some(dt), Some(DateGranularity::Day)),   Some("2020-03-15".to_string()));
+/// assert_eq!(format_valid_time_endpoint(None, Some(DateGranularity::Month)), None);
+/// ```
+pub fn format_valid_time_endpoint(
+    date: Option<chrono::DateTime<chrono::Utc>>,
+    granularity: Option<DateGranularity>,
+) -> Option<String> {
+    let dt = date?;
+    Some(match granularity {
+        Some(DateGranularity::Year) => format!("{}", dt.format("%Y")),
+        Some(DateGranularity::Month) => format!("{}", dt.format("%Y-%m")),
+        // Day and Instant both render at day precision — Instant sub-day detail is
+        // intentionally omitted here to avoid surfacing fabricated precision for dates
+        // that were normalised to midnight UTC during ingestion.
+        Some(DateGranularity::Day) | Some(DateGranularity::Instant) => {
+            format!("{}", dt.format("%Y-%m-%d"))
+        }
+        // None granularity (legacy row or unknown precision): fall back to day form.
+        None => format!("{}", dt.format("%Y-%m-%d")),
+    })
+}
+
 impl ValidTime {
     /// Returns true iff both start and end are None (unknown valid-time window).
     pub fn is_unknown(&self) -> bool {
@@ -379,5 +425,64 @@ mod tests {
         assert!(json.contains("start_granularity"), "Some start_granularity must appear in serialised JSON");
         assert!(json.contains("month"), "granularity value must be 'month'");
         assert!(!json.contains("end_granularity"), "None end_granularity must not appear in serialised JSON");
+    }
+
+    // ── W5 — format_valid_time_endpoint render helper ────────────────────────
+
+    /// Year granularity: only year component emitted, never month or day.
+    #[test]
+    fn render_helper_year_granularity_no_month_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Year)).unwrap();
+        assert_eq!(out, "2020", "Year granularity must output only YYYY");
+        assert!(!out.contains('-'), "Year output must not contain a dash (no month/day)");
+    }
+
+    /// Month granularity: year and month emitted, never day.
+    #[test]
+    fn render_helper_month_granularity_no_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Month)).unwrap();
+        assert_eq!(out, "2020-03", "Month granularity must output YYYY-MM");
+        // Must not contain a day component — splitting by '-' gives ["2020","03"] only.
+        let parts: Vec<&str> = out.splitn(4, '-').collect();
+        assert_eq!(parts.len(), 2, "Month output must have exactly two dash-separated parts (YYYY-MM)");
+    }
+
+    /// Day granularity: full YYYY-MM-DD.
+    #[test]
+    fn render_helper_day_granularity_full_date() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Day)).unwrap();
+        assert_eq!(out, "2020-03-15");
+    }
+
+    /// Instant granularity: rendered at day precision (sub-day suppressed to avoid
+    /// fabricating precision when dates were normalised to midnight UTC at ingestion).
+    #[test]
+    fn render_helper_instant_granularity_renders_at_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 10, 30, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Instant)).unwrap();
+        assert_eq!(out, "2020-03-15", "Instant renders at day precision");
+    }
+
+    /// None granularity (legacy / unknown precision): falls back to day form.
+    #[test]
+    fn render_helper_none_granularity_falls_back_to_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), None).unwrap();
+        assert_eq!(out, "2020-03-15", "None granularity must fall back to YYYY-MM-DD");
+    }
+
+    /// None date returns None regardless of granularity.
+    #[test]
+    fn render_helper_none_date_returns_none() {
+        assert_eq!(format_valid_time_endpoint(None, Some(DateGranularity::Month)), None);
+        assert_eq!(format_valid_time_endpoint(None, None), None);
     }
 }

@@ -204,6 +204,8 @@ pub use mempill_types::{
     Marker,
     // Time types (used in Tier-2 bi-temporal examples)
     ValidTime,
+    // Date granularity — DISPLAY-ONLY precision hint surfaced in BeliefDetail
+    DateGranularity,
 };
 
 pub use mempill_core::{
