@@ -10,7 +10,7 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.2.0** · Apache-2.0 · MSRV 1.88 · 446 Rust + 135 Python tests (+ Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
+**0.2.0** · Apache-2.0 · MSRV 1.88 · 471 Rust + 144 Python + 15 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate.
 
 
@@ -75,8 +75,8 @@ Key properties:
 | MCP adapter (`mempill-mcp`) | ✅ Shipped | FastMCP, 4 tools, stdio transport |
 | `mempill` facade crate | ✅ Shipped | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
 | Bi-temporal history read (`query_history` / `history()`) | ✅ Shipped | Full claim timeline of a subject line — values, effective valid-time windows, `Current`/`Superseded` status |
-| Valid-time as-of query (`valid_at`) | ⏳ Planned (v0.3) | Point-in-time recall ("who was CEO in 2021?"); `as_of_tx_time` is transaction-time only today |
-| Date precision / granularity | ⏳ Planned (v0.3) | Partial dates (`2020-03`) normalize to the start of the period (`2020-03-01`); the filled day is a placeholder, not asserted precision — granularity-aware valid-time is planned |
+| Valid-time as-of query (`valid_at`) | ✅ Shipped (main · 0.3.0) | Point-in-time recall ("who was CEO in 2021?"); `valid_at` is a separate axis from `as_of_tx_time` — available in Rust, Python, and MCP. Not yet in the published 0.2.0 crate. |
+| Date precision / granularity | ✅ Shipped (main · 0.3.0) | `DateGranularity` enum + lenient date parser (YYYY / YYYY-MM / YYYY-MM-DD); granularity is recorded, not silently normalized away. Not yet in the published 0.2.0 crate. |
 | Vector search / VectorPort | ⏳ Planned | Structural seam exists (NoOp); no vector retrieval yet |
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
@@ -90,7 +90,7 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 ## Production readiness & scope
 
 mempill 0.2.0 is a **correct, well-tested engine** (bi-temporal fold, ACID writes,
-cross-adapter conformance, append-only integrity — 446 Rust tests) designed for
+cross-adapter conformance, append-only integrity — 471 Rust + 144 Python + 15 MCP tests on main) designed for
 **embedded and early-stage** use. Read this before deploying it at scale.
 
 **Safe today for:**
@@ -116,7 +116,7 @@ cross-adapter conformance, append-only integrity — 446 Rust tests) designed fo
 - **No built-in observability** — there is no `tracing`/metrics instrumentation yet, so
   latency, error rates, and contention are not visible to an operator out of the box.
   *(v0.3.)*
-- **No published load/stress benchmarks** — all 446 tests are correctness tests;
+- **No published load/stress benchmarks** — all 471 Rust + 144 Python + 15 MCP tests are correctness tests;
   performance at large scale is not yet characterized.
 
 **Not recommended yet for:** public-facing multi-tenant services, high-frequency

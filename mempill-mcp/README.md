@@ -69,7 +69,8 @@ Read the canonical belief for a (subject, predicate) pair.
 Parameters:
 - `subject` (str)
 - `predicate` (str)
-- `as_of_tx_time` (str, optional) — ISO-8601 UTC timestamp for point-in-time query
+- `as_of_tx_time` (str, optional) — ISO-8601 UTC timestamp; rewinds the transaction-time axis
+- `valid_at` (str, optional) — ISO-8601 UTC timestamp; filters by real-world validity window (independent of `as_of_tx_time`)
 
 Returns: `{"belief": {...BeliefProjection...}}`
 
