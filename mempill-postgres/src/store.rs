@@ -649,6 +649,12 @@ impl PersistencePort for PostgresPersistenceStore {
     ) -> Result<Vec<Claim>, PostgresStoreError> {
         let mut conn = self.pool.get()?;
         if let Some(cutoff) = as_of_tx_time {
+            // tx_time is a TEXT column storing RFC-3339 strings. Bind the cutoff as a String
+            // so the comparison is string-vs-string (lexicographic). RFC-3339 UTC sorts
+            // chronologically, matching the stored format written by `.to_rfc3339()` on INSERT.
+            // Binding a DateTime<Utc> directly triggers a TIMESTAMPTZ type mismatch against
+            // the TEXT column: "error serializing parameter N".
+            let cutoff_str = cutoff.to_rfc3339();
             let sql = format!(
                 "SELECT {CLAIM_SELECT_COLS} FROM claims
                  WHERE agent_id = $1 AND subject = $2 AND predicate = $3
@@ -657,7 +663,7 @@ impl PersistencePort for PostgresPersistenceStore {
             );
             let rows = conn.query(
                 &sql,
-                &[&agent_id.0.as_str(), &subject, &predicate, &cutoff],
+                &[&agent_id.0.as_str(), &subject, &predicate, &cutoff_str.as_str()],
             )?;
             rows.iter().map(row_to_claim).collect()
         } else {

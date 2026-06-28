@@ -258,6 +258,183 @@ mod tests {
         });
     }
 
+    /// Verify valid_at depythonize: string ISO-8601 date → Option<DateTime<Utc>>.
+    /// This test catches the serde(default) + Option<DateTime<Utc>> silent-ignore bug.
+    #[test]
+    fn query_memory_request_valid_at_round_trip() {
+        Python::initialize();
+        Python::attach(|py| {
+            // Test: valid_at as an ISO-8601 string should deserialize to Some(DateTime)
+            let req_json = serde_json::json!({
+                "agent_id": "test-agent",
+                "subject": "user",
+                "predicate": "city",
+                "valid_at": "2021-06-01T00:00:00Z"
+            });
+            let py_dict = pythonize(py, &req_json).expect("pythonize json");
+            let req: QueryMemoryRequest = depythonize(&py_dict)
+                .expect("depythonize QueryMemoryRequest with valid_at");
+            assert!(
+                req.valid_at.is_some(),
+                "valid_at='2021-06-01T00:00:00Z' must deserialize to Some(DateTime), got None"
+            );
+            let vat = req.valid_at.unwrap();
+            // Verify it's in 2021 by comparing timestamps
+            let expected: mempill_core::application::dto::QueryMemoryRequest = serde_json::from_str(
+                r#"{"agent_id":"test-agent","subject":"user","predicate":"city","valid_at":"2021-06-01T00:00:00Z"}"#
+            ).unwrap();
+            assert_eq!(vat, expected.valid_at.unwrap(), "valid_at must match 2021-06-01T00:00:00Z");
+
+            // Test: valid_at=null should deserialize to None
+            let req_null = serde_json::json!({
+                "agent_id": "test-agent",
+                "subject": "user",
+                "predicate": "city",
+                "valid_at": null
+            });
+            let py_dict_null = pythonize(py, &req_null).expect("pythonize json null");
+            let req_null: QueryMemoryRequest = depythonize(&py_dict_null)
+                .expect("depythonize QueryMemoryRequest with valid_at=null");
+            assert!(req_null.valid_at.is_none(), "valid_at=null must deserialize to None");
+
+            // Test: omitted valid_at (serde default) → None
+            let req_omit = serde_json::json!({
+                "agent_id": "test-agent",
+                "subject": "user",
+                "predicate": "city"
+            });
+            let py_dict_omit = pythonize(py, &req_omit).expect("pythonize json omit");
+            let req_omit: QueryMemoryRequest = depythonize(&py_dict_omit)
+                .expect("depythonize QueryMemoryRequest without valid_at");
+            assert!(req_omit.valid_at.is_none(), "absent valid_at must default to None");
+        });
+    }
+
+    /// Verify valid_at depythonize from a NATIVELY constructed Python dict.
+    /// This is the exact path that Python callers use (not via pythonize(serde_json::Value)).
+    #[test]
+    fn query_memory_valid_at_native_pydict() {
+        Python::initialize();
+        Python::attach(|py| {
+            use pyo3::types::{PyDict, PyString};
+            // Build the dict exactly as Python code would: dict["valid_at"] = "2021-06-01T00:00:00Z"
+            let py_dict = PyDict::new(py);
+            py_dict.set_item("agent_id", "test-agent").unwrap();
+            py_dict.set_item("subject", "user").unwrap();
+            py_dict.set_item("predicate", "city").unwrap();
+            py_dict.set_item("valid_at", PyString::new(py, "2021-06-01T00:00:00Z")).unwrap();
+
+            let result = depythonize::<QueryMemoryRequest>(&py_dict.as_any());
+            match &result {
+                Ok(req) => {
+                    assert!(
+                        req.valid_at.is_some(),
+                        "FAIL: valid_at='2021-06-01T00:00:00Z' from native PyDict must be Some(DateTime), got None"
+                    );
+                    eprintln!("PASS: valid_at from native PyDict = {:?}", req.valid_at);
+                }
+                Err(e) => {
+                    panic!("FAIL: depythonize from native PyDict raised error: {e}");
+                }
+            }
+        });
+    }
+
+    /// Full engine integration test: ingest Alice+Bob succession, query with valid_at.
+    /// Mirrors the Python test scenario that was failing.
+    #[test]
+    fn valid_at_succession_fold_via_pyengine() {
+        Python::initialize();
+        Python::attach(|py| {
+            use pyo3::types::{PyDict, PyList, PyString};
+
+            let engine = open_in_memory().expect("open_in_memory");
+
+            // Helper to build ingest request dict
+            fn make_ingest_dict<'py>(
+                py: Python<'py>,
+                agent: &str, subject: &str, pred: &str, value: &str,
+                start: &str, end: Option<&str>,
+            ) -> pyo3::Bound<'py, PyDict> {
+                let d = PyDict::new(py);
+                d.set_item("agent_id", agent).unwrap();
+                d.set_item("subject", subject).unwrap();
+                d.set_item("predicate", pred).unwrap();
+                d.set_item("value", value).unwrap();
+
+                // provenance = {"type": "External", "kind": "ExternalFirstHand"}
+                let prov = PyDict::new(py);
+                prov.set_item("type", "External").unwrap();
+                prov.set_item("kind", "ExternalFirstHand").unwrap();
+                d.set_item("provenance", prov).unwrap();
+                d.set_item("cardinality", "Functional").unwrap();
+
+                // valid_time
+                let vt = PyDict::new(py);
+                vt.set_item("start", start).unwrap();
+                if let Some(e) = end {
+                    vt.set_item("end", e).unwrap();
+                }
+                vt.set_item("valid_time_confidence", 0.99f64).unwrap();
+                d.set_item("valid_time", vt).unwrap();
+
+                // confidence
+                let conf = PyDict::new(py);
+                conf.set_item("value_confidence", 0.99f64).unwrap();
+                conf.set_item("valid_time_confidence", 0.99f64).unwrap();
+                d.set_item("confidence", conf).unwrap();
+
+                d.set_item("criticality", "High").unwrap();
+                d.set_item("derived_from", PyList::empty(py)).unwrap();
+                d
+            }
+
+            // Ingest Alice valid [2020-01-01, 2022-01-01)
+            let alice_dict = make_ingest_dict(py, "test-agent", "x", "y", "Alice",
+                "2020-01-01T00:00:00Z", Some("2022-01-01T00:00:00Z"));
+            engine.ingest_claim(py, &alice_dict.as_any()).expect("ingest Alice");
+
+            // Ingest Bob valid [2022-01-01, open)
+            let bob_dict = make_ingest_dict(py, "test-agent", "x", "y", "Bob",
+                "2022-01-01T00:00:00Z", None);
+            engine.ingest_claim(py, &bob_dict.as_any()).expect("ingest Bob");
+
+            // Query with valid_at=2021-06-01 → should return Alice
+            let q_alice = PyDict::new(py);
+            q_alice.set_item("agent_id", "test-agent").unwrap();
+            q_alice.set_item("subject", "x").unwrap();
+            q_alice.set_item("predicate", "y").unwrap();
+            q_alice.set_item("valid_at", PyString::new(py, "2021-06-01T00:00:00Z")).unwrap();
+
+            let resp_alice = engine.query_memory(py, &q_alice.as_any()).expect("query Alice");
+            let resp_json: serde_json::Value = depythonize(&resp_alice).expect("depythonize resp");
+            let value_alice = resp_json["belief"]["primary"]["fact"]["value"].as_str();
+            eprintln!("valid_at=2021 → {value_alice:?}");
+            assert_eq!(
+                value_alice,
+                Some("Alice"),
+                "valid_at=2021-06-01 must return Alice, got: {value_alice:?}"
+            );
+
+            // Query with valid_at=2023-01-01 → should return Bob
+            let q_bob = PyDict::new(py);
+            q_bob.set_item("agent_id", "test-agent").unwrap();
+            q_bob.set_item("subject", "x").unwrap();
+            q_bob.set_item("predicate", "y").unwrap();
+            q_bob.set_item("valid_at", PyString::new(py, "2023-01-01T00:00:00Z")).unwrap();
+
+            let resp_bob = engine.query_memory(py, &q_bob.as_any()).expect("query Bob");
+            let resp_json_b: serde_json::Value = depythonize(&resp_bob).expect("depythonize resp bob");
+            let value_bob = resp_json_b["belief"]["primary"]["fact"]["value"].as_str();
+            eprintln!("valid_at=2023 → {value_bob:?}");
+            assert_eq!(
+                value_bob,
+                Some("Bob"),
+                "valid_at=2023-01-01 must return Bob, got: {value_bob:?}"
+            );
+        });
+    }
+
     /// Verify AuditQueryRequest round-trip.
     #[test]
     fn audit_query_request_dto_round_trip() {
