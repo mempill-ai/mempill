@@ -194,14 +194,40 @@ async def query_memory(
     subject: str,
     predicate: str,
     as_of_tx_time: Optional[str] = None,
+    valid_at: Optional[str] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Query the canonical belief for a (subject, predicate) pair.
 
+    Bi-temporal query — two independent time axes:
+
+    * ``valid_at`` selects the belief that was *true in the world* at the given
+      real-world instant.  Example: "What was the CEO on 2023-06-15?"
+      This is the *valid-time* axis (D2 bi-temporal rule).
+
+    * ``as_of_tx_time`` selects what the *system knew* at a given point in its
+      own log.  Example: "What did the engine believe last Tuesday before the
+      correction was ingested?"
+      This is the *transaction-time* axis.
+
+    The two can be combined independently:
+        ``valid_at="2023-06-15T00:00:00Z", as_of_tx_time="2024-01-01T00:00:00Z"``
+    asks "What did the system believe on 2024-01-01 about what was true on
+    2023-06-15?" — the canonical bi-temporal point-in-time query.
+
+    When neither is set, the current live belief is returned (both axes = now).
+
     Args:
         subject: The entity to query (e.g. "user:alice").
         predicate: The property to read (e.g. "age").
-        as_of_tx_time: Optional ISO-8601 UTC timestamp for point-in-time query.
+        as_of_tx_time: Optional ISO-8601 UTC timestamp for transaction-time
+            point-in-time query.  Filters out claims recorded after this
+            instant (controls which writes are visible).
+        valid_at: Optional ISO-8601 UTC timestamp for valid-time selection.
+            After the transaction-time filter is applied, narrows to the claim
+            whose valid-time window contains this instant.
+            When absent, backward-compatible behaviour is preserved: the
+            as_of_tx_time (or now) is also used as the valid-time instant.
 
     Returns:
         {"belief": {...}} with the BeliefProjection.
@@ -219,6 +245,8 @@ async def query_memory(
     }
     if as_of_tx_time is not None:
         request["as_of_tx_time"] = as_of_tx_time
+    if valid_at is not None:
+        request["valid_at"] = valid_at
 
     result: dict[str, Any] = engine.query_memory(request)
 

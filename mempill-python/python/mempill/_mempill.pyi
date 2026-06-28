@@ -83,16 +83,35 @@ class PyEngine:
     def query_memory(self, request: dict[str, Any]) -> dict[str, Any]:
         """Query the current belief for a (subject, predicate) pair.
 
+        Bi-temporal query — two independent time axes (D2 independence rule):
+
+        * ``valid_at``: selects the belief *true in the world* at this real-world
+          instant (the valid-time axis).  Example: "What was the CEO on 2023-06-15?"
+
+        * ``as_of_tx_time``: selects what the *system knew* at this point in its own
+          log (the transaction-time axis).  Example: "What did the engine know last
+          Tuesday, before the correction was ingested?"
+
+        The two compose independently: transaction-time filter is applied first, then
+        valid-time selection narrows the result.  When neither is set, both axes
+        default to ``now`` (backward-compatible current live belief).
+
         Args:
             request: dict with:
                 - agent_id (str)
                 - subject (str)
                 - predicate (str)
-                - as_of_tx_time (str | None): optional ISO-8601 UTC string
+                - as_of_tx_time (str | None): optional ISO-8601 UTC string —
+                  transaction-time axis; controls which writes are visible.
+                - valid_at (str | None): optional ISO-8601 UTC string —
+                  valid-time axis; selects the claim whose valid-time window
+                  contains this instant.  When absent, as_of_tx_time (or now)
+                  is used as the valid-time instant (backward-compatible).
 
         Returns:
             dict with:
-                - belief (dict): BeliefProjection structure
+                - belief (dict): BeliefProjection structure.
+                  Access: result["belief"]["primary"]["fact"]["value"]
 
         Raises:
             ValidationError: bad request
