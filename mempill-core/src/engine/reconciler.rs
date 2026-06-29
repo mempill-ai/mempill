@@ -205,7 +205,7 @@ mod tests {
     }
 
     fn no_vt() -> ValidTime {
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None}
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None}
     }
 
     fn make_claim(
@@ -555,7 +555,7 @@ mod tests {
                 value,
             },
             provenance: mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted),
-            valid_time: ValidTime { start: vt_start, end: vt_end, valid_time_confidence: vt_confidence, granularity: None },
+            valid_time: ValidTime { start: vt_start, end: vt_end, valid_time_confidence: vt_confidence, start_granularity: None, end_granularity: None },
             transaction_time: tx_past(),
             confidence: mempill_types::Confidence { value_confidence: 0.8, valid_time_confidence: vt_confidence },
             currency_signal: mempill_types::CurrencySignal {
@@ -584,7 +584,7 @@ mod tests {
             mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::ExternalFirstHand),
             mempill_types::ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             tx(),
-            ValidTime { start: vt_start, end: vt_end, valid_time_confidence: vt_confidence, granularity: None },
+            ValidTime { start: vt_start, end: vt_end, valid_time_confidence: vt_confidence, start_granularity: None, end_granularity: None },
             mempill_types::Confidence { value_confidence: 0.9, valid_time_confidence: vt_confidence },
             mempill_types::Criticality::Medium,
             vec![],

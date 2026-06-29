@@ -276,7 +276,7 @@ mod tests {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(tx_time),
-            ValidTime { start: vt_start, end: None, valid_time_confidence: vt_confidence , granularity: None},
+            ValidTime { start: vt_start, end: None, valid_time_confidence: vt_confidence , start_granularity: None, end_granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: vt_confidence },
             mempill_types::Criticality::Medium,
             vec![],

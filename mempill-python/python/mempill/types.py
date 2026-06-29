@@ -128,20 +128,26 @@ class ValidTimeDict(TypedDict, total=False):
 
     Fields:
         start: ISO-8601 UTC string marking the start of the valid-time window (inclusive).
-               Example: "2023-01-01T00:00:00Z"
+               Example: "2023-03-01T00:00:00Z"
         end:   ISO-8601 UTC string marking the end of the valid-time window (exclusive).
                None / omitted means open-ended (still valid as of now).
         valid_time_confidence: Confidence that the asserted time bounds are correct [0.0, 1.0].
                                0.0 = unknown / no time bounds supplied.
-        granularity: Optional human-readable precision hint, e.g. "year", "month", "day".
-                     The engine does not interpret this value — it is stored verbatim and
-                     surfaced to callers for display purposes (planned v0.3 feature).
+        start_granularity: Raw precision tag for the ``start`` endpoint as supplied by the
+                           caller.  One of ``"year"``, ``"month"``, ``"day"``, ``"instant"``.
+                           Absent when the start was not set or the row predates granularity
+                           tracking.  Use ``valid_from_display`` on the belief slot for a
+                           pre-rendered, human-readable form.
+        end_granularity:   Same semantics as ``start_granularity`` but for the ``end``
+                           endpoint.  Absent when the end is open-ended or the row predates
+                           granularity tracking.
     """
 
     start: str
     end: str
     valid_time_confidence: float
-    granularity: str
+    start_granularity: str  # "year" | "month" | "day" | "instant"
+    end_granularity: str    # "year" | "month" | "day" | "instant"
 
 
 class FactDict(TypedDict):
@@ -157,6 +163,28 @@ class BeliefSlot(TypedDict, total=False):
 
     Maps to the Rust ``BeliefSlot`` type returned by ``query_memory``.
     Use ``belief["primary"]["fact"]["value"]`` for the resolved value.
+
+    Granularity / display fields (added in W6):
+
+        ``valid_time.start_granularity`` — raw precision tag for the start endpoint:
+        ``"year"``, ``"month"``, ``"day"``, or ``"instant"``.  Absent when the
+        start was not set or the row predates granularity tracking.
+
+        ``valid_time.end_granularity`` — same for the end endpoint.
+
+        ``valid_from_display`` — start of the valid-time window rendered at its
+        recorded precision (e.g. ``"2020-03"`` for Month, ``"2020"`` for Year,
+        ``"2020-03-15"`` for Day/Instant).  Pre-rendered by the engine so callers
+        never need to import ``DateGranularity`` or call format helpers.  Absent
+        when the start endpoint is unknown (open).
+
+        ``valid_until_display`` — same for the end endpoint.  Absent when the
+        end is open-ended.
+
+    Usage (honest display without fabricating precision)::
+
+        primary = resp["belief"]["primary"]
+        display = primary.get("valid_from_display", primary["valid_time"].get("start", "unknown"))
     """
 
     claim_ref: str          # UUID string of the backing claim
@@ -165,6 +193,8 @@ class BeliefSlot(TypedDict, total=False):
     confidence: ConfidenceDict
     provenance: dict[str, str]   # adjacently-tagged: {"type": ..., "kind"?: ...}
     currency_signal: dict[str, Any]
+    valid_from_display: str      # pre-rendered start at recorded precision; absent when unknown
+    valid_until_display: str     # pre-rendered end at recorded precision; absent when open-ended
 
 
 class BeliefProjection(TypedDict, total=False):

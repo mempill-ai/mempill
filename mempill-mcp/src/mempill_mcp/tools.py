@@ -233,6 +233,22 @@ async def query_memory(
         {"belief": {...}} with the BeliefProjection.
         A "status_reason" field is added when the belief status is Contested or
         PendingReview, explaining why the belief is not yet authoritative.
+
+        Each belief slot (``belief["primary"]``, ``belief["alternatives"][i]``)
+        also carries per-endpoint valid-time precision metadata:
+
+          - ``valid_from_display`` (str | absent): start of the valid-time window
+            at its recorded precision.  Examples: ``"2020"`` (Year),
+            ``"2020-03"`` (Month, no fabricated day), ``"2020-03-15"`` (Day).
+            Absent when the start is unknown / not set.
+
+          - ``valid_until_display`` (str | absent): same for the end endpoint.
+            Absent when open-ended.
+
+          - ``valid_time["start_granularity"]`` (str | absent): raw granularity tag
+            — ``"year"``, ``"month"``, ``"day"``, or ``"instant"``.
+
+          - ``valid_time["end_granularity"]`` (str | absent): same for the end.
     """
     lc = ctx.request_context.lifespan_context
     engine = lc["engine"]

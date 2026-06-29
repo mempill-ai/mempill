@@ -46,7 +46,7 @@ fn make_claim(agent_id: &AgentId, subject: &str, predicate: &str) -> Claim {
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(Utc::now()),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],
@@ -340,7 +340,7 @@ where
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(t1),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],
@@ -355,7 +355,7 @@ where
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(t2),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],
@@ -855,7 +855,7 @@ where
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(tx),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],
@@ -905,7 +905,7 @@ where
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(tx),
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             Criticality::Low,
             vec![],
@@ -975,7 +975,7 @@ where
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(t1),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],
@@ -1094,7 +1094,7 @@ where
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(Utc::now()),
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             Criticality::Low,
             vec![],
@@ -1133,7 +1133,7 @@ where
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(t_a),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],
@@ -1172,7 +1172,7 @@ where
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(t_b),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],
@@ -1327,7 +1327,7 @@ fn make_vt_claim_for_conformance(
             start: Some(vt_start),
             end: vt_end,
             valid_time_confidence: 0.9,
-            granularity: None,
+            start_granularity: None, end_granularity: None,
         },
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
         Criticality::Medium,
@@ -1718,5 +1718,222 @@ where
         fold.live_claims[0].claim.fact().value,
         serde_json::json!("carol"),
         "va6: backward compat — None valid_at with as_of=2026 → Carol's open window [2024, ∞)"
+    );
+}
+
+// ── Granularity conformance harness ──────────────────────────────────────────
+
+/// Run the `DateGranularity` persistence conformance suite against `store`.
+///
+/// Verifies that both adapters store and retrieve `start_granularity` / `end_granularity`
+/// identically. Each scenario uses a distinct `AgentId` to avoid cross-contamination.
+///
+/// Scenarios:
+///   gran1 — `start_granularity=Month`, open end  → exact values round-trip
+///   gran2 — `start_granularity=Day`, `end_granularity=Year` → both round-trip
+///   gran3 — both `None` (legacy / no granularity) → remain `None`
+///
+/// This harness complements the per-adapter `granularity_roundtrip` tests (W2/W3) by
+/// proving cross-adapter behavioral parity through the same shared fixture path used by
+/// the rest of the conformance suite.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_granularity_conformance<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    granularity_month_start_open_end(store);
+    granularity_day_start_year_end(store);
+    granularity_none_none_legacy(store);
+}
+
+/// gran1: `start_granularity=Month`, `end_granularity=None` round-trips.
+#[cfg(any(test, feature = "test-support"))]
+fn granularity_month_start_open_end<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use mempill_types::DateGranularity;
+
+    let agent = AgentId("conformance-gran-t1".into());
+    let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(20_000_000, 0).unwrap();
+    // "2020-03" parses to first-of-month midnight UTC.
+    let start = chrono::DateTime::<chrono::Utc>::from_timestamp(1583020800, 0).unwrap(); // 2020-03-01
+
+    let claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact {
+            subject: "gran-person".into(),
+            predicate: "birth_month".into(),
+            value: serde_json::json!("test-value"),
+        },
+        mempill_types::claim::Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime {
+            start: Some(start),
+            end: None,
+            valid_time_confidence: 0.9,
+            start_granularity: Some(DateGranularity::Month),
+            end_granularity: None,
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        mempill_types::claim::Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+    let claim_ref = claim.claim_ref().clone();
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[gran-t1]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[gran-t1]: append_claim");
+    store.commit(txn).expect("conformance[gran-t1]: commit");
+
+    let loaded = store
+        .load_claim(&agent, &claim_ref)
+        .expect("conformance[gran-t1]: load_claim must not error")
+        .expect("conformance[gran-t1]: claim must be present");
+
+    assert_eq!(
+        loaded.valid_time().start_granularity,
+        Some(DateGranularity::Month),
+        "conformance[gran-t1]: start_granularity must round-trip as Month; got {:?}",
+        loaded.valid_time().start_granularity,
+    );
+    assert_eq!(
+        loaded.valid_time().end_granularity,
+        None,
+        "conformance[gran-t1]: end_granularity must remain None for open end; got {:?}",
+        loaded.valid_time().end_granularity,
+    );
+    assert_eq!(
+        loaded.valid_time().start,
+        Some(start),
+        "conformance[gran-t1]: start datetime must be preserved"
+    );
+}
+
+/// gran2: `start_granularity=Day`, `end_granularity=Year` both round-trip.
+#[cfg(any(test, feature = "test-support"))]
+fn granularity_day_start_year_end<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use mempill_types::DateGranularity;
+
+    let agent = AgentId("conformance-gran-t2".into());
+    let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(20_000_001, 0).unwrap();
+    let start = chrono::DateTime::<chrono::Utc>::from_timestamp(1560556800, 0).unwrap(); // 2019-06-15
+    let end   = chrono::DateTime::<chrono::Utc>::from_timestamp(1672531200, 0).unwrap(); // 2023-01-01
+
+    let claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact {
+            subject: "gran-project".into(),
+            predicate: "active_window".into(),
+            value: serde_json::json!("test-value"),
+        },
+        mempill_types::claim::Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime {
+            start: Some(start),
+            end: Some(end),
+            valid_time_confidence: 0.8,
+            start_granularity: Some(DateGranularity::Day),
+            end_granularity: Some(DateGranularity::Year),
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.8 },
+        mempill_types::claim::Criticality::Low,
+        vec![],
+        None,
+        None,
+    );
+    let claim_ref = claim.claim_ref().clone();
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[gran-t2]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[gran-t2]: append_claim");
+    store.commit(txn).expect("conformance[gran-t2]: commit");
+
+    let loaded = store
+        .load_claim(&agent, &claim_ref)
+        .expect("conformance[gran-t2]: load_claim must not error")
+        .expect("conformance[gran-t2]: claim must be present");
+
+    assert_eq!(
+        loaded.valid_time().start_granularity,
+        Some(DateGranularity::Day),
+        "conformance[gran-t2]: start_granularity must round-trip as Day; got {:?}",
+        loaded.valid_time().start_granularity,
+    );
+    assert_eq!(
+        loaded.valid_time().end_granularity,
+        Some(DateGranularity::Year),
+        "conformance[gran-t2]: end_granularity must round-trip as Year; got {:?}",
+        loaded.valid_time().end_granularity,
+    );
+}
+
+/// gran3: both granularities `None` (legacy rows) remain `None` after round-trip.
+#[cfg(any(test, feature = "test-support"))]
+fn granularity_none_none_legacy<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    let agent = AgentId("conformance-gran-t3".into());
+    let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(20_000_002, 0).unwrap();
+
+    let claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact {
+            subject: "gran-legacy".into(),
+            predicate: "event_time".into(),
+            value: serde_json::json!("test-value"),
+        },
+        mempill_types::claim::Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime {
+            start: None,
+            end: None,
+            valid_time_confidence: 0.0,
+            start_granularity: None,
+            end_granularity: None,
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        mempill_types::claim::Criticality::Low,
+        vec![],
+        None,
+        None,
+    );
+    let claim_ref = claim.claim_ref().clone();
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[gran-t3]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[gran-t3]: append_claim");
+    store.commit(txn).expect("conformance[gran-t3]: commit");
+
+    let loaded = store
+        .load_claim(&agent, &claim_ref)
+        .expect("conformance[gran-t3]: load_claim must not error")
+        .expect("conformance[gran-t3]: claim must be present");
+
+    assert_eq!(
+        loaded.valid_time().start_granularity,
+        None,
+        "conformance[gran-t3]: start_granularity must remain None for legacy rows"
+    );
+    assert_eq!(
+        loaded.valid_time().end_granularity,
+        None,
+        "conformance[gran-t3]: end_granularity must remain None for legacy rows"
     );
 }

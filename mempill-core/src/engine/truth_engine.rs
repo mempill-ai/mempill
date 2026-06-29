@@ -286,6 +286,10 @@ where
 /// Currency decay is NOT computed here — that is the Projection component's responsibility.
 /// The `last_refreshed_at` is set to the claim's transaction_time as the baseline;
 /// projection.rs will compute the actual decay state using `now`.
+///
+/// GRANULARITY NOTE (DISPLAY-ONLY): `valid_time` is cloned verbatim from the claim,
+/// so `start_granularity` and `end_granularity` are preserved here.  Granularity is
+/// purely a display hint — it does NOT influence fold selection, matching, or ordering.
 pub(crate) fn claim_to_belief(cs: &ClaimWithStatus) -> Belief {
     Belief {
         claim_ref: cs.claim.claim_ref().clone(),
@@ -381,7 +385,7 @@ mod tests {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(tx_time),
-            ValidTime { start: vt_start, end: None, valid_time_confidence: vt_confidence , granularity: None},
+            ValidTime { start: vt_start, end: None, valid_time_confidence: vt_confidence , start_granularity: None, end_granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: vt_confidence },
             mempill_types::Criticality::Medium,
             vec![],
@@ -756,7 +760,7 @@ mod tests {
             mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted),
             mempill_types::ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(tx_time),
-            mempill_types::ValidTime { start: Some(vt_start), end: vt_end, valid_time_confidence: 0.9, granularity: None },
+            mempill_types::ValidTime { start: Some(vt_start), end: vt_end, valid_time_confidence: 0.9, start_granularity: None, end_granularity: None },
             mempill_types::Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
             mempill_types::Criticality::Medium,
             vec![],

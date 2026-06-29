@@ -7,7 +7,7 @@
 /// render dates honestly (e.g. display `"2024"` instead of `"2024-01-01T00:00:00Z"`).
 ///
 /// Additive field — existing `ValidTime` values without this field deserialise with `None`
-/// (see `#[serde(default)]` on [`ValidTime::granularity`]).
+/// (see `#[serde(default)]` on [`ValidTime::start_granularity`] and [`ValidTime::end_granularity`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DateGranularity {
@@ -49,7 +49,44 @@ pub struct ValidTime {
     ///
     /// Additive field: old serialised `ValidTime` values without this key deserialise to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub granularity: Option<DateGranularity>,
+    pub start_granularity: Option<DateGranularity>,
+    /// Optional precision hint for the `end` field when it was derived from a partial date string.
+    /// `None` means the end was either absent (open-ended) or already a full instant.
+    ///
+    /// Additive field: old serialised `ValidTime` values without this key deserialise to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_granularity: Option<DateGranularity>,
+}
+
+/// Convert a [`DateGranularity`] to its canonical TEXT representation used in both
+/// the SQLite and Postgres persistence adapters.
+///
+/// The strings are identical to the serde snake_case serialisation so that TEXT stored in
+/// the database matches JSON round-trips: `"year"`, `"month"`, `"day"`, `"instant"`.
+///
+/// Both adapters MUST use this function (not hand-rolled `match` arms) to guarantee
+/// cross-adapter encoding consistency.
+pub fn date_granularity_to_str(g: DateGranularity) -> &'static str {
+    match g {
+        DateGranularity::Year => "year",
+        DateGranularity::Month => "month",
+        DateGranularity::Day => "day",
+        DateGranularity::Instant => "instant",
+    }
+}
+
+/// Parse the TEXT column value back to [`DateGranularity`].
+///
+/// Returns `None` for `NULL` (old rows without granularity) and errors on unknown strings.
+/// Both adapters MUST use this function for decode symmetry with [`date_granularity_to_str`].
+pub fn str_to_date_granularity(s: &str) -> Option<DateGranularity> {
+    match s {
+        "year" => Some(DateGranularity::Year),
+        "month" => Some(DateGranularity::Month),
+        "day" => Some(DateGranularity::Day),
+        "instant" => Some(DateGranularity::Instant),
+        _ => None,
+    }
 }
 
 /// Parse a lenient date string into a UTC `DateTime` start-of-period and its [`DateGranularity`].
@@ -111,6 +148,52 @@ pub fn parse_valid_time_date(
     None
 }
 
+/// Render a valid-time endpoint honestly at its recorded precision.
+///
+/// The granularity governs how many date components are included in the output.
+/// The hard rule: output MUST NOT fabricate finer precision than `granularity`.
+///
+/// | Granularity       | Example output        |
+/// |-------------------|-----------------------|
+/// | `Year`            | `"2020"`              |
+/// | `Month`           | `"2020-03"`           |
+/// | `Day`             | `"2020-03-15"`        |
+/// | `Instant`         | `"2020-03-15"` (day form; sub-day precision is not shown by default) |
+/// | `None` (unknown)  | falls back to `"YYYY-MM-DD"` day form, or `None` when `date` is also `None` |
+///
+/// Returns `None` when `date` is `None` (open / unknown endpoint).
+///
+/// # Example
+///
+/// ```
+/// use chrono::{TimeZone, Utc};
+/// use mempill_types::time::{DateGranularity, format_valid_time_endpoint};
+///
+/// let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+/// assert_eq!(format_valid_time_endpoint(Some(dt), Some(DateGranularity::Month)), Some("2020-03".to_string()));
+/// assert_eq!(format_valid_time_endpoint(Some(dt), Some(DateGranularity::Year)),  Some("2020".to_string()));
+/// assert_eq!(format_valid_time_endpoint(Some(dt), Some(DateGranularity::Day)),   Some("2020-03-15".to_string()));
+/// assert_eq!(format_valid_time_endpoint(None, Some(DateGranularity::Month)), None);
+/// ```
+pub fn format_valid_time_endpoint(
+    date: Option<chrono::DateTime<chrono::Utc>>,
+    granularity: Option<DateGranularity>,
+) -> Option<String> {
+    let dt = date?;
+    Some(match granularity {
+        Some(DateGranularity::Year) => format!("{}", dt.format("%Y")),
+        Some(DateGranularity::Month) => format!("{}", dt.format("%Y-%m")),
+        // Day and Instant both render at day precision — Instant sub-day detail is
+        // intentionally omitted here to avoid surfacing fabricated precision for dates
+        // that were normalised to midnight UTC during ingestion.
+        Some(DateGranularity::Day) | Some(DateGranularity::Instant) => {
+            format!("{}", dt.format("%Y-%m-%d"))
+        }
+        // None granularity (legacy row or unknown precision): fall back to day form.
+        None => format!("{}", dt.format("%Y-%m-%d")),
+    })
+}
+
 impl ValidTime {
     /// Returns true iff both start and end are None (unknown valid-time window).
     pub fn is_unknown(&self) -> bool {
@@ -141,13 +224,13 @@ mod tests {
 
     #[test]
     fn valid_time_unknown_when_both_none() {
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None};
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None};
         assert!(vt.is_unknown());
     }
 
     #[test]
     fn valid_time_not_unknown_when_start_set() {
-        let vt = ValidTime { start: Some(Utc::now()), end: None, valid_time_confidence: 0.8 , granularity: None};
+        let vt = ValidTime { start: Some(Utc::now()), end: None, valid_time_confidence: 0.8 , start_granularity: None, end_granularity: None};
         assert!(!vt.is_unknown());
     }
 
@@ -159,7 +242,7 @@ mod tests {
             start: Some(now + chrono::Duration::hours(1)),
             end: Some(now),
             valid_time_confidence: 1.0,
-            granularity: None,
+            start_granularity: None, end_granularity: None,
         };
         assert!(vt.is_temporally_incoherent(&tx));
     }
@@ -172,7 +255,7 @@ mod tests {
             start: Some(now + chrono::Duration::hours(1)),
             end: None,
             valid_time_confidence: 1.0,
-            granularity: None,
+            start_granularity: None, end_granularity: None,
         };
         assert!(vt.is_temporally_incoherent(&tx));
     }
@@ -185,7 +268,7 @@ mod tests {
             start: Some(now - chrono::Duration::days(1)),
             end: Some(now),
             valid_time_confidence: 0.9,
-            granularity: None,
+            start_granularity: None, end_granularity: None,
         };
         assert!(!vt.is_temporally_incoherent(&tx));
     }
@@ -213,7 +296,7 @@ mod tests {
 
     #[test]
     fn valid_time_round_trip_serde() {
-        let vt = ValidTime { start: Some(Utc::now()), end: None, valid_time_confidence: 0.7 , granularity: None};
+        let vt = ValidTime { start: Some(Utc::now()), end: None, valid_time_confidence: 0.7 , start_granularity: None, end_granularity: None};
         let json = serde_json::to_string(&vt).unwrap();
         let back: ValidTime = serde_json::from_str(&json).unwrap();
         assert_eq!(vt.start, back.start);
@@ -222,15 +305,16 @@ mod tests {
 
     // ── W1c — DateGranularity + parse_valid_time_date ────────────────────────
 
-    /// Old-format ValidTime (no granularity field) must deserialise to granularity = None.
+    /// Old-format ValidTime (no granularity fields) must deserialise with both granularities = None.
     #[test]
     fn valid_time_old_format_compat_no_granularity_field() {
         let old_json = r#"{"start":null,"end":null,"valid_time_confidence":0.0}"#;
         let vt: ValidTime = serde_json::from_str(old_json).unwrap();
-        assert_eq!(vt.granularity, None, "old-format ValidTime must deserialise granularity=None");
+        assert_eq!(vt.start_granularity, None, "old-format ValidTime must deserialise start_granularity=None");
+        assert_eq!(vt.end_granularity, None, "old-format ValidTime must deserialise end_granularity=None");
     }
 
-    /// ValidTime with granularity=Year round-trips correctly.
+    /// ValidTime with start_granularity=Year round-trips correctly.
     #[test]
     fn valid_time_with_granularity_round_trips() {
         use chrono::TimeZone;
@@ -239,12 +323,33 @@ mod tests {
             start: Some(dt),
             end: None,
             valid_time_confidence: 0.9,
-            granularity: Some(DateGranularity::Year),
+            start_granularity: Some(DateGranularity::Year),
+            end_granularity: None,
         };
         let json = serde_json::to_string(&vt).unwrap();
         let back: ValidTime = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.granularity, Some(DateGranularity::Year));
+        assert_eq!(back.start_granularity, Some(DateGranularity::Year));
+        assert_eq!(back.end_granularity, None);
         assert_eq!(back.start, Some(dt));
+    }
+
+    /// ValidTime with both start and end granularity round-trips correctly.
+    #[test]
+    fn valid_time_with_both_granularities_round_trips() {
+        use chrono::TimeZone;
+        let start = Utc.with_ymd_and_hms(2020, 3, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
+        let vt = ValidTime {
+            start: Some(start),
+            end: Some(end),
+            valid_time_confidence: 0.9,
+            start_granularity: Some(DateGranularity::Month),
+            end_granularity: Some(DateGranularity::Year),
+        };
+        let json = serde_json::to_string(&vt).unwrap();
+        let back: ValidTime = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.start_granularity, Some(DateGranularity::Month));
+        assert_eq!(back.end_granularity, Some(DateGranularity::Year));
     }
 
     /// parse_valid_time_date("YYYY") produces Year granularity and Jan 1 midnight UTC.
@@ -297,15 +402,15 @@ mod tests {
         assert_eq!(back, DateGranularity::Year);
     }
 
-    /// granularity field is omitted from JSON when None (skip_serializing_if).
+    /// Granularity fields are omitted from JSON when both are None (skip_serializing_if).
     #[test]
     fn granularity_none_not_serialised() {
-        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0, granularity: None };
+        let vt = ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None };
         let json = serde_json::to_string(&vt).unwrap();
-        assert!(!json.contains("granularity"), "None granularity must not appear in serialised JSON");
+        assert!(!json.contains("granularity"), "None granularity fields must not appear in serialised JSON");
     }
 
-    /// granularity Some(Year) IS serialised.
+    /// start_granularity Some(Month) IS serialised; end_granularity None is omitted.
     #[test]
     fn granularity_some_is_serialised() {
         use chrono::TimeZone;
@@ -313,10 +418,71 @@ mod tests {
             start: Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()),
             end: None,
             valid_time_confidence: 0.9,
-            granularity: Some(DateGranularity::Month),
+            start_granularity: Some(DateGranularity::Month),
+            end_granularity: None,
         };
         let json = serde_json::to_string(&vt).unwrap();
-        assert!(json.contains("granularity"), "Some granularity must appear in serialised JSON");
+        assert!(json.contains("start_granularity"), "Some start_granularity must appear in serialised JSON");
         assert!(json.contains("month"), "granularity value must be 'month'");
+        assert!(!json.contains("end_granularity"), "None end_granularity must not appear in serialised JSON");
+    }
+
+    // ── W5 — format_valid_time_endpoint render helper ────────────────────────
+
+    /// Year granularity: only year component emitted, never month or day.
+    #[test]
+    fn render_helper_year_granularity_no_month_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Year)).unwrap();
+        assert_eq!(out, "2020", "Year granularity must output only YYYY");
+        assert!(!out.contains('-'), "Year output must not contain a dash (no month/day)");
+    }
+
+    /// Month granularity: year and month emitted, never day.
+    #[test]
+    fn render_helper_month_granularity_no_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Month)).unwrap();
+        assert_eq!(out, "2020-03", "Month granularity must output YYYY-MM");
+        // Must not contain a day component — splitting by '-' gives ["2020","03"] only.
+        let parts: Vec<&str> = out.splitn(4, '-').collect();
+        assert_eq!(parts.len(), 2, "Month output must have exactly two dash-separated parts (YYYY-MM)");
+    }
+
+    /// Day granularity: full YYYY-MM-DD.
+    #[test]
+    fn render_helper_day_granularity_full_date() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Day)).unwrap();
+        assert_eq!(out, "2020-03-15");
+    }
+
+    /// Instant granularity: rendered at day precision (sub-day suppressed to avoid
+    /// fabricating precision when dates were normalised to midnight UTC at ingestion).
+    #[test]
+    fn render_helper_instant_granularity_renders_at_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 10, 30, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), Some(DateGranularity::Instant)).unwrap();
+        assert_eq!(out, "2020-03-15", "Instant renders at day precision");
+    }
+
+    /// None granularity (legacy / unknown precision): falls back to day form.
+    #[test]
+    fn render_helper_none_granularity_falls_back_to_day() {
+        use chrono::TimeZone;
+        let dt = Utc.with_ymd_and_hms(2020, 3, 15, 0, 0, 0).unwrap();
+        let out = format_valid_time_endpoint(Some(dt), None).unwrap();
+        assert_eq!(out, "2020-03-15", "None granularity must fall back to YYYY-MM-DD");
+    }
+
+    /// None date returns None regardless of granularity.
+    #[test]
+    fn render_helper_none_date_returns_none() {
+        assert_eq!(format_valid_time_endpoint(None, Some(DateGranularity::Month)), None);
+        assert_eq!(format_valid_time_endpoint(None, None), None);
     }
 }

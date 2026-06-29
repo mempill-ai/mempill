@@ -12,7 +12,7 @@ use rusqlite::{Connection, Result};
 
 /// The target schema version this runner brings the database to.
 /// Increment this constant (and add a new migration step) for every future DDL change.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Embedded DDL — the 4-table append-only schema (§5).
 const V1_INITIAL_SQL: &str = include_str!("schema/v1_initial.sql");
@@ -22,6 +22,9 @@ const INDEXES_SQL: &str = include_str!("schema/indexes.sql");
 
 /// Embedded DDL — oracle adjudication queue (pending_adjudications table).
 const V2_PENDING_ADJUDICATIONS_SQL: &str = include_str!("schema/v2_pending_adjudications.sql");
+
+/// Embedded DDL — per-endpoint date-granularity columns on claims.
+const V3_DATE_GRANULARITY_SQL: &str = include_str!("schema/v3_date_granularity.sql");
 
 /// Migration error wrapper.
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +53,10 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), MigrationError> {
         apply_v2(conn)?;
     }
 
+    if current < 3 {
+        apply_v3(conn)?;
+    }
+
     Ok(())
 }
 
@@ -72,7 +79,7 @@ fn set_user_version(conn: &Connection, version: u32) -> Result<(), MigrationErro
 }
 
 /// Migration v1: create the 4 append-only tables and all structural indexes.
-fn apply_v1(conn: &Connection) -> Result<(), MigrationError> {
+pub(crate) fn apply_v1(conn: &Connection) -> Result<(), MigrationError> {
     conn.execute_batch(V1_INITIAL_SQL)?;
     conn.execute_batch(INDEXES_SQL)?;
     set_user_version(conn, 1)?;
@@ -80,9 +87,20 @@ fn apply_v1(conn: &Connection) -> Result<(), MigrationError> {
 }
 
 /// Migration v2: create the oracle adjudication queue table and its indexes.
-fn apply_v2(conn: &Connection) -> Result<(), MigrationError> {
+pub(crate) fn apply_v2(conn: &Connection) -> Result<(), MigrationError> {
     conn.execute_batch(V2_PENDING_ADJUDICATIONS_SQL)?;
     set_user_version(conn, 2)?;
+    Ok(())
+}
+
+/// Migration v3: add `valid_time_start_granularity` and `valid_time_end_granularity`
+/// nullable TEXT columns to the `claims` table.
+///
+/// Old rows upgrade cleanly: the new columns default to NULL, which the read path maps to
+/// `None` on `ValidTime::start_granularity` and `ValidTime::end_granularity`.
+pub(crate) fn apply_v3(conn: &Connection) -> Result<(), MigrationError> {
+    conn.execute_batch(V3_DATE_GRANULARITY_SQL)?;
+    set_user_version(conn, 3)?;
     Ok(())
 }
 
@@ -178,6 +196,9 @@ mod tests {
             "metadata",
             "snapshot_schema_version",
             "embedding_model_id",
+            // v3 — date granularity
+            "valid_time_start_granularity",
+            "valid_time_end_granularity",
         ] {
             assert!(
                 cols.contains(&expected.to_string()),
@@ -393,5 +414,74 @@ mod tests {
         assert!(table_exists(&conn, "pending_adjudications"));
         assert!(index_exists(&conn, "idx_pending_adj_agent_id"));
         assert!(index_exists(&conn, "idx_pending_adj_expires_at"));
+    }
+
+    // ── v3 migration tests ────────────────────────────────────────────────────
+
+    /// v3 adds the two nullable granularity columns to the claims table.
+    #[test]
+    fn v3_granularity_columns_exist_after_migration() {
+        let conn = open_memory();
+        apply_migrations(&conn).expect("migrations should succeed");
+
+        let cols = column_names(&conn, "claims");
+        assert!(
+            cols.contains(&"valid_time_start_granularity".to_string()),
+            "claims table missing column: valid_time_start_granularity (added in v3)"
+        );
+        assert!(
+            cols.contains(&"valid_time_end_granularity".to_string()),
+            "claims table missing column: valid_time_end_granularity (added in v3)"
+        );
+    }
+
+    /// v3 upgrade invariant: a DB at v2 can be upgraded to v3, and old rows (NULL columns)
+    /// still read back cleanly.
+    #[test]
+    fn v3_upgrade_from_v2_succeeds() {
+        // Start from scratch and apply only v1 + v2.
+        let conn = open_memory();
+        apply_v1(&conn).expect("v1 must succeed");
+        apply_v2(&conn).expect("v2 must succeed");
+        assert_eq!(user_version(&conn).unwrap(), 2, "after v2 version must be 2");
+
+        // Verify granularity columns don't exist yet.
+        let cols_before = column_names(&conn, "claims");
+        assert!(
+            !cols_before.contains(&"valid_time_start_granularity".to_string()),
+            "granularity column must not exist before v3"
+        );
+
+        // Now upgrade to v3.
+        apply_v3(&conn).expect("v3 upgrade must succeed");
+        assert_eq!(user_version(&conn).unwrap(), 3, "after v3 version must be 3");
+
+        let cols_after = column_names(&conn, "claims");
+        assert!(
+            cols_after.contains(&"valid_time_start_granularity".to_string()),
+            "granularity column must exist after v3"
+        );
+        assert!(
+            cols_after.contains(&"valid_time_end_granularity".to_string()),
+            "granularity column must exist after v3"
+        );
+    }
+
+    /// Running apply_migrations on a v2 database upgrades it to v3.
+    #[test]
+    fn apply_migrations_upgrades_v2_to_v3() {
+        let conn = open_memory();
+        apply_v1(&conn).expect("v1 must succeed");
+        apply_v2(&conn).expect("v2 must succeed");
+
+        // Simulate an existing v2 DB being opened with the new library.
+        apply_migrations(&conn).expect("apply_migrations must succeed on v2 db");
+
+        let v = user_version(&conn).unwrap();
+        assert_eq!(v, CURRENT_SCHEMA_VERSION, "version must be CURRENT_SCHEMA_VERSION after upgrade");
+
+        let cols = column_names(&conn, "claims");
+        assert!(cols.contains(&"valid_time_start_granularity".to_string()));
+        assert!(cols.contains(&"valid_time_end_granularity".to_string()));
     }
 }

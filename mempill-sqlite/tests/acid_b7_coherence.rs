@@ -55,7 +55,7 @@ async fn acid_b7_incoherent_future_start_ingest_returns_quarantined() {
                 start: Some(future_start),
                 end: Some(future_end),
                 valid_time_confidence: 0.9, // above 0.7 threshold → B7 check runs
-                granularity: None,
+                start_granularity: None, end_granularity: None,
             }),
             confidence: Confidence {
                 value_confidence: 0.95,
@@ -102,7 +102,7 @@ async fn acid_b7_quarantined_claim_in_audit_ledger() {
                 start: Some(future_start),
                 end: None,
                 valid_time_confidence: 0.9,
-                granularity: None,
+                start_granularity: None, end_granularity: None,
             }),
             confidence: Confidence {
                 value_confidence: 0.95,
@@ -185,7 +185,7 @@ async fn acid_b7_quarantined_claim_excluded_from_live_fold() {
                 start: Some(future_start),
                 end: None,
                 valid_time_confidence: 0.9,
-                granularity: None,
+                start_granularity: None, end_granularity: None,
             }),
             confidence: Confidence {
                 value_confidence: 0.9,
@@ -253,7 +253,7 @@ async fn acid_b7_coherent_past_start_is_admitted_as_live_belief() {
                 start: Some(past_start),
                 end: Some(past_end),
                 valid_time_confidence: 0.9,
-                granularity: None,
+                start_granularity: None, end_granularity: None,
             }),
             confidence: Confidence {
                 value_confidence: 0.95,
@@ -320,7 +320,7 @@ async fn acid_b7_low_confidence_bypasses_coherence_check_and_is_admitted() {
                 end: None,
                 // 0.6 < 0.7 threshold → B7 coherence check is SKIPPED.
                 valid_time_confidence: 0.6,
-                granularity: None,
+                start_granularity: None, end_granularity: None,
             }),
             confidence: Confidence {
                 value_confidence: 0.8,
@@ -368,7 +368,7 @@ async fn acid_b7_confidence_exactly_at_threshold_triggers_quarantine() {
                 end: None,
                 // Exactly 0.7: the check is `< threshold`, so 0.7 is NOT below → check RUNS.
                 valid_time_confidence: 0.7,
-                granularity: None,
+                start_granularity: None, end_granularity: None,
             }),
             confidence: Confidence {
                 value_confidence: 0.9,

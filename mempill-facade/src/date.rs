@@ -3,8 +3,13 @@
 //! Accepts human-friendly date strings and normalises them to `DateTime<Utc>`.
 //! Natural-language dates ("March 2020") are the host's concern — they produce
 //! `MempillDxError::UnparsableDate` with an actionable hint.
+//!
+//! The granularity-aware version is [`mempill_types::time::parse_valid_time_date`].
+//! The write path in `ergonomic.rs` calls that directly; `parse_lenient_date` is
+//! kept as a thin shim for callers that only need the `DateTime` (no granularity).
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
+use mempill_types::time::parse_valid_time_date;
 
 use crate::ergonomic::MempillDxError;
 
@@ -12,7 +17,11 @@ const HINT: &str =
     "Use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339 (e.g. 2026-01-01T00:00:00Z). \
      Natural-language dates must be resolved by the caller before passing to remember().";
 
-/// Parse a lenient date string into a UTC `DateTime`.
+/// Parse a lenient date string into a UTC `DateTime`, discarding granularity.
+///
+/// This is a thin shim over [`mempill_types::time::parse_valid_time_date`] for callers
+/// that only need the `DateTime<Utc>` value (no precision tracking). The write path in
+/// `ergonomic.rs` calls `parse_valid_time_date` directly to capture both components.
 ///
 /// | Input | Normalised to |
 /// |-------|--------------|
@@ -22,66 +31,16 @@ const HINT: &str =
 /// | `"2020-03-15T12:00:00Z"` | pass-through |
 /// | anything else | `MempillDxError::UnparsableDate` |
 ///
-/// **Precision note:** a partial date snaps to the **start of the period** (`2020` → Jan 1,
-/// `2020-03` → the 1st). The filled-in day/month is a normalization placeholder for a sortable
-/// instant — **not** asserted precision. Granularity-aware valid-time (rendering "March 2020")
-/// is planned for v0.3.
-///
 /// # Errors
 /// Returns `MempillDxError::UnparsableDate { input, hint }` for unrecognised formats.
 pub fn parse_lenient_date(s: &str) -> Result<DateTime<Utc>, MempillDxError> {
     let s = s.trim();
-
     if s.is_empty() {
         return Err(MempillDxError::UnparsableDate { input: s.to_string(), hint: HINT });
     }
-
-    // ── RFC3339 / ISO-8601 full timestamp ────────────────────────────────────
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Ok(dt.with_timezone(&Utc));
-    }
-
-    // ── YYYY-MM-DD ───────────────────────────────────────────────────────────
-    if s.len() == 10 && s.chars().filter(|c| *c == '-').count() == 2 {
-        let parts: Vec<&str> = s.splitn(3, '-').collect();
-        if parts.len() == 3 {
-            if let (Ok(y), Ok(m), Ok(d)) = (
-                parts[0].parse::<i32>(),
-                parts[1].parse::<u32>(),
-                parts[2].parse::<u32>(),
-            ) {
-                if let Some(nd) = NaiveDate::from_ymd_opt(y, m, d) {
-                    let ndt = NaiveDateTime::new(nd, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-                    return Ok(Utc.from_utc_datetime(&ndt));
-                }
-            }
-        }
-    }
-
-    // ── YYYY-MM ──────────────────────────────────────────────────────────────
-    if s.len() == 7 && s.chars().filter(|c| *c == '-').count() == 1 {
-        let parts: Vec<&str> = s.splitn(2, '-').collect();
-        if parts.len() == 2 {
-            if let (Ok(y), Ok(m)) = (parts[0].parse::<i32>(), parts[1].parse::<u32>()) {
-                if let Some(nd) = NaiveDate::from_ymd_opt(y, m, 1) {
-                    let ndt = NaiveDateTime::new(nd, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-                    return Ok(Utc.from_utc_datetime(&ndt));
-                }
-            }
-        }
-    }
-
-    // ── YYYY ─────────────────────────────────────────────────────────────────
-    if s.len() == 4 && s.chars().all(|c| c.is_ascii_digit()) {
-        if let Ok(y) = s.parse::<i32>() {
-            if let Some(nd) = NaiveDate::from_ymd_opt(y, 1, 1) {
-                let ndt = NaiveDateTime::new(nd, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-                return Ok(Utc.from_utc_datetime(&ndt));
-            }
-        }
-    }
-
-    Err(MempillDxError::UnparsableDate { input: s.to_string(), hint: HINT })
+    parse_valid_time_date(s)
+        .map(|(dt, _gran)| dt)
+        .ok_or_else(|| MempillDxError::UnparsableDate { input: s.to_string(), hint: HINT })
 }
 
 #[cfg(test)]

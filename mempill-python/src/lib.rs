@@ -13,6 +13,7 @@
 //!   - Exception types:  `MempillError`, `ValidationError`, `NotFoundError`,
 //!     `ConflictError`, `StorageError`, `ConfigError`, `InternalError`
 
+mod display;
 mod engine;
 mod errors;
 mod oracle;

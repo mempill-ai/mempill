@@ -19,9 +19,8 @@ use mempill_core::{IngestClaimRequest, MemError, QueryHistoryRequest, QueryMemor
 use mempill_types::{
     AgentId, BeliefStatus, Cardinality, ClaimRef, Confidence, Criticality, Disposition,
     ExternalKind, ProvenanceLabel, ValidTime,
+    time::{parse_valid_time_date, DateGranularity},
 };
-
-use crate::date::parse_lenient_date;
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -309,6 +308,23 @@ pub struct BeliefDetail {
     pub valid_from: Option<DateTime<Utc>>,
     /// End of the valid-time window, or `None` if open-ended.
     pub valid_until: Option<DateTime<Utc>>,
+    /// Precision of the `valid_from` date as originally supplied by the caller.
+    ///
+    /// `Some(Year)` means the date was given as `"2020"` and only year precision is known;
+    /// `Some(Month)` as `"2020-03"`; `Some(Day)` as `"2020-03-15"`; `Some(Instant)` as a
+    /// full RFC-3339 timestamp. `None` means the date was absent or the row predates
+    /// granularity tracking (legacy). Use [`mempill_types::time::format_valid_time_endpoint`]
+    /// to render `valid_from` at the correct precision.
+    ///
+    /// DISPLAY-ONLY — never used for matching or fold selection.
+    pub valid_from_granularity: Option<DateGranularity>,
+    /// Precision of the `valid_until` date as originally supplied by the caller.
+    ///
+    /// Same semantics as `valid_from_granularity`. `None` when `valid_until` is absent
+    /// (open-ended) or the row predates granularity tracking.
+    ///
+    /// DISPLAY-ONLY — never used for matching or fold selection.
+    pub valid_until_granularity: Option<DateGranularity>,
     /// Value confidence (0.0–1.0).
     pub value_confidence: f32,
     /// Human-readable provenance label (e.g. `"External/UserAsserted"`, `"RecallReEntry"`, `"ModelDerived"`).
@@ -479,8 +495,31 @@ impl IngestClaimRequestBuilder {
         let has_dates = self.valid_from.is_some() || self.valid_until.is_some();
         let vtc = if has_dates { value_confidence } else { 0.0 };
 
-        let start = self.valid_from.as_deref().map(parse_lenient_date).transpose()?;
-        let end = self.valid_until.as_deref().map(parse_lenient_date).transpose()?;
+        // Parse each endpoint individually via parse_valid_time_date so granularity is captured.
+        // parse_lenient_date is kept as a shim for non-granularity callers; here we call the
+        // granularity-aware version directly and map the error to MempillDxError.
+        let (start, start_granularity) = match self.valid_from.as_deref() {
+            None => (None, None),
+            Some(s) => {
+                let (dt, gran) = parse_valid_time_date(s).ok_or_else(|| MempillDxError::UnparsableDate {
+                    input: s.to_string(),
+                    hint: "Use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339 (e.g. 2026-01-01T00:00:00Z). \
+                           Natural-language dates must be resolved by the caller before passing to remember().",
+                })?;
+                (Some(dt), Some(gran))
+            }
+        };
+        let (end, end_granularity) = match self.valid_until.as_deref() {
+            None => (None, None),
+            Some(s) => {
+                let (dt, gran) = parse_valid_time_date(s).ok_or_else(|| MempillDxError::UnparsableDate {
+                    input: s.to_string(),
+                    hint: "Use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339 (e.g. 2026-01-01T00:00:00Z). \
+                           Natural-language dates must be resolved by the caller before passing to remember().",
+                })?;
+                (Some(dt), Some(gran))
+            }
+        };
 
         if let (Some(s), Some(e)) = (start, end) {
             if s >= e {
@@ -493,7 +532,7 @@ impl IngestClaimRequestBuilder {
         }
 
         let valid_time = if has_dates {
-            Some(ValidTime { start, end, valid_time_confidence: vtc , granularity: None})
+            Some(ValidTime { start, end, valid_time_confidence: vtc, start_granularity, end_granularity })
         } else {
             None
         };
@@ -620,12 +659,17 @@ pub async fn recall(
     let bp = resp.belief;
 
     // ── Helper: build a BeliefDetail from a raw Belief ───────────────────────
+    // GRANULARITY NOTE: valid_from_granularity / valid_until_granularity are
+    // carried verbatim from the projected Belief's ValidTime.  They are
+    // DISPLAY-ONLY — never used for matching or fold selection.
     let make_detail = |b: &mempill_types::Belief| -> BeliefDetail {
         BeliefDetail {
             claim_ref: b.claim_ref.clone(),
             value: b.fact.value.clone(),
             valid_from: b.valid_time.start,
             valid_until: b.valid_time.end,
+            valid_from_granularity: b.valid_time.start_granularity,
+            valid_until_granularity: b.valid_time.end_granularity,
             value_confidence: b.confidence.value_confidence,
             provenance: provenance_label_str(&b.provenance),
             corroboration_count: b.currency_signal.corroboration_count,
@@ -804,6 +848,76 @@ mod tests {
         }
     }
 
+    // ── W1: per-endpoint granularity capture ─────────────────────────────────
+
+    /// `valid_from("2020-03")` → start_granularity = Month, open end → end_granularity = None.
+    #[test]
+    fn w1_write_path_captures_start_granularity_month() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.expect("ValidTime must be Some when valid_from is set");
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Month),
+            "month-precision start must record Month granularity");
+        assert_eq!(vt.end_granularity, None,
+            "open end must yield None end_granularity");
+    }
+
+    /// `valid_from("2020")` → start_granularity = Year.
+    #[test]
+    fn w1_write_path_captures_start_granularity_year() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Year));
+    }
+
+    /// `valid_from("2020-03-15")` → start_granularity = Day.
+    #[test]
+    fn w1_write_path_captures_start_granularity_day() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03-15")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Day));
+    }
+
+    /// Both endpoints with differing granularities are captured independently.
+    /// e.g. start="2020-03" (Month) / end="2023" (Year).
+    #[test]
+    fn w1_write_path_captures_per_endpoint_granularity() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03")
+            .valid_until("2023")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Month),
+            "start must have Month granularity");
+        assert_eq!(vt.end_granularity, Some(DateGranularity::Year),
+            "end must have Year granularity");
+    }
+
+    /// RFC3339 start → Instant granularity.
+    #[test]
+    fn w1_write_path_rfc3339_yields_instant_granularity() {
+        use mempill_types::time::DateGranularity;
+        let req = IngestClaimRequest::builder("a", "s", "p", serde_json::json!(1))
+            .valid_from("2020-03-15T10:00:00Z")
+            .build()
+            .unwrap();
+        let vt = req.valid_time.unwrap();
+        assert_eq!(vt.start_granularity, Some(DateGranularity::Instant));
+    }
+
     // ── RecallResult helper methods ───────────────────────────────────────────
 
     fn make_recall_result(status: BeliefStatus, value: Option<serde_json::Value>) -> RecallResult {
@@ -823,6 +937,8 @@ mod tests {
             value,
             valid_from: None,
             valid_until: None,
+            valid_from_granularity: None,
+            valid_until_granularity: None,
             value_confidence: 1.0,
             provenance: "External/UserAsserted".to_owned(),
             corroboration_count: 0,
@@ -1120,6 +1236,114 @@ mod tests {
         let h = history(&engine, "agent", "nobody", "nothing").await.unwrap();
         assert!(h.is_empty());
         assert!(h.current().is_none());
+    }
+
+    // ── W4/W5 — granularity survives ingest → SQLite persist → fold → DTO ────
+
+    /// End-to-end: ingest with Month-precision valid_from("2020-03"), recall, assert
+    /// BeliefDetail.valid_from_granularity == Some(Month).  Proves the full pipeline:
+    /// write-path capture → SQLite persist → fold (ValidTime clone) → DTO population.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn granularity_survives_ingest_to_belief_detail_month() {
+        use mempill_types::time::DateGranularity;
+        let engine = crate::open_default_in_memory().unwrap();
+
+        // Month-precision start: "2020-03" → DateGranularity::Month
+        let opts = RememberOptions::new().valid_from("2020-03").confidence(0.9);
+        remember(&engine, "agent", "subject", "pred", "value", opts)
+            .await
+            .unwrap();
+
+        let r = recall(&engine, "agent", "subject", "pred").await.unwrap();
+        let p = r.primary.as_ref().expect("primary must be set after remember");
+
+        assert_eq!(
+            p.valid_from_granularity,
+            Some(DateGranularity::Month),
+            "Month-precision start must survive ingest → persist → fold → BeliefDetail"
+        );
+        assert_eq!(
+            p.valid_until_granularity,
+            None,
+            "open end → valid_until_granularity must be None"
+        );
+    }
+
+    /// Day-precision valid_from → Some(Day); Year-precision valid_until → Some(Year).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn granularity_survives_ingest_to_belief_detail_day_and_year() {
+        use mempill_types::time::DateGranularity;
+        let engine = crate::open_default_in_memory().unwrap();
+
+        let opts = RememberOptions::new()
+            .valid_from("2020-03-15") // Day
+            .valid_until("2023")      // Year
+            .confidence(0.9);
+        remember(&engine, "agent", "thing", "fact", "val", opts)
+            .await
+            .unwrap();
+
+        let r = recall(&engine, "agent", "thing", "fact").await.unwrap();
+        let p = r.primary.as_ref().expect("primary must be set");
+
+        assert_eq!(
+            p.valid_from_granularity,
+            Some(DateGranularity::Day),
+            "Day-precision start must be Day"
+        );
+        assert_eq!(
+            p.valid_until_granularity,
+            Some(DateGranularity::Year),
+            "Year-precision end must be Year"
+        );
+    }
+
+    /// Year-precision only valid_from, no valid_until.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn granularity_survives_ingest_to_belief_detail_year_open_end() {
+        use mempill_types::time::DateGranularity;
+        let engine = crate::open_default_in_memory().unwrap();
+
+        let opts = RememberOptions::new().valid_from("2020").confidence(0.9);
+        remember(&engine, "agent", "sub2", "pred2", "val2", opts)
+            .await
+            .unwrap();
+
+        let r = recall(&engine, "agent", "sub2", "pred2").await.unwrap();
+        let p = r.primary.as_ref().expect("primary must be set");
+
+        assert_eq!(
+            p.valid_from_granularity,
+            Some(DateGranularity::Year),
+            "Year-precision start must be Year"
+        );
+        assert_eq!(p.valid_until_granularity, None, "open end → None");
+    }
+
+    /// No valid_from / valid_until → both granularities None.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn granularity_none_when_no_dates_supplied() {
+        let engine = crate::open_default_in_memory().unwrap();
+
+        remember(&engine, "agent", "sub3", "pred3", "val3", RememberOptions::new())
+            .await
+            .unwrap();
+
+        let r = recall(&engine, "agent", "sub3", "pred3").await.unwrap();
+        let p = r.primary.as_ref().expect("primary must be set");
+
+        assert_eq!(
+            p.valid_from_granularity, None,
+            "no dates → valid_from_granularity must be None"
+        );
+        assert_eq!(
+            p.valid_until_granularity, None,
+            "no dates → valid_until_granularity must be None"
+        );
     }
 
     #[cfg(feature = "sqlite")]

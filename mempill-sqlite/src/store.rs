@@ -36,7 +36,7 @@ use mempill_types::{
     identity::{AgentId, ClaimRef},
     ledger::{LedgerEntry, LedgerEventKind},
     provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel},
-    time::{TransactionTime, ValidTime},
+    time::{date_granularity_to_str, str_to_date_granularity, TransactionTime, ValidTime},
     validity::{AssertionKind, ValidityAssertion},
 };
 use rusqlite::Connection;
@@ -277,6 +277,8 @@ fn str_to_disposition(s: &str) -> Result<mempill_types::disposition::Disposition
 ///  15  derived_from  (JSON array of UUID strings)
 ///  16  metadata      (nullable JSON text)
 ///  17  snapshot_schema_version  (nullable INTEGER)
+///  18  valid_time_start_granularity  (nullable TEXT, added in v3)
+///  19  valid_time_end_granularity    (nullable TEXT, added in v3)
 fn row_to_claim(row: &rusqlite::Row<'_>) -> Result<Claim, rusqlite::Error> {
     // We map rusqlite errors to SqliteStoreError in the caller; use rusqlite::Error here
     // so this fn can be used directly as a row-mapper closure.
@@ -298,6 +300,8 @@ fn row_to_claim(row: &rusqlite::Row<'_>) -> Result<Claim, rusqlite::Error> {
     let derived_from_json: String = row.get(15)?;
     let metadata_json: Option<String> = row.get(16)?;
     let snapshot_schema_version_raw: Option<i64> = row.get(17)?;
+    let start_granularity_str: Option<String> = row.get(18)?;
+    let end_granularity_str: Option<String> = row.get(19)?;
 
     // These mapping errors cannot be expressed as rusqlite::Error cleanly; use
     // rusqlite::Error::InvalidColumnType as a carrier — callers convert to SqliteStoreError.
@@ -387,7 +391,12 @@ fn row_to_claim(row: &rusqlite::Row<'_>) -> Result<Claim, rusqlite::Error> {
             start: valid_time_start,
             end: valid_time_end,
             valid_time_confidence: valid_time_confidence as f32,
-            granularity: None,
+            start_granularity: start_granularity_str
+                .as_deref()
+                .and_then(str_to_date_granularity),
+            end_granularity: end_granularity_str
+                .as_deref()
+                .and_then(str_to_date_granularity),
         },
         Confidence {
             value_confidence: value_confidence as f32,
@@ -407,7 +416,8 @@ const CLAIM_SELECT_COLS: &str = "
     provenance_label, nearest_external_anchor_id, derivation_depth,
     tx_time, valid_time_start, valid_time_end, valid_time_confidence,
     value_confidence, criticality, derived_from,
-    metadata, snapshot_schema_version
+    metadata, snapshot_schema_version,
+    valid_time_start_granularity, valid_time_end_granularity
 ";
 
 /// Map a rusqlite `Row` from the `claim_edges` table to a `ClaimEdge` domain type.
@@ -515,6 +525,10 @@ impl PersistencePort for SqlitePersistenceStore {
         let valid_time_start: Option<String> = vt.start.map(|dt| dt.to_rfc3339());
         let valid_time_end: Option<String> = vt.end.map(|dt| dt.to_rfc3339());
         let valid_time_confidence = vt.valid_time_confidence as f64;
+        let valid_time_start_granularity: Option<&'static str> =
+            vt.start_granularity.map(date_granularity_to_str);
+        let valid_time_end_granularity: Option<&'static str> =
+            vt.end_granularity.map(date_granularity_to_str);
         let conf = claim.confidence();
         let value_confidence = conf.value_confidence as f64;
         let criticality = criticality_to_str(claim.criticality());
@@ -538,13 +552,15 @@ impl PersistencePort for SqlitePersistenceStore {
                 provenance_label, nearest_external_anchor_id, derivation_depth,
                 tx_time, valid_time_start, valid_time_end, valid_time_confidence,
                 value_confidence, criticality, derived_from,
-                metadata, snapshot_schema_version, embedding_model_id
+                metadata, snapshot_schema_version, embedding_model_id,
+                valid_time_start_granularity, valid_time_end_granularity
             ) VALUES (
                 ?1,  ?2,  ?3,  ?4,  ?5,  ?6,
                 ?7,  ?8,  ?9,
                 ?10, ?11, ?12, ?13,
                 ?14, ?15, ?16,
-                ?17, ?18, NULL
+                ?17, ?18, NULL,
+                ?19, ?20
             )",
             rusqlite::params![
                 claim_id,
@@ -565,6 +581,8 @@ impl PersistencePort for SqlitePersistenceStore {
                 derived_from_json.as_str(),
                 metadata,
                 snapshot_schema_version,
+                valid_time_start_granularity,
+                valid_time_end_granularity,
             ],
         )?;
 
@@ -1621,7 +1639,7 @@ mod tests {
             ProvenanceLabel::External(ExternalKind::UserAsserted),
             ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
             TransactionTime(Utc::now()),
-            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
             Criticality::Low,
             vec![],
@@ -2355,7 +2373,7 @@ mod tests {
                     value: serde_json::json!("Berlin"),
                 },
                 provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
-                valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+                valid_time: ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
                 transaction_time: now.clone(),
                 confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
                 currency_signal: CurrencySignal {

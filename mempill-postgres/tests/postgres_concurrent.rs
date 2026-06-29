@@ -45,7 +45,7 @@ fn make_claim(agent_id: &AgentId, subject: &str, predicate: &str) -> Claim {
         ProvenanceLabel::External(ExternalKind::UserAsserted),
         ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
         TransactionTime(Utc::now()),
-        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , granularity: None},
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0 , start_granularity: None, end_granularity: None},
         Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         Criticality::Low,
         vec![],

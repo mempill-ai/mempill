@@ -129,6 +129,7 @@ use mempill_core::application::dto::{
 use mempill_sqlite::OracleEngine;
 use mempill_types::AdjudicationResponse;
 
+use crate::display::enrich_query_memory;
 use crate::errors::{mem_err_to_pyerr, StorageError, ValidationError};
 
 static ORACLE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -184,7 +185,14 @@ impl PyOracleEngine {
 
     /// Query the current belief for a (subject, predicate) pair.
     ///
-    /// Returns a dict with `belief`.
+    /// Returns a dict with `belief`. Each belief slot includes:
+    ///   - `valid_from_display`: start of the valid-time window rendered at its
+    ///     recorded precision (e.g. `"2020-03"` for Month, `"2020"` for Year,
+    ///     `"2020-03-15"` for Day/Instant). Absent when the start is unknown.
+    ///   - `valid_until_display`: same for the end endpoint. Absent when open-ended.
+    ///   - `valid_time.start_granularity`: raw granularity string (`"year"`,
+    ///     `"month"`, `"day"`, `"instant"`) when set, otherwise absent.
+    ///   - `valid_time.end_granularity`: same for the end endpoint.
     #[pyo3(signature = (request))]
     fn query_memory<'py>(
         &self,
@@ -197,7 +205,7 @@ impl PyOracleEngine {
         let resp = py
             .detach(|| oracle_runtime().block_on(engine.query_memory(req)))
             .map_err(mem_err_to_pyerr)?;
-        Ok(pythonize::pythonize(py, &resp)?)
+        Ok(pythonize::pythonize(py, &enrich_query_memory(resp))?)
     }
 
     /// Reconcile one or more subject lines for an agent.
