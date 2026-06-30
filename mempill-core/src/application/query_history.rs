@@ -351,6 +351,7 @@ mod tests {
         ) -> Result<Vec<ClaimEdge>, MockErr> {
             Ok(vec![])
         }
+        fn list_predicates_for_subject(&self, _aid: &AgentId, _s: &str, _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> { Ok(vec![]) }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

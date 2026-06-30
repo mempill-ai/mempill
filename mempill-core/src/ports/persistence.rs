@@ -147,6 +147,22 @@ pub trait PersistencePort: Send + Sync + 'static {
         claim_ref: &ClaimRef,
     ) -> Result<Vec<ClaimEdge>, Self::Error>;
 
+    /// Return all distinct predicates stored for `(agent_id, subject)`.
+    ///
+    /// When `as_of_tx_time` is `Some(T)`, only predicates that have at least one claim
+    /// with `tx_time <= T` are returned (bi-temporal tx-time cutoff).  When `None`, all
+    /// predicates are returned (current view).
+    ///
+    /// The returned `Vec<String>` is NOT guaranteed to be sorted — the caller sorts if needed.
+    /// The result set is small (bounded by the number of distinct predicates per subject),
+    /// so no pagination is provided.
+    fn list_predicates_for_subject(
+        &self,
+        agent_id: &AgentId,
+        subject: &str,
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<String>, Self::Error>;
+
     /// Whether the store requires a global write serialization lock across all agent_ids.
     ///
     /// SQLite: true (single connection, no concurrent transactions possible).

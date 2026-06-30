@@ -1056,6 +1056,45 @@ impl PersistencePort for PostgresPersistenceStore {
             .collect()
     }
 
+    /// Return all distinct predicates for `(agent_id, subject)`.
+    ///
+    /// Postgres: uses `idx_claims_subject_line (agent_id, subject, predicate, tx_time DESC)`.
+    /// DISTINCT over (agent_id, subject, predicate) is served as an Index-Only Scan on this
+    /// index — no Seq Scan and no HashAggregate.
+    /// When `as_of_tx_time` is `Some(T)`, the `tx_time <= T` filter is applied before DISTINCT
+    /// so only predicates with at least one visible claim are returned.
+    ///
+    /// tx_time is a TEXT column — bind as `to_rfc3339()` STRING to avoid TIMESTAMPTZ mismatch.
+    fn list_predicates_for_subject(
+        &self,
+        agent_id: &AgentId,
+        subject: &str,
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<String>, PostgresStoreError> {
+        let mut conn = self.pool.get()?;
+
+        let predicates = if let Some(cutoff) = as_of_tx_time {
+            let cutoff_str = cutoff.to_rfc3339();
+            let rows = conn.query(
+                "SELECT DISTINCT predicate
+                 FROM claims
+                 WHERE agent_id = $1 AND subject = $2 AND tx_time <= $3",
+                &[&agent_id.0.as_str(), &subject, &cutoff_str.as_str()],
+            )?;
+            rows.iter().map(|row| Ok(row.get::<_, String>(0))).collect::<Result<Vec<_>, PostgresStoreError>>()?
+        } else {
+            let rows = conn.query(
+                "SELECT DISTINCT predicate
+                 FROM claims
+                 WHERE agent_id = $1 AND subject = $2",
+                &[&agent_id.0.as_str(), &subject],
+            )?;
+            rows.iter().map(|row| Ok(row.get::<_, String>(0))).collect::<Result<Vec<_>, PostgresStoreError>>()?
+        };
+
+        Ok(predicates)
+    }
+
     /// Postgres uses a pool + per-agent advisory lock — no global write lock is needed.
     fn requires_global_write_serialization(&self) -> bool {
         false

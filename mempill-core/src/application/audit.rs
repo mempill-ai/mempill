@@ -104,6 +104,7 @@ mod tests {
         fn load_edges_for(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
         fn load_injected_claims(&self, _a: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
         fn load_lineage(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+        fn list_predicates_for_subject(&self, _a: &AgentId, _s: &str, _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> { Ok(vec![]) }
     }
 
     fn make_entry(agent_id: &AgentId, at: chrono::DateTime<Utc>) -> LedgerEntry {

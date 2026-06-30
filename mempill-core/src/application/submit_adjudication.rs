@@ -539,6 +539,8 @@ mod tests {
         fn load_injected_claims(&self, _: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
 
         fn load_lineage(&self, _: &AgentId, _: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+
+        fn list_predicates_for_subject(&self, _: &AgentId, _: &str, _: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> { Ok(vec![]) }
     }
 
     // ── Mock PendingStore ─────────────────────────────────────────────────────

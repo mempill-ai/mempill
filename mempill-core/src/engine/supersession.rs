@@ -403,6 +403,7 @@ mod tests {
             if *self.txn_open.lock().unwrap() { return Err(MockError::InjectedFailure); }
             Ok(vec![])
         }
+        fn list_predicates_for_subject(&self, _: &AgentId, _: &str, _: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockError> { Ok(vec![]) }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────

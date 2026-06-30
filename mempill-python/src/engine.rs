@@ -12,7 +12,8 @@
 use std::sync::OnceLock;
 
 use mempill_core::application::dto::{
-    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest, ReconcileRequest,
+    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest,
+    QuerySubjectRequest, ReconcileRequest,
 };
 use mempill_sqlite::DefaultEngine;
 use pyo3::prelude::*;
@@ -133,6 +134,28 @@ impl PyEngine {
         let resp = py.detach(|| runtime().block_on(engine.query_audit(req)))
             .map_err(mem_err_to_pyerr)?;
         Ok(pythonize(py, &resp)?)
+    }
+
+    /// Query all resolved beliefs for every predicate stored under a subject.
+    ///
+    /// `request` must be a dict with:
+    ///   - `agent_id`        — str
+    ///   - `subject`         — str
+    ///   - `valid_at`        — optional ISO-8601 string (valid-time axis)
+    ///   - `as_of_tx_time`   — optional ISO-8601 string (tx-time axis)
+    ///
+    /// Returns a list of dicts, one per distinct predicate, each with:
+    ///   predicate, value (str|null), status, valid_from_display (str|null),
+    ///   valid_until_display (str|null), provenance, claim_ref (str|null), conf (float|null).
+    /// Entries are sorted by predicate (alphabetical).
+    #[pyo3(signature = (request))]
+    fn query_subject<'py>(&self, py: Python<'py>, request: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let req: QuerySubjectRequest = depythonize(request)
+            .map_err(|e| ValidationError::new_err(format!("bad request: {e}")))?;
+        let engine = self.engine.clone();
+        let resp = py.detach(|| runtime().block_on(engine.query_subject(req)))
+            .map_err(mem_err_to_pyerr)?;
+        Ok(pythonize(py, &resp.entries)?)
     }
 }
 

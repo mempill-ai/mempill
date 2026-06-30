@@ -155,6 +155,7 @@ mod tests {
         fn load_lineage(&self, _: &AgentId, _: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> {
             Ok(self.edges.clone())
         }
+        fn list_predicates_for_subject(&self, _: &AgentId, _: &str, _: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> { Ok(vec![]) }
     }
 
     fn agent() -> AgentId {

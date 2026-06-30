@@ -79,3 +79,8 @@ required-features = ["postgres-integration"]
 name = "postgres_as_of_query"
 path = "tests/postgres_as_of_query.rs"
 required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_query_subject_index_plan"
+path = "tests/postgres_query_subject_index_plan.rs"
+required-features = ["postgres-integration"]

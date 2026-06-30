@@ -158,6 +158,71 @@ impl QueryHistoryResponse {
     }
 }
 
+// ── QUERY SUBJECT ─────────────────────────────────────────────────────────────
+
+/// Request to retrieve the resolved belief for every predicate stored under a subject.
+///
+/// Returns one [`SubjectFactEntry`] per distinct predicate that has at least one claim
+/// satisfying the `as_of_tx_time` cutoff.  Each entry is the same fold result that
+/// `query_memory` would produce for that `(subject, predicate)` pair under the same
+/// `valid_at` / `as_of_tx_time` — the existing fold/disposition logic is reused, not
+/// reimplemented.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QuerySubjectRequest {
+    /// The agent whose memory is queried.
+    pub agent_id: AgentId,
+    /// The subject for which all predicate beliefs are returned.
+    pub subject: String,
+    /// Optional: query as of a specific valid-time instant (valid-time axis).
+    ///
+    /// When set, the fold selects the claim whose valid-time window contains this instant.
+    /// When `None`, the backward-compatible behaviour is used (as_of / now drives both axes).
+    #[serde(default)]
+    pub valid_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional: query as of a specific transaction time (bi-temporal tx-time axis).
+    ///
+    /// When set, only claims whose `tx_time <= as_of_tx_time` are visible.
+    /// When `None`, the full current view is used.
+    #[serde(default)]
+    pub as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One per-predicate entry in a [`QuerySubjectResponse`].
+///
+/// Mirrors the shape that `query_memory` + `enrich_query_memory` would produce for a
+/// single `(subject, predicate)` pair.  The field names match the API contract exactly
+/// so Python callers can read them as dict keys without additional mapping.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SubjectFactEntry {
+    /// The predicate this entry describes.
+    pub predicate: String,
+    /// The resolved value string, or `None` when the status is `NoBelief`.
+    pub value: Option<String>,
+    /// Resolved belief status: `"Resolved"`, `"Contested"`, `"NoBelief"`, or `"TimingUncertain"`.
+    pub status: String,
+    /// Start of the valid-time window rendered at recorded precision (e.g. `"2020-03"`).
+    /// `None` when the start endpoint is unknown.
+    pub valid_from_display: Option<String>,
+    /// End of the valid-time window rendered at recorded precision.
+    /// `None` when the end endpoint is unknown / open-ended.
+    pub valid_until_display: Option<String>,
+    /// Human-readable provenance label, or `"none"` when there is no primary belief.
+    pub provenance: String,
+    /// Stable UUID reference to the primary claim, or `None` when there is no primary.
+    pub claim_ref: Option<String>,
+    /// Value confidence of the primary claim (0.0–1.0), or `None` when absent.
+    pub conf: Option<f32>,
+}
+
+/// Response from a `query_subject` call — one entry per distinct predicate.
+///
+/// Entries are sorted by `predicate` (lexicographic) for stable, deterministic output.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QuerySubjectResponse {
+    /// Per-predicate fold results, sorted by predicate.
+    pub entries: Vec<SubjectFactEntry>,
+}
+
 // ── AUDIT QUERY ───────────────────────────────────────────────────────────────
 
 /// Request to query the audit ledger.
