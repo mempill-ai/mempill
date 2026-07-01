@@ -15,8 +15,8 @@ categories = ["database", "data-structures"]
 [dependencies]
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
-mempill-types = { path = "../mempill-types", version = "0.2.0" }
-mempill-core  = { path = "../mempill-core",  version = "0.2.0" }
+mempill-types = { path = "../mempill-types", version = "0.3.0" }
+mempill-core  = { path = "../mempill-core",  version = "0.3.0" }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -24,4 +24,4 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true }
-mempill-core = { path = "../mempill-core", version = "0.2.0", features = ["test-support"] }
+mempill-core = { path = "../mempill-core", version = "0.3.0", features = ["test-support"] }
