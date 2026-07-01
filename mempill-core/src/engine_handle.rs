@@ -27,11 +27,13 @@ use crate::{
         dto::{
             AuditQueryRequest, AuditQueryResponse, IngestClaimRequest, IngestClaimResponse,
             QueryHistoryRequest, QueryHistoryResponse, QueryMemoryRequest, QueryMemoryResponse,
+            QuerySubjectRequest, QuerySubjectResponse,
             ReconcileRequest, ReconcileResponse,
         },
         ingest_claim::IngestClaimUseCase,
         query_history::QueryHistoryUseCase,
         query_memory::QueryMemoryUseCase,
+        query_subject::QuerySubjectUseCase,
         reconcile::ReconcileUseCase,
         submit_adjudication::SubmitAdjudicationUseCase,
         sweep_adjudications::SweepAdjudicationsUseCase,
@@ -275,6 +277,25 @@ where
     ) -> Result<QueryMemoryResponse, MemError> {
         let now = Utc::now();
         let uc = QueryMemoryUseCase::new(
+            Arc::clone(&self.persistence),
+            self.vector.clone(),
+            self.config.clone(),
+        );
+        task::spawn_blocking(move || uc.execute_with_time(req, now))
+            .await
+            .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
+    }
+
+    /// Subject read path: returns all resolved beliefs for every predicate under a subject.
+    ///
+    /// Read-only (no write lock). Reuses the existing QueryMemory fold per predicate.
+    /// Clock is read ONCE here (DETERMINISM).
+    pub async fn query_subject(
+        &self,
+        req: QuerySubjectRequest,
+    ) -> Result<QuerySubjectResponse, MemError> {
+        let now = Utc::now();
+        let uc = QuerySubjectUseCase::new(
             Arc::clone(&self.persistence),
             self.vector.clone(),
             self.config.clone(),

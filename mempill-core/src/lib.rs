@@ -45,6 +45,7 @@ pub use application::{
     AuditQueryRequest, AuditQueryResponse, AuditUseCase, HistoryEntry, IngestClaimRequest,
     IngestClaimResponse, IngestClaimUseCase, QueryHistoryRequest, QueryHistoryResponse,
     QueryHistoryUseCase, QueryMemoryRequest, QueryMemoryResponse, QueryMemoryUseCase,
+    QuerySubjectRequest, QuerySubjectResponse, QuerySubjectUseCase, SubjectFactEntry,
     ReconcileRequest, ReconcileResponse, ReconcileUseCase,
 };
 pub use config::EngineConfig;

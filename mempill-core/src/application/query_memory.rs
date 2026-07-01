@@ -176,6 +176,17 @@ mod tests {
         fn load_edges_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
         fn load_injected_claims(&self, _aid: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
         fn load_lineage(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+        fn list_predicates_for_subject(&self, _aid: &AgentId, subject: &str, _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> {
+            let claims = self.claims.lock().unwrap();
+            let mut preds: Vec<String> = claims.iter()
+                .filter(|c| c.fact().subject == subject)
+                .map(|c| c.fact().predicate.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            preds.sort();
+            Ok(preds)
+        }
     }
 
     fn make_claim(subject: &str, predicate: &str, value: serde_json::Value, tx: DateTime<Utc>) -> Claim {
@@ -323,6 +334,17 @@ mod tests {
             fn load_edges_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
             fn load_injected_claims(&self, _aid: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
             fn load_lineage(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+            fn list_predicates_for_subject(&self, _aid: &AgentId, subject: &str, _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> {
+                let claims = self.claims.lock().unwrap();
+                let mut preds: Vec<String> = claims.iter()
+                    .filter(|c| c.fact().subject == subject)
+                    .map(|c| c.fact().predicate.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                preds.sort();
+                Ok(preds)
+            }
         }
 
         let store = Arc::new(FullMockStore::default());
@@ -599,6 +621,18 @@ mod tests {
             fn load_edges_for(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
             fn load_injected_claims(&self, _aid: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
             fn load_lineage(&self, _aid: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+            fn list_predicates_for_subject(&self, _aid: &AgentId, subject: &str, as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> {
+                let claims = self.claims.lock().unwrap();
+                let mut preds: Vec<String> = claims.iter()
+                    .filter(|c| c.fact().subject == subject)
+                    .filter(|c| as_of.is_none_or(|t| c.transaction_time().0 <= t))
+                    .map(|c| c.fact().predicate.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                preds.sort();
+                Ok(preds)
+            }
         }
 
         let store = Arc::new(FullMockStore2::default());

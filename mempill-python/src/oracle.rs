@@ -124,7 +124,8 @@ impl OraclePort for PyOracleBridge {
 use std::sync::OnceLock;
 
 use mempill_core::application::dto::{
-    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest, ReconcileRequest,
+    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest,
+    QuerySubjectRequest, ReconcileRequest,
 };
 use mempill_sqlite::OracleEngine;
 use mempill_types::AdjudicationResponse;
@@ -301,6 +302,27 @@ impl PyOracleEngine {
             .detach(|| oracle_runtime().block_on(engine.submit_adjudication(handle_id, resp)))
             .map_err(mem_err_to_pyerr)?;
         Ok(pythonize::pythonize(py, &outcome)?)
+    }
+
+    /// Query all resolved beliefs for every predicate stored under a subject.
+    ///
+    /// `request` must be a dict with: agent_id, subject, valid_at (optional ISO-8601),
+    /// as_of_tx_time (optional ISO-8601).
+    ///
+    /// Returns a list of dicts, one per distinct predicate, sorted by predicate.
+    #[pyo3(signature = (request))]
+    fn query_subject<'py>(
+        &self,
+        py: Python<'py>,
+        request: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let req: QuerySubjectRequest = pythonize::depythonize(request)
+            .map_err(|e| ValidationError::new_err(format!("bad request: {e}")))?;
+        let engine = self.engine.clone();
+        let resp = py
+            .detach(|| oracle_runtime().block_on(engine.query_subject(req)))
+            .map_err(mem_err_to_pyerr)?;
+        Ok(pythonize::pythonize(py, &resp.entries)?)
     }
 
     /// Sweep all expired pending-adjudication rows.

@@ -1254,6 +1254,59 @@ impl PersistencePort for SqlitePersistenceStore {
         }
         Ok(edges)
     }
+
+    /// Return all distinct predicates for `(agent_id, subject)`.
+    ///
+    /// Uses `idx_claims_subject_line (agent_id, subject, predicate, tx_time DESC)`.
+    ///
+    /// SQLite DISTINCT over the leading three columns of the covering index is served
+    /// as an index scan — no temp B-tree because the DISTINCT columns are a prefix of the
+    /// index.  When `as_of_tx_time` is `Some(T)`, the `tx_time <= T` filter is applied
+    /// before the DISTINCT so only predicates with at least one visible claim are returned.
+    fn list_predicates_for_subject(
+        &self,
+        agent_id: &AgentId,
+        subject: &str,
+        as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<String>, SqliteStoreError> {
+        let slot = self.conn.lock().expect("mutex poisoned");
+        let conn = slot.as_ref().ok_or(SqliteStoreError::TxnAlreadyOpen)?;
+
+        let predicates = if let Some(cutoff) = as_of_tx_time {
+            let cutoff_str = cutoff.to_rfc3339();
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT predicate
+                 FROM claims
+                 WHERE agent_id = ?1 AND subject = ?2 AND tx_time <= ?3",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![agent_id.0.as_str(), subject, cutoff_str.as_str()],
+                |row| row.get::<_, String>(0),
+            )?;
+            let mut preds = Vec::new();
+            for row in rows {
+                preds.push(row?);
+            }
+            preds
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT predicate
+                 FROM claims
+                 WHERE agent_id = ?1 AND subject = ?2",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![agent_id.0.as_str(), subject],
+                |row| row.get::<_, String>(0),
+            )?;
+            let mut preds = Vec::new();
+            for row in rows {
+                preds.push(row?);
+            }
+            preds
+        };
+
+        Ok(predicates)
+    }
 }
 
 // ── SqlitePendingStore ────────────────────────────────────────────────────────
