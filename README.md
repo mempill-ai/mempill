@@ -89,9 +89,9 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 
 ## Production readiness & scope
 
-mempill 0.3.0 is a **correct, well-tested engine** (bi-temporal fold, ACID writes,
-cross-adapter conformance, append-only integrity — 507 Rust + 155 Python + 19 MCP tests on main) designed for
-**embedded and early-stage** use. Read this before deploying it at scale.
+mempill 0.3.0 is designed for **embedded and early-stage** use (bi-temporal fold, ACID writes,
+cross-adapter conformance, append-only integrity — 507 Rust + 155 Python + 19 MCP tests on main).
+Read this before deploying it at scale.
 
 **Safe today for:**
 
@@ -123,9 +123,8 @@ cross-adapter conformance, append-only integrity — 507 Rust + 155 Python + 19 
 automated write pipelines, networked PostgreSQL with real credentials (until TLS), or
 very high agent cardinality (the per-agent advisory lock uses a 32-bit hash).
 
-If your use case is outside the safe envelope, the engine is still a solid foundation —
-the gaps above are operational, not algorithmic — but treat 0.3.0 as an early release
-and pin a specific version.
+If your use case is outside the safe envelope, the core algorithm is implemented and tested;
+the gaps above are operational, not algorithmic. Treat 0.3.0 as an early release and pin a specific version.
 
 ---
 
