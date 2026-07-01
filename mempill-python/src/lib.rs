@@ -1,4 +1,4 @@
-//! mempill-python — PyO3/maturin binding crate (v0.2).
+//! mempill-python — PyO3/maturin binding crate (v0.3).
 //!
 //! Exposes the mempill engine to Python as the `mempill._mempill` extension module.
 //! The Python ergonomics layer (mempill/__init__.py stubs, .pyi type hints) is Wave 3.
