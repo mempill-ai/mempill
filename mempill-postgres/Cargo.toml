@@ -19,8 +19,8 @@ postgres-integration = []
 all-features = true
 
 [dependencies]
-mempill-core  = { path = "../mempill-core",  version = "0.2.0" }
-mempill-types = { path = "../mempill-types", version = "0.2.0" }
+mempill-core  = { path = "../mempill-core",  version = "0.3.0" }
+mempill-types = { path = "../mempill-types", version = "0.3.0" }
 postgres      = { version = "0.19", features = ["with-serde_json-1", "with-chrono-0_4"] }
 r2d2          = "0.8"
 r2d2_postgres = "0.18"
@@ -32,7 +32,7 @@ thiserror     = { workspace = true }
 
 [dev-dependencies]
 testcontainers-modules = { version = "0.15", features = ["postgres", "blocking", "watchdog"] }
-mempill-core = { path = "../mempill-core", version = "0.2.0", features = ["test-support"] }
+mempill-core = { path = "../mempill-core", version = "0.3.0", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [[test]]

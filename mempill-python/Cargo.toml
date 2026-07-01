@@ -1,6 +1,6 @@
 [package]
 name = "mempill-python"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 readme = "README.md"
@@ -25,7 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
-mempill-core   = { path = "../mempill-core",   version = "0.2.0" }
-mempill-sqlite = { path = "../mempill-sqlite", version = "0.2.0" }
-mempill-types  = { path = "../mempill-types",  version = "0.2.0" }
+mempill-core   = { path = "../mempill-core",   version = "0.3.0" }
+mempill-sqlite = { path = "../mempill-sqlite", version = "0.3.0" }
+mempill-types  = { path = "../mempill-types",  version = "0.3.0" }
 uuid = { version = "1", features = ["v4"] }
