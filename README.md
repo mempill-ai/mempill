@@ -10,7 +10,7 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.3.0** · Apache-2.0 · MSRV 1.88 · 507 Rust + 155 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
+**0.3.0** · Apache-2.0 · MSRV 1.88 · 501 Rust + 155 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate + per-endpoint date granularity.
 
 
@@ -90,7 +90,7 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 ## Production readiness & scope
 
 mempill 0.3.0 is designed for **embedded and early-stage** use (bi-temporal fold, ACID writes,
-cross-adapter conformance, append-only integrity — 507 Rust + 155 Python + 19 MCP tests on main).
+cross-adapter conformance, append-only integrity — 501 Rust + 155 Python + 19 MCP tests on main).
 Read this before deploying it at scale.
 
 **Safe today for:**
@@ -116,7 +116,7 @@ Read this before deploying it at scale.
 - **No built-in observability** — there is no `tracing`/metrics instrumentation yet, so
   latency, error rates, and contention are not visible to an operator out of the box.
   *(v0.3.)*
-- **No published load/stress benchmarks** — all 507 Rust + 155 Python + 19 MCP tests are correctness tests;
+- **No published load/stress benchmarks** — all 501 Rust + 155 Python + 19 MCP tests are correctness tests;
   performance at large scale is not yet characterized.
 
 **Not recommended yet for:** public-facing multi-tenant services, high-frequency
