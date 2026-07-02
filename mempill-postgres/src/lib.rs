@@ -36,7 +36,7 @@ mod connection;
 mod store;
 mod txn;
 
-pub use connection::{PostgresPersistenceStore, PostgresStoreError};
+pub use connection::{PoolConfig, PostgresPersistenceStore, PostgresStoreError};
 pub use store::{open_postgres, open_postgres_with_oracle, PostgresPendingStore};
 pub use txn::PostgresTxn;
 
