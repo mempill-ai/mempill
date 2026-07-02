@@ -127,12 +127,13 @@ where
 /// subject-line whose superseded claim has a disposition event that would fall
 /// outside a small agent-wide cap — the silent-wrong-belief-at-scale bug.
 #[cfg(any(test, feature = "test-support"))]
-pub fn run_disposition_scope_conformance<P>(store: &P)
+pub fn run_disposition_scope_conformance<P>(store: &std::sync::Arc<P>)
 where
-    P: PersistencePort,
+    P: PersistencePort + Send + Sync + 'static,
     P::Error: std::fmt::Debug,
 {
-    test_superseded_claim_excluded_despite_large_agent_ledger(store);
+    test_superseded_claim_excluded_despite_large_agent_ledger(store.as_ref());
+    test_write_audit_paths_correct_despite_large_agent_ledger(std::sync::Arc::clone(store));
 }
 
 // ── Sub-tests ─────────────────────────────────────────────────────────────────
@@ -1256,6 +1257,467 @@ where
         fold.live_claims[0].claim.fact().value,
         serde_json::json!("Bob"),
         "dscope[t1]: the live claim must be Bob (B), not Alice (A — superseded)"
+    );
+}
+
+/// WRITE/AUDIT-path regression: `ingest_claim`, `reconcile`, `submit_adjudication`, and
+/// `sweep_adjudications` must all compute correct dispositions despite an agent ledger
+/// with more than 10,000 entries (AC-004-1 / AC-004-2, US-004).
+///
+/// Prior to this fix, these four use-cases called the CAPPED, agent-wide
+/// `PersistencePort::load_ledger(agent_id, None, 10_000)` to build their disposition map.
+/// A superseded/resolved claim whose disposition-changing ledger entry fell outside the
+/// 10,000-row cap window was silently treated as still-live, causing:
+///   - `ingest_claim`: incorrect incumbent/conflict detection against a stale "live" claim
+///   - `reconcile`: an already-superseded claim re-entering reconciliation as if live
+///   - `submit_adjudication`: a stale state guard allowing a duplicate/expired verdict to apply
+///   - `sweep_adjudications`: a stale state guard reverting an already-resolved claim
+///
+/// This test floods the agent ledger with >10,000 noise entries BEFORE exercising each
+/// of the four write/audit use-cases, proving each one's disposition computation is now
+/// scoped via `load_ledger_for_claims` (uncapped, claim-scoped) and is therefore correct
+/// regardless of total agent ledger size — mirroring the read-path proof above.
+#[cfg(any(test, feature = "test-support"))]
+fn test_write_audit_paths_correct_despite_large_agent_ledger<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use std::sync::Arc;
+
+    use crate::application::{
+        dto::{IngestClaimRequest, ReconcileRequest},
+        ingest_claim::IngestClaimUseCase,
+        reconcile::ReconcileUseCase,
+        submit_adjudication::SubmitAdjudicationUseCase,
+        sweep_adjudications::SweepAdjudicationsUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::engine_handle::{ErasedPendingStore, ErasedPendingStoreAdapter};
+    use crate::noop::NoOpOracle;
+    use crate::ports::pending_adjudication::{
+        OrphanedQueuedClaim, PendingAdjudicationPort, PendingAdjudicationRow,
+    };
+    use crate::MemError;
+    use std::sync::Mutex;
+
+    let agent = AgentId("conformance-dscope-wa1".into());
+
+    // ── 1. Flood the agent ledger with > 10_000 noise entries on OTHER claims ──────
+    // Exceeds the old cap (10_000) so any capped agent-wide load_ledger call would
+    // silently drop the disposition-critical entries written in steps 2-5 below.
+    for i in 0..1010u32 {
+        let noise_claim = Claim::new(
+            ClaimRef::new_random(),
+            agent.clone(),
+            Fact {
+                subject: format!("wa-noise-subject-{i}"),
+                predicate: "noise-predicate".to_owned(),
+                value: serde_json::json!(i),
+            },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(Utc::now()),
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            Criticality::Low,
+            vec![],
+            None,
+            None,
+        );
+        let noise_ref = noise_claim.claim_ref().clone();
+        let mut txn = store.begin_atomic(&agent).expect("dscope[wa1]: noise begin_atomic");
+        store.append_claim(&mut txn, &noise_claim).expect("dscope[wa1]: noise append_claim");
+        // 10 ledger entries per noise claim => 10,100 total noise ledger rows (> old 10_000 cap).
+        for _ in 0..10 {
+            let entry = make_ledger_entry(&agent, &noise_ref);
+            store.append_ledger_entry(&mut txn, &entry).expect("dscope[wa1]: noise ledger entry");
+        }
+        store.commit(txn).expect("dscope[wa1]: noise commit");
+    }
+
+    let config = EngineConfig::default();
+
+    // ── 2. ingest_claim: incumbent A committed directly against the store, then a
+    // conflicting claim B is ingested. The use-case must see A as the live incumbent
+    // (disposition map correctly scoped, not silently missing it due to the flood). ──
+    let claim_a = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "wa-ingest-subject".into(), predicate: "wa-predicate".into(), value: serde_json::json!("Alice") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(Utc::now() - chrono::Duration::seconds(10)),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+    let ref_a = claim_a.claim_ref().clone();
+    {
+        let mut txn = store.begin_atomic(&agent).expect("dscope[wa1]: claim_a begin");
+        store.append_claim(&mut txn, &claim_a).expect("dscope[wa1]: claim_a append");
+        store.append_ledger_entry(&mut txn, &make_ledger_entry(&agent, &ref_a))
+            .expect("dscope[wa1]: claim_a ledger");
+        store.commit(txn).expect("dscope[wa1]: claim_a commit");
+    }
+
+    let store_arc = Arc::clone(&store);
+    let ingest_uc = IngestClaimUseCase::new(
+        Arc::clone(&store_arc),
+        None::<Arc<NoOpOracle>>,
+        None,
+        config.clone(),
+    );
+    let ingest_req = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "wa-ingest-subject".into(),
+        predicate: "wa-predicate".into(),
+        value: serde_json::json!("Bob"), // conflicts with Alice
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: None,
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    };
+    let ingest_resp = ingest_uc
+        .execute_with_time(ingest_req, Utc::now())
+        .expect("dscope[wa1]: ingest_claim must not error");
+    // Oracle absent (B11a): a fresh External contradiction against a correctly-visible
+    // live incumbent must surface as Contested — proving A was seen as live despite the flood.
+    assert_eq!(
+        ingest_resp.disposition, Disposition::Contested,
+        "dscope[wa1]: ingest_claim must detect the live incumbent A despite >10k noise ledger rows"
+    );
+    assert_eq!(
+        ingest_resp.contested_with, vec![ref_a.clone()],
+        "dscope[wa1]: ingest_claim must surface A as the contested incumbent"
+    );
+
+    // ── 3. reconcile: claim C committed, then superseded by claim D directly in the
+    // store. reconcile() must NOT re-surface C as live (it must see the Superseded entry). ──
+    let claim_c = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "wa-reconcile-subject".into(), predicate: "wa-predicate".into(), value: serde_json::json!("Carol") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(Utc::now() - chrono::Duration::seconds(20)),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+    let ref_c = claim_c.claim_ref().clone();
+    let claim_d = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "wa-reconcile-subject".into(), predicate: "wa-predicate".into(), value: serde_json::json!("Dave") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(Utc::now() - chrono::Duration::seconds(10)),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+    let ref_d = claim_d.claim_ref().clone();
+    {
+        let mut txn = store.begin_atomic(&agent).expect("dscope[wa1]: claim_c begin");
+        store.append_claim(&mut txn, &claim_c).expect("dscope[wa1]: claim_c append");
+        store.append_ledger_entry(&mut txn, &make_ledger_entry(&agent, &ref_c))
+            .expect("dscope[wa1]: claim_c ledger");
+        store.commit(txn).expect("dscope[wa1]: claim_c commit");
+
+        let mut txn = store.begin_atomic(&agent).expect("dscope[wa1]: claim_d begin");
+        store.append_claim(&mut txn, &claim_d).expect("dscope[wa1]: claim_d append");
+        let superseded_c = LedgerEntry {
+            entry_id: Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: ref_c.clone(),
+            event_kind: LedgerEventKind::ValidityAsserted,
+            disposition: Disposition::Superseded,
+            rationale: None,
+            recorded_at: TransactionTime(Utc::now()),
+        };
+        store.append_ledger_entry(&mut txn, &superseded_c).expect("dscope[wa1]: superseded_c");
+        store.append_ledger_entry(&mut txn, &make_ledger_entry(&agent, &ref_d))
+            .expect("dscope[wa1]: claim_d ledger");
+        store.commit(txn).expect("dscope[wa1]: claim_d commit");
+    }
+
+    let reconcile_uc = ReconcileUseCase::new(
+        Arc::clone(&store_arc),
+        None::<Arc<NoOpOracle>>,
+        config.clone(),
+    );
+    let reconcile_resp = reconcile_uc
+        .execute(ReconcileRequest {
+            agent_id: agent.clone(),
+            subject_lines: vec![("wa-reconcile-subject".into(), "wa-predicate".into())],
+        })
+        .expect("dscope[wa1]: reconcile must not error");
+    let reconciled_refs: Vec<_> = reconcile_resp.outcomes.iter().map(|(r, _)| r.clone()).collect();
+    assert!(
+        !reconciled_refs.contains(&ref_c),
+        "dscope[wa1]: reconcile must NOT re-surface superseded claim C despite >10k noise ledger rows; outcomes={:?}",
+        reconcile_resp.outcomes
+    );
+    assert!(
+        reconciled_refs.contains(&ref_d),
+        "dscope[wa1]: reconcile must process live claim D; outcomes={:?}",
+        reconcile_resp.outcomes
+    );
+
+    // ── 4/5. submit_adjudication + sweep_adjudications: state-guard idempotency. ──────
+    // A challenger claim E is QueuedForAdjudication in the ledger. A duplicate/late
+    // verdict submit (or a stale sweep) must correctly see E's CURRENT (already-resolved)
+    // disposition rather than a stale QueuedForAdjudication view lost behind the flood.
+    let claim_e = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "wa-adj-subject".into(), predicate: "wa-predicate".into(), value: serde_json::json!("Eve") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(Utc::now() - chrono::Duration::seconds(30)),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+    let ref_e = claim_e.claim_ref().clone();
+    let claim_f = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "wa-adj-subject".into(), predicate: "wa-predicate".into(), value: serde_json::json!("Frank") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(Utc::now() - chrono::Duration::seconds(25)),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+    let ref_f = claim_f.claim_ref().clone();
+    {
+        let mut txn = store.begin_atomic(&agent).expect("dscope[wa1]: claim_e begin");
+        store.append_claim(&mut txn, &claim_e).expect("dscope[wa1]: claim_e append");
+        // E starts QueuedForAdjudication, then is resolved to CommittedCheap (Affirm) by a
+        // PRIOR verdict-apply — this is the "already resolved" state a duplicate/stale
+        // caller must correctly observe.
+        let queued_e = LedgerEntry {
+            entry_id: Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: ref_e.clone(),
+            event_kind: LedgerEventKind::ClaimCommitted,
+            disposition: Disposition::QueuedForAdjudication,
+            rationale: None,
+            recorded_at: TransactionTime(Utc::now() - chrono::Duration::seconds(5)),
+        };
+        store.append_ledger_entry(&mut txn, &queued_e).expect("dscope[wa1]: queued_e");
+        store.append_claim(&mut txn, &claim_f).expect("dscope[wa1]: claim_f append");
+        store.append_ledger_entry(&mut txn, &make_ledger_entry(&agent, &ref_f))
+            .expect("dscope[wa1]: claim_f ledger");
+        store.commit(txn).expect("dscope[wa1]: claim_e/f commit");
+
+        let mut txn = store.begin_atomic(&agent).expect("dscope[wa1]: resolve_e begin");
+        let resolved_e = LedgerEntry {
+            entry_id: Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: ref_e.clone(),
+            event_kind: LedgerEventKind::AdjudicationResolved,
+            disposition: Disposition::CommittedCheap,
+            rationale: None,
+            recorded_at: TransactionTime(Utc::now()),
+        };
+        store.append_ledger_entry(&mut txn, &resolved_e).expect("dscope[wa1]: resolved_e");
+        store.commit(txn).expect("dscope[wa1]: resolve_e commit");
+    }
+
+    // In-memory PendingAdjudicationPort stub, seeded with a still-"pending" row for E
+    // (simulating a duplicate verdict arriving after E was already resolved above).
+    struct StubPendingStore {
+        rows: Mutex<Vec<PendingAdjudicationRow>>,
+    }
+    impl PendingAdjudicationPort for StubPendingStore {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> {
+            self.rows.lock().unwrap().push(row.clone());
+            Ok(())
+        }
+        fn get_pending(&self, handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> {
+            Ok(self.rows.lock().unwrap().iter().find(|r| r.handle_id == handle_id).cloned())
+        }
+        fn list_pending(&self, _agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> {
+            Ok(self.rows.lock().unwrap().clone())
+        }
+        fn list_expired(&self, _now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> {
+            Ok(vec![])
+        }
+        fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> {
+            for r in self.rows.lock().unwrap().iter_mut() {
+                if r.handle_id == handle_id { r.status = "resolved".into(); }
+            }
+            Ok(())
+        }
+        fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> {
+            for r in self.rows.lock().unwrap().iter_mut() {
+                if r.handle_id == handle_id { r.status = "expired".into(); }
+            }
+            Ok(())
+        }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> {
+            Ok(vec![])
+        }
+    }
+
+    let handle_id = Uuid::new_v4();
+    let dummy_adj_request = mempill_types::AdjudicationRequest {
+        subject_line: mempill_types::SubjectLineRef {
+            agent_id: agent.clone(),
+            subject: "wa-adj-subject".into(),
+            predicate: "wa-predicate".into(),
+        },
+        incumbent: mempill_types::Belief {
+            claim_ref: ref_f.clone(),
+            fact: claim_f.fact().clone(),
+            provenance: claim_f.provenance().clone(),
+            valid_time: claim_f.valid_time().clone(),
+            transaction_time: claim_f.transaction_time().clone(),
+            confidence: claim_f.confidence().clone(),
+            currency_signal: mempill_types::CurrencySignal {
+                last_refreshed_at: claim_f.transaction_time().clone(),
+                state: mempill_types::CurrencyState::Fresh,
+                corroboration_count: 0,
+            },
+            criticality: claim_f.criticality().clone(),
+        },
+        challenger: claim_e.clone(),
+        criticality: Criticality::Medium,
+        reason: mempill_types::OverturnReason::ExternalContradiction,
+    };
+    let pending_store = Arc::new(StubPendingStore {
+        rows: Mutex::new(vec![PendingAdjudicationRow {
+            handle_id,
+            agent_id: agent.clone(),
+            subject: "wa-adj-subject".into(),
+            predicate: "wa-predicate".into(),
+            challenger_claim_ref: ref_e.clone(),
+            incumbent_claim_ref: ref_f.clone(),
+            request_payload: dummy_adj_request,
+            queued_at: Utc::now() - chrono::Duration::seconds(5),
+            expires_at: None,
+            status: "pending".into(),
+        }]),
+    });
+    // `ErasedPendingStoreAdapter::new` requires an owned `S: PendingAdjudicationPort`, not
+    // `Arc<S>` — wrap the shared `Arc<StubPendingStore>` in a thin delegating newtype so it
+    // can still be shared with `sweep_uc` below (mirrors the `SharedWrapper` pattern used
+    // elsewhere in this codebase, e.g. `ingest_claim.rs` tests).
+    struct SharedPendingWrapper(Arc<StubPendingStore>);
+    impl PendingAdjudicationPort for SharedPendingWrapper {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> {
+            self.0.insert_pending(row)
+        }
+        fn get_pending(&self, handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> {
+            self.0.get_pending(handle_id)
+        }
+        fn list_pending(&self, agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> {
+            self.0.list_pending(agent_id)
+        }
+        fn list_expired(&self, now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> {
+            self.0.list_expired(now)
+        }
+        fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> {
+            self.0.mark_resolved(handle_id)
+        }
+        fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> {
+            self.0.mark_expired(handle_id)
+        }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> {
+            self.0.list_queued_orphan_claims()
+        }
+    }
+    let erased_pending: Arc<dyn ErasedPendingStore> = Arc::new(ErasedPendingStoreAdapter::new(
+        SharedPendingWrapper(Arc::clone(&pending_store)),
+    ));
+
+    let submit_uc = SubmitAdjudicationUseCase::new(Arc::clone(&store_arc), Arc::clone(&erased_pending));
+    let dup_response = mempill_types::AdjudicationResponse {
+        handle_id,
+        verdict: mempill_types::AdjudicationVerdict::Deny,
+        evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+    };
+    let submit_result = submit_uc.execute(handle_id, dup_response, Utc::now());
+    assert!(
+        matches!(submit_result, Err(MemError::AdjudicationHandleNotFound { .. })),
+        "dscope[wa1]: submit_adjudication state guard must see E's CURRENT resolved disposition \
+         (CommittedCheap) despite >10k noise ledger rows, not a stale QueuedForAdjudication view; got {submit_result:?}"
+    );
+
+    // sweep_adjudications must reach the identical conclusion via revert_expired_row: the
+    // pending row for E is stale (challenger already resolved) — idempotent no-op (false).
+    let sweep_uc = SweepAdjudicationsUseCase::new(Arc::clone(&store_arc), Arc::clone(&erased_pending));
+    let stale_row = PendingAdjudicationRow {
+        handle_id,
+        agent_id: agent.clone(),
+        subject: "wa-adj-subject".into(),
+        predicate: "wa-predicate".into(),
+        challenger_claim_ref: ref_e.clone(),
+        incumbent_claim_ref: ref_f.clone(),
+        request_payload: mempill_types::AdjudicationRequest {
+            subject_line: mempill_types::SubjectLineRef {
+                agent_id: agent.clone(),
+                subject: "wa-adj-subject".into(),
+                predicate: "wa-predicate".into(),
+            },
+            incumbent: mempill_types::Belief {
+                claim_ref: ref_f.clone(),
+                fact: claim_f.fact().clone(),
+                provenance: claim_f.provenance().clone(),
+                valid_time: claim_f.valid_time().clone(),
+                transaction_time: claim_f.transaction_time().clone(),
+                confidence: claim_f.confidence().clone(),
+                currency_signal: mempill_types::CurrencySignal {
+                    last_refreshed_at: claim_f.transaction_time().clone(),
+                    state: mempill_types::CurrencyState::Fresh,
+                    corroboration_count: 0,
+                },
+                criticality: claim_f.criticality().clone(),
+            },
+            challenger: claim_e.clone(),
+            criticality: Criticality::Medium,
+            reason: mempill_types::OverturnReason::ExternalContradiction,
+        },
+        queued_at: Utc::now() - chrono::Duration::seconds(5),
+        expires_at: Some(Utc::now() - chrono::Duration::seconds(1)),
+        status: "pending".into(),
+    };
+    let reverted = sweep_uc
+        .revert_expired_row(&stale_row, Utc::now())
+        .expect("dscope[wa1]: sweep revert_expired_row must not error");
+    assert!(
+        !reverted,
+        "dscope[wa1]: sweep_adjudications must correctly see E's CURRENT resolved disposition \
+         despite >10k noise ledger rows and skip the stale revert (idempotency guard)"
     );
 }
 

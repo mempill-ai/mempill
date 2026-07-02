@@ -61,12 +61,6 @@ where
         // All subject-line claims, validity assertions, ledger, and edges for any
         // supersession candidate must be loaded HERE — outside the transaction window.
 
-        // Load ledger for disposition filtering (excludes non-live dispositions from fold).
-        let all_ledger = self.persistence
-            .load_ledger(&req.agent_id, None, 10_000)
-            .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
-        let latest_disposition = build_latest_disposition_map(&all_ledger);
-
         // Per subject-line: load claims, fold, compute decisions, pre-load edges.
         struct SubjectLineData {
             fold: truth_engine::FoldResult,
@@ -78,8 +72,13 @@ where
             )>,
         }
 
-        let mut subject_line_data: Vec<SubjectLineData> = Vec::new();
-
+        // Load claims for every requested subject-line FIRST, so the ledger load below can
+        // be scoped to exactly the claims being reconciled (no agent-wide cap) — mirrors the
+        // read path (query_memory/query_history) and avoids the silent-wrong-belief bug where
+        // a disposition-changing entry outside a capped agent-wide scan caused a superseded
+        // claim to be misclassified as live.
+        let mut subject_line_claims: Vec<Vec<mempill_types::Claim>> = Vec::new();
+        let mut all_claim_refs: Vec<mempill_types::ClaimRef> = Vec::new();
         for (subject, predicate) in &req.subject_lines {
             // WRITE path: pass None so reconcile sees the full current state.
             // A tx-time cutoff here would break conflict detection (post-cutoff claims
@@ -87,7 +86,20 @@ where
             let claims = self.persistence
                 .load_subject_line(&req.agent_id, subject, predicate, None)
                 .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+            all_claim_refs.extend(claims.iter().map(|c| c.claim_ref().clone()));
+            subject_line_claims.push(claims);
+        }
 
+        // Load ledger for disposition filtering (excludes non-live dispositions from fold),
+        // scoped to the union of claims across all requested subject-lines.
+        let all_ledger = self.persistence
+            .load_ledger_for_claims(&req.agent_id, &all_claim_refs, None)
+            .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+        let latest_disposition = build_latest_disposition_map(&all_ledger);
+
+        let mut subject_line_data: Vec<SubjectLineData> = Vec::new();
+
+        for claims in subject_line_claims {
             let fold = truth_engine::fold(
                 claims.clone(),
                 |cref| {

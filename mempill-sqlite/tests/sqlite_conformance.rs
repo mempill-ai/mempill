@@ -24,7 +24,7 @@ fn sqlite_passes_history_conformance() {
 #[test]
 fn sqlite_passes_disposition_scope_conformance() {
     let conn = open_in_memory().expect("in-memory SQLite connection must open");
-    let store = SqlitePersistenceStore::new(conn);
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
     run_disposition_scope_conformance(&store);
 }
 

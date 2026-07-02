@@ -141,8 +141,13 @@ where
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         // Load ledger for disposition-based filtering (excludes non-live dispositions from fold).
+        // Scoped to exactly the incumbent claims on this subject-line (no agent-wide cap) —
+        // mirrors the read path (query_memory/query_history) to avoid the silent-wrong-belief
+        // bug where a supersession/adjudication entry outside a capped agent-wide scan caused
+        // a superseded claim to be misclassified as live.
+        let incumbent_refs: Vec<_> = incumbent_claims.iter().map(|c| c.claim_ref().clone()).collect();
         let ledger_for_fold = self.persistence
-            .load_ledger(&req.agent_id, None, 10_000)
+            .load_ledger_for_claims(&req.agent_id, &incumbent_refs, None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         // Build LATEST disposition per claim from the ledger (for the disposition-based fold filter).

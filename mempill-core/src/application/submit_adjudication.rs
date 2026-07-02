@@ -86,8 +86,11 @@ where
                 let handle_id_exp = handle_id;
 
                 // Load ledger to verify challenger is still QueuedForAdjudication.
+                // Scoped to exactly the challenger claim ref (no agent-wide cap) — mirrors
+                // the read path and avoids the silent-wrong-belief bug where a disposition
+                // entry outside a capped agent-wide scan caused a stale state guard.
                 let ledger_check = self.persistence
-                    .load_ledger(&agent_id_exp, None, 10_000)
+                    .load_ledger_for_claims(&agent_id_exp, std::slice::from_ref(&challenger_ref_exp), None)
                     .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
                 let challenger_disp = latest_disposition_from_ledger(&ledger_check, &challenger_ref_exp);
 
@@ -136,10 +139,12 @@ where
         let incumbent_ref = row.incumbent_claim_ref.clone();
 
         // ── Step 3: State guard — load latest dispositions BEFORE begin_atomic ────
-        // Check that both claims are still in QueuedForAdjudication (idempotency guard R6).
-        // We read the ledger to get the latest disposition per claim.
+        // Check that the challenger is still QueuedForAdjudication (idempotency guard R6).
+        // Scoped to exactly the challenger claim ref (no agent-wide cap) — mirrors the
+        // read path and avoids the silent-wrong-belief bug where a disposition entry
+        // outside a capped agent-wide scan caused a stale state guard at scale.
         let ledger = self.persistence
-            .load_ledger(&agent_id, None, 10_000)
+            .load_ledger_for_claims(&agent_id, std::slice::from_ref(&challenger_ref), None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         let challenger_disp = latest_disposition_from_ledger(&ledger, &challenger_ref);
@@ -528,8 +533,8 @@ mod tests {
             Ok(self.ledger.lock().unwrap().clone())
         }
 
-        fn load_ledger_for_claims(&self, _: &AgentId, _refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> {
-            Ok(vec![])
+        fn load_ledger_for_claims(&self, _: &AgentId, refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> {
+            Ok(self.ledger.lock().unwrap().iter().filter(|e| refs.contains(&e.claim_ref)).cloned().collect())
         }
 
         fn load_edges_for(&self, _: &AgentId, _: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> {
