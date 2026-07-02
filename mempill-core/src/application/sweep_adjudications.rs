@@ -78,8 +78,11 @@ where
 
         // ── Pre-check: verify challenger is still QueuedForAdjudication ──────────
         // Load ledger BEFORE begin_atomic to avoid reads inside an open transaction.
+        // Scoped to exactly the challenger claim ref (no agent-wide cap) — mirrors the
+        // read path and avoids the silent-wrong-belief bug where a disposition entry
+        // outside a capped agent-wide scan caused a stale state guard at scale.
         let ledger = self.persistence
-            .load_ledger(&agent_id, None, 10_000)
+            .load_ledger_for_claims(&agent_id, std::slice::from_ref(&challenger_ref), None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         let challenger_disp = latest_disposition_from_ledger(&ledger, &challenger_ref);
@@ -146,8 +149,11 @@ where
         let challenger_ref = orphan.challenger_claim_ref.clone();
 
         // ── Pre-check: verify challenger is still QueuedForAdjudication ──────────
+        // Scoped to exactly the challenger claim ref (no agent-wide cap) — mirrors the
+        // read path and avoids the silent-wrong-belief bug where a disposition entry
+        // outside a capped agent-wide scan caused a stale state guard at scale.
         let ledger = self.persistence
-            .load_ledger(&agent_id, None, 10_000)
+            .load_ledger_for_claims(&agent_id, std::slice::from_ref(&challenger_ref), None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         let challenger_disp = latest_disposition_from_ledger(&ledger, &challenger_ref);

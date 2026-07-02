@@ -55,7 +55,7 @@ fn postgres_history_conformance_pg18() {
 #[test]
 fn postgres_disposition_scope_conformance_pg16() {
     common::with_pg("16", |store| {
-        run_disposition_scope_conformance(&*store);
+        run_disposition_scope_conformance(&store);
     });
 }
 
@@ -63,7 +63,7 @@ fn postgres_disposition_scope_conformance_pg16() {
 #[test]
 fn postgres_disposition_scope_conformance_pg18() {
     common::with_pg("18", |store| {
-        run_disposition_scope_conformance(&*store);
+        run_disposition_scope_conformance(&store);
     });
 }
 
