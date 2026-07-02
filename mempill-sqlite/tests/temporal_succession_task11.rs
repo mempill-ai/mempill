@@ -14,6 +14,21 @@
 //!   low_confidence_is_conflict  — non-overlapping but confidence < 0.7 → Contested (I2 fallback)
 //!   no_valid_time_regression    — no valid_time → Contested (existing behavior unchanged)
 //!   n_gt_1_incumbent            — 2 live incumbents + new claim → stays SameLineConflict
+//!
+//! TASK-25-W4 (verification wave) gap-fill additions:
+//!   succession_boundary_via_valid_at   — exact boundary instant queried through the public
+//!                                        `valid_at` API param (integration-level proof of the
+//!                                        unit-level `select_boundary_start_inclusive` guarantee;
+//!                                        `succession_boundary` above only proves NOW, not the
+//!                                        exact handoff instant end-to-end).
+//!   one_sided_no_valid_time_is_conflict — ONE claim has valid_time=None, other has a confident
+//!                                        window → Contested (I2 fallback; distinct from the
+//!                                        both-None case already covered by
+//!                                        no_valid_time_regression).
+//!   succession_point_claim              — Alice is a zero-duration point claim
+//!                                        (start == end == 2020-01-01), Bob [2020-01-02, ∞).
+//!                                        Documents actual half-open-interval read-time behavior
+//!                                        at the point instant (see in-test note).
 
 use chrono::Utc;
 use mempill_core::application::{IngestClaimRequest, QueryMemoryRequest};
@@ -629,4 +644,236 @@ async fn n_gt_1_incumbent() {
         "N>1 live incumbents → succession check SKIPPED → Contested (resolution #2)");
 
     println!("[n_gt_1_incumbent] PASS: N>1 incumbents → succession skipped → Contested");
+}
+
+// ── succession_boundary_via_valid_at (TASK-25-W4 gap-fill) ─────────────────────
+
+/// Alice [2020-01-01, 2024-03-01), Bob [2024-03-01, ∞).
+/// Query with `valid_at` set EXACTLY to the boundary instant (2024-03-01T00:00:00Z),
+/// independent of tx_time/NOW, proving start-inclusive/end-exclusive semantics
+/// end-to-end through the public API (not just at the `select_by_valid_time_instant`
+/// unit-test level). Mirrors `postgres_succession.rs::run_succession_scenario` step 5
+/// so SQLite and Postgres are verified against the identical boundary instant.
+#[tokio::test]
+async fn succession_boundary_via_valid_at() {
+    let engine = open_default_in_memory().unwrap();
+    let agent = AgentId("succ-boundary-va".into());
+
+    engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "corp2".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("alice"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt("2020-01-01T00:00:00Z", Some("2024-03-01T00:00:00Z"))),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+
+    let r_bob = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "corp2".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("bob"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt("2024-03-01T00:00:00Z", None)),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+    assert_eq!(r_bob.disposition, Disposition::CommittedCheap, "succession must be CommittedCheap");
+
+    // valid_at = exact boundary instant. Alice's window is half-open [2020, 2024-03-01):
+    // end is EXCLUSIVE so Alice does NOT cover this instant. Bob's window
+    // [2024-03-01, ∞) has start INCLUSIVE, so Bob DOES cover this instant.
+    let boundary = dt("2024-03-01T00:00:00Z");
+    let qr = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "corp2".into(),
+        predicate: "ceo".into(),
+        as_of_tx_time: None,
+        valid_at: Some(boundary),
+    }).await.unwrap();
+
+    println!("[succession_boundary_via_valid_at] status={:?}, primary={:?}",
+        qr.belief.status, qr.belief.primary.as_ref().map(|b| &b.fact.value));
+
+    assert_eq!(qr.belief.status, BeliefStatus::Resolved,
+        "exact boundary instant via valid_at MUST be Resolved");
+    assert_eq!(
+        qr.belief.primary.as_ref().map(|b| b.fact.value.clone()),
+        Some(serde_json::json!("bob")),
+        "boundary instant == Bob's start (inclusive) and == Alice's end (exclusive) → Bob selected"
+    );
+}
+
+// ── one_sided_no_valid_time_is_conflict (TASK-25-W4 gap-fill) ──────────────────
+
+/// Alice has NO valid_time (None), Bob has a confident bounded window.
+/// A trusted succession requires ALL claims in the fold to be trusted
+/// (see `is_trusted_succession` / `claim_is_trusted`); a claim with valid_time=None
+/// fails `claim_is_trusted` (start is None) so the pair can never form a succession,
+/// regardless of which side carries the None. Distinct from `no_valid_time_regression`
+/// (both sides None) — this proves the asymmetric case is also NOT silently promoted
+/// to succession just because one side has a confident window.
+#[tokio::test]
+async fn one_sided_no_valid_time_is_conflict() {
+    let engine = open_default_in_memory().unwrap();
+    let agent = AgentId("succ-onesided-novt".into());
+
+    // Alice: no valid_time at all.
+    let r_alice = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "co2".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("alice"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: None,
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+    assert_eq!(r_alice.disposition, Disposition::CommittedCheap, "first claim always CommittedCheap");
+
+    // Bob: confident bounded valid_time window, open-ended.
+    let r_bob = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "co2".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("bob"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt("2024-03-01T00:00:00Z", None)),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+
+    assert_eq!(r_bob.disposition, Disposition::Contested,
+        "one side missing valid_time MUST NOT be treated as succession → Contested (I2 fallback)");
+
+    let qr = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "co2".into(),
+        predicate: "ceo".into(),
+        as_of_tx_time: None,
+        valid_at: None,
+    }).await.unwrap();
+
+    assert_eq!(qr.belief.status, BeliefStatus::Contested,
+        "asymmetric valid_time (one None, one confident) MUST surface as Contested");
+
+    println!("[one_sided_no_valid_time_is_conflict] PASS: one-sided missing valid_time → Contested");
+}
+
+// ── succession_point_claim (TASK-25-W4 gap-fill) ────────────────────────────────
+
+/// Alice is a zero-duration POINT claim: start == end == 2020-01-01T00:00:00Z.
+/// Bob: [2020-01-02, ∞).
+///
+/// Ingest-time (B7 gate, see `gate.rs::p2_start_equals_end_is_not_quarantined`):
+/// start == end is a VALID window (not quarantined) — only start > end is malformed.
+/// Alice's point window and Bob's window do not overlap (Alice's end 2020-01-01 <=
+/// Bob's start 2020-01-02), so ingest classifies this as succession → CommittedCheap.
+///
+/// Read-time (`select_by_valid_time_instant`): half-open interval semantics are
+/// `start <= instant < end`. For a POINT window (start == end), NO instant satisfies
+/// `instant < end` when `instant == start == end`, because that requires
+/// `instant < instant`, which is always false. This means a point claim's own instant
+/// query does NOT resolve to a `Resolved` state through instant-selection — it is
+/// documented (not spec-violating) half-open-interval behavior: point-in-time windows
+/// are structurally empty under `[start, end)` and are effectively unselectable via
+/// `valid_at` set exactly to that point. This test documents the ACTUAL behavior so a
+/// future change to point-claim semantics (e.g. treating instant==start==end as a
+/// single-instant closed interval) is a deliberate, visible decision, not a silent
+/// regression.
+#[tokio::test]
+async fn succession_point_claim() {
+    let engine = open_default_in_memory().unwrap();
+    let agent = AgentId("succ-point".into());
+
+    let point_instant = "2020-01-01T00:00:00Z";
+    let r_alice = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "event".into(),
+        predicate: "status".into(),
+        value: serde_json::json!("alice-point"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt(point_instant, Some(point_instant))),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+
+    // Ingest-time: point window is valid (not quarantined) and, being the first claim
+    // on the line, is always CommittedCheap regardless of succession classification.
+    assert_eq!(r_alice.disposition, Disposition::CommittedCheap,
+        "point claim (start==end) is a VALID window at ingest, not quarantined (B7)");
+
+    let r_bob = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "event".into(),
+        predicate: "status".into(),
+        value: serde_json::json!("bob"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt("2020-01-02T00:00:00Z", None)),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+
+    // Alice's window [2020-01-01, 2020-01-01) does not overlap Bob's [2020-01-02, ∞)
+    // (a_end 2020-01-01 <= b_start 2020-01-02) → non-overlapping → succession.
+    assert_eq!(r_bob.disposition, Disposition::CommittedCheap,
+        "point claim + non-overlapping open window MUST still classify as succession at ingest");
+
+    // Query exactly AT the point instant. Under strict half-open `[start, end)` with
+    // start==end, no instant satisfies `instant < end`, so the point window does NOT
+    // cover its own instant. Confirm the actual (documented) outcome: NoBelief, not a
+    // silent/incorrect Resolved(Alice). This is the honest verification result — see
+    // module doc note above for rationale.
+    let qr_at_point = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "event".into(),
+        predicate: "status".into(),
+        as_of_tx_time: None,
+        valid_at: Some(dt(point_instant)),
+    }).await.unwrap();
+
+    println!("[succession_point_claim] valid_at=point → status={:?}, primary={:?}",
+        qr_at_point.belief.status,
+        qr_at_point.belief.primary.as_ref().map(|b| &b.fact.value));
+
+    assert_eq!(qr_at_point.belief.status, BeliefStatus::NoBelief,
+        "DOCUMENTED behavior: half-open [start,end) with start==end covers no instant; \
+         a point-claim's own instant query returns NoBelief (not Resolved(Alice)). \
+         See module doc for rationale — this is a semantics finding, not a bug being fixed \
+         in this verification-only wave.");
+
+    // Sanity: a query safely inside Bob's open window still resolves to Bob, confirming
+    // the point claim did not corrupt the rest of the succession chain's read path.
+    let qr_bob_window = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "event".into(),
+        predicate: "status".into(),
+        as_of_tx_time: None,
+        valid_at: Some(dt("2021-01-01T00:00:00Z")),
+    }).await.unwrap();
+    assert_eq!(qr_bob_window.belief.status, BeliefStatus::Resolved,
+        "instant safely inside Bob's window must still resolve normally");
+    assert_eq!(
+        qr_bob_window.belief.primary.as_ref().map(|b| b.fact.value.clone()),
+        Some(serde_json::json!("bob")),
+        "instant inside Bob's window selects Bob"
+    );
+
+    println!("[succession_point_claim] PASS: point claim valid at ingest (B7), succession \
+              classification correct; read-time instant-selection at the point itself is \
+              NoBelief under strict half-open semantics (documented finding, not a defect fix).");
 }
