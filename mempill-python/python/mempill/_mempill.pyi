@@ -46,7 +46,8 @@ class InternalError(MempillError):
 class PyEngine:
     """Sync Python handle to a mempill DefaultEngine (SQLite, no oracle, no vector).
 
-    Obtain via ``open_default(path)`` or ``open_in_memory()``. Thread-safe (Arc-backed).
+    Obtain via ``open_default_for_agent(base_dir, agent_id)`` or ``open_in_memory()``.
+    Thread-safe (Arc-backed).
     All methods accept and return plain Python dicts (via pythonize/depythonize).
     """
 
@@ -179,11 +180,14 @@ class PyEngine:
 
 # ── Module-level constructors ─────────────────────────────────────────────────
 
-def open_default(path: str) -> PyEngine:
-    """Open a file-backed mempill engine at ``path``.
+def open_default_for_agent(base_dir: str, agent_id: str) -> PyEngine:
+    """Open a file-backed, per-agent mempill engine under ``base_dir``.
+
+    The database file is derived automatically as ``base_dir/agent_{agent_id}.db``.
 
     Raises:
-        StorageError: if the database cannot be opened or migrations fail.
+        StorageError: if ``agent_id`` contains characters that could cause a filename
+            collision, if the database cannot be opened, or if migrations fail.
     """
     ...
 
@@ -197,7 +201,7 @@ def open_in_memory() -> PyEngine:
 
 __all__ = [
     "PyEngine",
-    "open_default",
+    "open_default_for_agent",
     "open_in_memory",
     "MempillError",
     "ValidationError",

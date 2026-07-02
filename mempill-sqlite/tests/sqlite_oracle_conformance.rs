@@ -34,7 +34,7 @@ use mempill_core::{
     EngineConfig, EngineHandle,
 };
 use mempill_sqlite::{
-    connection::{open_in_memory, open as open_file},
+    connection::{open_in_memory, open_for_agent},
     store::SqlitePersistenceStore,
 };
 use mempill_types::{
@@ -78,8 +78,8 @@ fn build_engine_tiny_ttl(handle_id: uuid::Uuid) -> OracleEng {
 }
 
 /// File-backed oracle engine for the reopen test.
-fn build_engine_file(path: &str, handle_id: uuid::Uuid) -> OracleEng {
-    let conn = open_file(path).expect("file SQLite must open");
+fn build_engine_file(base_dir: &std::path::Path, agent_id: &str, handle_id: uuid::Uuid) -> OracleEng {
+    let conn = open_for_agent(base_dir, agent_id).expect("file SQLite must open");
     let persistence = Arc::new(SqlitePersistenceStore::new(conn));
     let pending_adapter = ErasedPendingStoreAdapter::new(persistence.pending_store());
     let pending_store: Arc<dyn ErasedPendingStore> = Arc::new(pending_adapter);
@@ -279,13 +279,12 @@ async fn sqlite_oc_08b_sweep_recovers_orphan() {
 #[tokio::test]
 async fn sqlite_oc_09_durable_store_survives_reopen() {
     let dir = tempfile::tempdir().expect("tempdir must succeed");
-    let path = dir.path().join("reopen.db");
-    let path_str = path.to_str().unwrap().to_owned();
+    let base_dir = dir.path().to_owned();
     let handle_id = uuid::Uuid::new_v4();
 
-    let engine1 = build_engine_file(&path_str, handle_id);
-    let path_str_2 = path_str.clone();
-    let build_engine2 = move || build_engine_file(&path_str_2, handle_id);
+    let engine1 = build_engine_file(&base_dir, "reopen-agent", handle_id);
+    let base_dir_2 = base_dir.clone();
+    let build_engine2 = move || build_engine_file(&base_dir_2, "reopen-agent", handle_id);
 
     oc::scenario_durable_store_survives_reopen(engine1, build_engine2, handle_id).await;
 }

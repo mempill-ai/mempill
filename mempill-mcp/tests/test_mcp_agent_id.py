@@ -22,7 +22,7 @@ async def test_missing_agent_id_raises_on_startup(monkeypatch: pytest.MonkeyPatc
     with a clear error — not silently yield a broken context.
     """
     monkeypatch.delenv("MEMPILL_AGENT_ID", raising=False)
-    monkeypatch.delenv("MEMPILL_DB_PATH", raising=False)
+    monkeypatch.delenv("MEMPILL_DB_DIR", raising=False)
 
     # Re-import to pick up the cleared env (server module is already imported
     # but the lifespan reads os.environ at call time, so no reload needed).
@@ -55,7 +55,7 @@ async def test_missing_agent_id_raises_on_startup(monkeypatch: pytest.MonkeyPatc
 async def test_empty_agent_id_raises_on_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty string MEMPILL_AGENT_ID must also be rejected."""
     monkeypatch.setenv("MEMPILL_AGENT_ID", "")
-    monkeypatch.delenv("MEMPILL_DB_PATH", raising=False)
+    monkeypatch.delenv("MEMPILL_DB_DIR", raising=False)
 
     from mempill_mcp.server import mcp as mcp_server
 
@@ -82,7 +82,7 @@ async def test_empty_agent_id_raises_on_startup(monkeypatch: pytest.MonkeyPatch)
 async def test_valid_agent_id_starts_successfully(monkeypatch: pytest.MonkeyPatch) -> None:
     """Positive case: a non-empty MEMPILL_AGENT_ID must allow normal startup."""
     monkeypatch.setenv("MEMPILL_AGENT_ID", "valid-agent-for-startup-test")
-    monkeypatch.delenv("MEMPILL_DB_PATH", raising=False)
+    monkeypatch.delenv("MEMPILL_DB_DIR", raising=False)
 
     from mempill_mcp.server import mcp as mcp_server
 

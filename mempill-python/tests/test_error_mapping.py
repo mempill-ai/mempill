@@ -125,9 +125,17 @@ class TestReachableErrors:
             engine.ingest_claim(req)
 
     def test_storage_error_on_invalid_path(self) -> None:
-        """mempill.open() with unwritable/invalid path → StorageError."""
+        """mempill.open_for_agent() with an unwritable/non-existent base_dir → StorageError."""
         with pytest.raises(StorageError):
-            mempill.open("/nonexistent_root_dir_mempill/cannot_create.db")
+            mempill.open_for_agent("/nonexistent_root_dir_mempill", "test-agent")
+
+    def test_storage_error_on_invalid_agent_id(self) -> None:
+        """mempill.open_for_agent() with a path-unsafe agent_id → StorageError.
+
+        Two agent_ids that would normalize to the same filename must fail loudly
+        (path separators, '..' traversal, etc. are rejected outright)."""
+        with pytest.raises(StorageError):
+            mempill.open_for_agent("/tmp", "../escape")
 
     def test_audit_unknown_claim_ref_returns_empty_not_raises(
         self, engine: mempill.Engine, agent_id: str

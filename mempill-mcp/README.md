@@ -23,8 +23,8 @@ pip install .
 ## Run
 
 ```sh
-export MEMPILL_AGENT_ID="my-agent"            # required
-export MEMPILL_DB_PATH="/data/my-agent.db"    # optional; omit for in-memory (ephemeral)
+export MEMPILL_AGENT_ID="my-agent"    # required
+export MEMPILL_DB_DIR="/data"         # optional; omit for in-memory (ephemeral)
 mempill-mcp
 ```
 
@@ -37,7 +37,15 @@ The server starts on stdio transport (the default for Claude Desktop and other M
 | Variable | Required | Description |
 |---|---|---|
 | `MEMPILL_AGENT_ID` | Yes | Unique agent identifier. The server fails fast if not set. |
-| `MEMPILL_DB_PATH` | No | Path to the SQLite database file. Omit for in-memory (data lost on exit). |
+| `MEMPILL_DB_DIR` | No | Base directory for SQLite storage. The database file is derived automatically as `MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db`. Omit for in-memory (data lost on exit). |
+
+> **Breaking change (0.4.0):** `MEMPILL_DB_PATH` (a full file path) was replaced by
+> `MEMPILL_DB_DIR` (a base directory), because storage is now opened via
+> `mempill.open_for_agent(base_dir, agent_id)` — the file path is always derived from
+> `agent_id`, so it is no longer possible to point two different agents at the same file.
+> Existing pre-0.4.0 `MEMPILL_DB_PATH` databases are not auto-migrated; point
+> `MEMPILL_DB_DIR` at a fresh directory, or migrate the old file manually (see the
+> `mempill-sqlite` CHANGELOG).
 
 The engine is opened once at startup (FastMCP lifespan) and shared across all tool calls.
 

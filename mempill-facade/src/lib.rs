@@ -222,7 +222,9 @@ pub use mempill_core::{
 
 /// SQLite persistence adapter (`feature = "sqlite"`).
 ///
-/// Use [`sqlite::open_default_in_memory`] or [`sqlite::open_default`] to open an engine.
+/// Use [`sqlite::open_default_in_memory`] or [`sqlite::open_default_for_agent`] to open
+/// an engine. `open_default_for_agent` derives a per-agent database file automatically —
+/// there is no way to point two different `agent_id`s at the same file through this API.
 #[cfg(feature = "sqlite")]
 pub mod sqlite {
     pub use mempill_sqlite::{
@@ -231,9 +233,9 @@ pub mod sqlite {
         SqlitePersistenceStore,
         SqlitePendingStore,
         SqliteStoreError,
-        open_default,
+        open_default_for_agent,
         open_default_in_memory,
-        open_with_oracle,
+        open_with_oracle_for_agent,
         open_with_oracle_in_memory,
     };
 }
@@ -278,14 +280,20 @@ pub fn open_default_in_memory() -> Result<sqlite::DefaultEngine, sqlite::SqliteS
     mempill_sqlite::open_default_in_memory()
 }
 
-/// Open a file-backed [`sqlite::DefaultEngine`] at the given path.
+/// Open a file-backed, per-agent [`sqlite::DefaultEngine`].
 ///
-/// Convenience shortcut for `mempill::sqlite::open_default(path)`.
+/// The database file is derived automatically as `base_dir/agent_{agent_id}.db`.
+/// Convenience shortcut for `mempill::sqlite::open_default_for_agent(base_dir, agent_id)`.
 /// Requires the `sqlite` feature (enabled by default).
 ///
 /// # Errors
-/// Returns [`sqlite::SqliteStoreError`] if the connection cannot be opened or migrations fail.
+/// Returns [`sqlite::SqliteStoreError::InvalidAgentId`] if `agent_id` contains characters
+/// that could cause a filename collision. Returns other [`sqlite::SqliteStoreError`]
+/// variants if the connection cannot be opened or migrations fail.
 #[cfg(feature = "sqlite")]
-pub fn open_default(path: &str) -> Result<sqlite::DefaultEngine, sqlite::SqliteStoreError> {
-    mempill_sqlite::open_default(path)
+pub fn open_default_for_agent(
+    base_dir: &std::path::Path,
+    agent_id: &str,
+) -> Result<sqlite::DefaultEngine, sqlite::SqliteStoreError> {
+    mempill_sqlite::open_default_for_agent(base_dir, agent_id)
 }
