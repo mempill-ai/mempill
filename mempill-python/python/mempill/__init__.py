@@ -2,8 +2,8 @@
 mempill — Python SDK for the mempill AI-agent memory engine.
 
 Ergonomic API (W3):
-  open(path)         → Engine  (file-backed SQLite)
-  open_in_memory()   → Engine  (ephemeral; tests / MCP sessions)
+  open_for_agent(base_dir, agent_id)   → Engine  (file-backed SQLite, one file per agent)
+  open_in_memory()                     → Engine  (ephemeral; tests / MCP sessions)
 
 Types:
   Disposition        — 12-state str-Enum; comparable to engine response strings
@@ -23,9 +23,9 @@ from __future__ import annotations
 from mempill._mempill import (
     PyEngine,
     PyOracleEngine,
-    open_default as _open_default,
+    open_default_for_agent as _open_default_for_agent,
     open_in_memory as _open_in_memory,
-    open_with_oracle as _open_with_oracle,
+    open_with_oracle_for_agent as _open_with_oracle_for_agent,
     open_with_oracle_in_memory as _open_with_oracle_in_memory,
     MempillError,
     ValidationError,
@@ -75,13 +75,22 @@ Engine = PyEngine
 OracleEngine = PyOracleEngine
 
 
-def open(path: str) -> Engine:  # noqa: A001  (shadows builtin intentionally)
-    """Open a file-backed mempill engine at *path*.
+def open_for_agent(base_dir: str, agent_id: str) -> Engine:
+    """Open a file-backed, per-agent mempill engine under *base_dir*.
+
+    The database file is derived automatically as ``base_dir/agent_{agent_id}.db`` —
+    there is no way to point two different ``agent_id``s at the same file through this
+    API. This is the only public entry point for file-backed storage; the prior
+    shared-path ``open(path)`` function has been removed from the public API (breaking
+    change, pre-1.0). See CHANGELOG for the manual migration path from a pre-0.4.0
+    shared-file database.
 
     Raises:
-        StorageError: if the database cannot be opened or migrations fail.
+        StorageError: if ``agent_id`` contains characters that could cause a filename
+            collision (only ``[A-Za-z0-9_-]`` is accepted), if the database cannot be
+            opened, or if migrations fail.
     """
-    return _open_default(path)
+    return _open_default_for_agent(base_dir, agent_id)
 
 
 def open_in_memory() -> Engine:
@@ -96,8 +105,10 @@ def open_in_memory() -> Engine:
     return _open_in_memory()
 
 
-def open_oracle(path: str, oracle: object) -> OracleEngine:
-    """Open a file-backed mempill engine wired to a Python oracle.
+def open_oracle_for_agent(base_dir: str, agent_id: str, oracle: object) -> OracleEngine:
+    """Open a file-backed, per-agent mempill engine wired to a Python oracle.
+
+    The database file is derived automatically as ``base_dir/agent_{agent_id}.db``.
 
     The ``oracle`` argument must be any Python object with:
 
@@ -106,9 +117,10 @@ def open_oracle(path: str, oracle: object) -> OracleEngine:
         def request_adjudication(self, agent_id: str, request: dict) -> str: ...
 
     Raises:
-        StorageError: if the database cannot be opened or migrations fail.
+        StorageError: if ``agent_id`` contains characters that could cause a filename
+            collision, if the database cannot be opened, or if migrations fail.
     """
-    return _open_with_oracle(path, oracle)
+    return _open_with_oracle_for_agent(base_dir, agent_id, oracle)
 
 
 def open_oracle_in_memory(oracle: object) -> OracleEngine:
@@ -128,10 +140,10 @@ def open_oracle_in_memory(oracle: object) -> OracleEngine:
 
 __all__ = [
     # No-oracle constructors
-    "open",
+    "open_for_agent",
     "open_in_memory",
     # Oracle constructors
-    "open_oracle",
+    "open_oracle_for_agent",
     "open_oracle_in_memory",
     # Engine handles
     "Engine",

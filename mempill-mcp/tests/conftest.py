@@ -20,4 +20,4 @@ def agent_id() -> str:
 def set_agent_id_env(agent_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Inject MEMPILL_AGENT_ID into the environment for all MCP tests."""
     monkeypatch.setenv("MEMPILL_AGENT_ID", agent_id)
-    monkeypatch.delenv("MEMPILL_DB_PATH", raising=False)
+    monkeypatch.delenv("MEMPILL_DB_DIR", raising=False)

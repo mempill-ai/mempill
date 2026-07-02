@@ -20,16 +20,16 @@
 //! These together prove: "same persisted facts → same read-time canonical belief" — the
 //! achievable G1 guarantee in v0.1, including through the supersession (HeavyPath) path.
 //!
-//! TECHNIQUE: use `tempfile::NamedTempFile` for a file-backed SQLite DB. Open Engine1,
-//! ingest claims, query → capture belief. Open Engine2 on SAME file, query → assert identical.
+//! TECHNIQUE: use a `tempfile::tempdir()` + `open_default_for_agent(dir, "g1-agent")` for a
+//! file-backed SQLite DB. Open Engine1, ingest claims, query → capture belief. Open Engine2
+//! on SAME derived file (same base_dir + same agent_id), query → assert identical.
 
-use mempill_sqlite::open_default;
+use mempill_sqlite::open_default_for_agent;
 use mempill_core::application::{IngestClaimRequest, QueryMemoryRequest};
 use mempill_types::{
     AgentId, BeliefStatus, Cardinality, Confidence, Criticality,
     Disposition, ExternalKind, ProvenanceLabel,
 };
-use tempfile::NamedTempFile;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -74,15 +74,14 @@ fn query_req(agent_id: AgentId, subject: &str, predicate: &str) -> QueryMemoryRe
 /// Proves the persisted state is canonical and deterministic across process restarts.
 #[tokio::test]
 async fn g1a_fresh_engine_same_file_same_belief() {
-    let tmp = NamedTempFile::new().expect("tempfile must be created");
-    let db_path = tmp.path().to_str().expect("path must be UTF-8").to_string();
+    let tmp_dir = tempfile::tempdir().expect("tempdir must be created");
 
     let claim_ref_ingested;
     let value_ingested: serde_json::Value;
 
     // ── Engine 1: ingest a claim ──────────────────────────────────────────────
     {
-        let engine1 = open_default(&db_path).expect("file-backed engine1 must open");
+        let engine1 = open_default_for_agent(tmp_dir.path(), "g1-agent").expect("file-backed engine1 must open");
         let resp = engine1
             .ingest_claim(ingest_req(agent(), "user", "home_city", "Berlin"))
             .await
@@ -109,7 +108,7 @@ async fn g1a_fresh_engine_same_file_same_belief() {
 
     // ── Engine 2: fresh instance on SAME file — must read identical belief ────
     {
-        let engine2 = open_default(&db_path).expect("file-backed engine2 must open (same file)");
+        let engine2 = open_default_for_agent(tmp_dir.path(), "g1-agent").expect("file-backed engine2 must open (same file)");
         let q2 = engine2.query_memory(query_req(agent(), "user", "home_city")).await
             .expect("query on engine2 must succeed");
 
@@ -185,15 +184,14 @@ async fn g1b_two_reads_same_engine_identical_belief() {
 /// a fresh engine on the same file sees both claims correctly.
 #[tokio::test]
 async fn g1c_multiple_predicates_persist_across_fresh_engine_instances() {
-    let tmp = NamedTempFile::new().expect("tempfile must be created");
-    let db_path = tmp.path().to_str().expect("path must be UTF-8").to_string();
+    let tmp_dir = tempfile::tempdir().expect("tempdir must be created");
 
     let ref_city;
     let ref_job;
 
     // ── Engine 1: ingest two claims on different predicates ───────────────────
     {
-        let engine1 = open_default(&db_path).expect("engine1 must open");
+        let engine1 = open_default_for_agent(tmp_dir.path(), "g1-agent").expect("engine1 must open");
         let agent = agent();
 
         let r_city = engine1.ingest_claim(ingest_req(
@@ -229,7 +227,7 @@ async fn g1c_multiple_predicates_persist_across_fresh_engine_instances() {
 
     // ── Engine 2: same file, fresh instance — both claims must still be present ─
     {
-        let engine2 = open_default(&db_path).expect("engine2 must open (same file)");
+        let engine2 = open_default_for_agent(tmp_dir.path(), "g1-agent").expect("engine2 must open (same file)");
         let agent = agent();
 
         // city claim must be identical.
@@ -336,8 +334,7 @@ async fn g1d_independent_predicates_deterministic_read() {
 /// return identical belief — this is the G1 guarantee extended to the conflict path.
 #[tokio::test]
 async fn g1e_supersession_determinism_across_fresh_engine_instances() {
-    let tmp = NamedTempFile::new().expect("tempfile must be created");
-    let db_path = tmp.path().to_str().expect("path must be UTF-8").to_string();
+    let tmp_dir = tempfile::tempdir().expect("tempdir must be created");
 
     let belief_status_engine1: BeliefStatus;
     let primary_ref_engine1: Option<mempill_types::ClaimRef>;
@@ -345,7 +342,7 @@ async fn g1e_supersession_determinism_across_fresh_engine_instances() {
 
     // ── Engine 1: ingest A then B (supersession sequence) ────────────────────
     {
-        let engine1 = open_default(&db_path).expect("file-backed engine1 must open");
+        let engine1 = open_default_for_agent(tmp_dir.path(), "g1-agent").expect("file-backed engine1 must open");
         let agent = AgentId("g1e-agent".into());
 
         // Ingest A: cheap-path incumbent.
@@ -405,7 +402,7 @@ async fn g1e_supersession_determinism_across_fresh_engine_instances() {
 
     // ── Engine 2: fresh instance on SAME file — belief must be IDENTICAL ──────
     {
-        let engine2 = open_default(&db_path).expect("file-backed engine2 must open (same file)");
+        let engine2 = open_default_for_agent(tmp_dir.path(), "g1-agent").expect("file-backed engine2 must open (same file)");
         let agent = AgentId("g1e-agent".into());
 
         let q2 = engine2.query_memory(QueryMemoryRequest {
