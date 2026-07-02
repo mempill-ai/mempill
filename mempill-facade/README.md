@@ -10,9 +10,9 @@ This crate is a thin facade over [`mempill-core`](https://crates.io/crates/mempi
 
 ```toml
 [dependencies]
-mempill = "0.2"                          # default = SQLite backend
+mempill = "0.3"                          # default = SQLite backend
 # or:
-mempill = { version = "0.2", features = ["postgres"] }
+mempill = { version = "0.3", features = ["postgres"] }
 ```
 
 ## Quick start

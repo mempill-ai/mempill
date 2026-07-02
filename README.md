@@ -10,7 +10,7 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.2.0** · Apache-2.0 · MSRV 1.88 · 507 Rust + 155 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
+**0.3.0** · Apache-2.0 · MSRV 1.88 · 501 Rust + 155 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate + per-endpoint date granularity.
 
 
@@ -75,8 +75,8 @@ Key properties:
 | MCP adapter (`mempill-mcp`) | ✅ Shipped | FastMCP, 4 tools, stdio transport |
 | `mempill` facade crate | ✅ Shipped | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
 | Bi-temporal history read (`query_history` / `history()`) | ✅ Shipped | Full claim timeline of a subject line — values, effective valid-time windows, `Current`/`Superseded` status |
-| Valid-time as-of query (`valid_at`) | ✅ Shipped (main · 0.3.0) | Point-in-time recall ("who was CEO in 2021?"); `valid_at` is a separate axis from `as_of_tx_time` — available in Rust, Python, and MCP. Not yet in the published 0.2.0 crate. |
-| Date precision / granularity | ✅ Shipped (main · 0.3.0) | Per-endpoint `DateGranularity` (Year / Month / Day / Instant) on `ValidTime.start` and `ValidTime.end` independently. Honest display: Month→"2020-03", Year→"2020", Day→"2020-03-15"; no fabricated precision. Ergonomic `remember()` infers granularity from the supplied date string; structured ingest (raw `IngestClaimRequest`, Python dict, MCP) requires explicit granularity. Legacy rows (pre-feature) have `None` granularity and display as YYYY-MM-DD. Cross-adapter conformance included. Not yet in the published 0.2.0 crate. |
+| Valid-time as-of query (`valid_at`) | ✅ Shipped (0.3.0) | Point-in-time recall ("who was CEO in 2021?"); `valid_at` is a separate axis from `as_of_tx_time` — available in Rust, Python, and MCP. |
+| Date precision / granularity | ✅ Shipped (0.3.0) | Per-endpoint `DateGranularity` (Year / Month / Day / Instant) on `ValidTime.start` and `ValidTime.end` independently. Honest display: Month→"2020-03", Year→"2020", Day→"2020-03-15"; no fabricated precision. Ergonomic `remember()` infers granularity from the supplied date string; structured ingest (raw `IngestClaimRequest`, Python dict, MCP) requires explicit granularity. Legacy rows (pre-feature) have `None` granularity and display as YYYY-MM-DD. Cross-adapter conformance included. |
 | Vector search / VectorPort | ⏳ Planned | Structural seam exists (NoOp); no vector retrieval yet |
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
@@ -89,9 +89,9 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 
 ## Production readiness & scope
 
-mempill 0.2.0 is a **correct, well-tested engine** (bi-temporal fold, ACID writes,
-cross-adapter conformance, append-only integrity — 507 Rust + 155 Python + 19 MCP tests on main) designed for
-**embedded and early-stage** use. Read this before deploying it at scale.
+mempill 0.3.0 is designed for **embedded and early-stage** use (bi-temporal fold, ACID writes,
+cross-adapter conformance, append-only integrity — 501 Rust + 155 Python + 19 MCP tests on main).
+Read this before deploying it at scale.
 
 **Safe today for:**
 
@@ -116,16 +116,15 @@ cross-adapter conformance, append-only integrity — 507 Rust + 155 Python + 19 
 - **No built-in observability** — there is no `tracing`/metrics instrumentation yet, so
   latency, error rates, and contention are not visible to an operator out of the box.
   *(v0.3.)*
-- **No published load/stress benchmarks** — all 507 Rust + 155 Python + 19 MCP tests are correctness tests;
+- **No published load/stress benchmarks** — all 501 Rust + 155 Python + 19 MCP tests are correctness tests;
   performance at large scale is not yet characterized.
 
 **Not recommended yet for:** public-facing multi-tenant services, high-frequency
 automated write pipelines, networked PostgreSQL with real credentials (until TLS), or
 very high agent cardinality (the per-agent advisory lock uses a 32-bit hash).
 
-If your use case is outside the safe envelope, the engine is still a solid foundation —
-the gaps above are operational, not algorithmic — but treat 0.2.0 as an early release
-and pin a specific version.
+If your use case is outside the safe envelope, the core algorithm is implemented and tested;
+the gaps above are operational, not algorithmic. Treat 0.3.0 as an early release and pin a specific version.
 
 ---
 
@@ -186,12 +185,12 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-mempill = "0.2"                            # SQLite (default)
-# mempill = { version = "0.2", features = ["postgres"] }
+mempill = "0.3"                            # SQLite (default)
+# mempill = { version = "0.3", features = ["postgres"] }
 ```
 
 Power users can depend on individual crates directly from crates.io by version:
-`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.2"`.
+`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.3"`.
 
 ### Python wheel
 

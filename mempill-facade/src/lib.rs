@@ -9,9 +9,9 @@
 //! ```toml
 //! # Cargo.toml
 //! [dependencies]
-//! mempill = "0.2"                          # default features = ["sqlite"]
+//! mempill = "0.3"                          # default features = ["sqlite"]
 //! # or:
-//! mempill = { version = "0.2", features = ["postgres"] }
+//! mempill = { version = "0.3", features = ["postgres"] }
 //! ```
 //!
 //! ## Quick start (SQLite, default)
@@ -241,7 +241,7 @@ pub mod sqlite {
 /// PostgreSQL persistence adapter (`feature = "postgres"`).
 ///
 /// Use [`postgres::open_postgres`] to open an engine connected to PostgreSQL.
-/// Note: NoTls only in v0.2.
+/// Note: NoTls only in v0.3.
 #[cfg(feature = "postgres")]
 pub mod postgres {
     pub use mempill_postgres::{
