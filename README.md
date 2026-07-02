@@ -10,8 +10,14 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.3.0** · Apache-2.0 · MSRV 1.88 · 501 Rust + 155 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
-Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate + per-endpoint date granularity.
+**0.4.0** · Apache-2.0 · MSRV 1.88 · 501 Rust + 155 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
+Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate + per-endpoint date granularity + configurable Postgres pool + as-of correctness benchmark.
+
+> **Breaking change in 0.4.0:** SQLite entry points are now per-agent.
+> `open_default(path)` / `open_with_oracle(path, oracle)` are replaced by
+> `open_default_for_agent(base_dir, agent_id)` / `open_with_oracle_for_agent(base_dir, agent_id, oracle)`.
+> `mempill-mcp`'s `MEMPILL_DB_PATH` is replaced by `MEMPILL_DB_DIR`. See
+> [CHANGELOG.md](./CHANGELOG.md#040) for the full migration note.
 
 
 ---
@@ -63,25 +69,56 @@ Key properties:
 
 ## Status and roadmap
 
-| Feature | Status | Notes |
-|---|---|---|
-| Rust core engine (8 deterministic components, 12-state disposition model) | ✅ Shipped | Bi-temporal append-only claim store, deterministic adjudication gate |
-| SQLite persistence adapter (topology-a) | ✅ Shipped | Embedded, file-per-agent, WAL + FULL sync |
-| PostgreSQL adapter (topology-b) | ✅ Shipped | sync postgres 0.19 + r2d2; PG 16 + 18 tested; NoTls |
-| Cross-adapter conformance suite | ✅ Shipped | SQLite and PostgreSQL proven behaviorally identical |
-| Oracle resolution loop | ✅ Shipped | `submit_adjudication` (Affirm/Deny/Unknown) + engine-enforced TTL + orphan sweep; works on both adapters |
-| Valid-time succession | ✅ Shipped | Non-overlapping confident valid-time windows fold to the claim valid at the query instant |
-| Python PyO3 wheel (`mempill`) | ✅ Shipped | maturin 1.14, PyO3 0.29, Python ≥ 3.11; includes Python oracle bridge |
-| MCP adapter (`mempill-mcp`) | ✅ Shipped | FastMCP, 4 tools, stdio transport |
-| `mempill` facade crate | ✅ Shipped | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
-| Bi-temporal history read (`query_history` / `history()`) | ✅ Shipped | Full claim timeline of a subject line — values, effective valid-time windows, `Current`/`Superseded` status |
-| Valid-time as-of query (`valid_at`) | ✅ Shipped (0.3.0) | Point-in-time recall ("who was CEO in 2021?"); `valid_at` is a separate axis from `as_of_tx_time` — available in Rust, Python, and MCP. |
-| Date precision / granularity | ✅ Shipped (0.3.0) | Per-endpoint `DateGranularity` (Year / Month / Day / Instant) on `ValidTime.start` and `ValidTime.end` independently. Honest display: Month→"2020-03", Year→"2020", Day→"2020-03-15"; no fabricated precision. Ergonomic `remember()` infers granularity from the supplied date string; structured ingest (raw `IngestClaimRequest`, Python dict, MCP) requires explicit granularity. Legacy rows (pre-feature) have `None` granularity and display as YYYY-MM-DD. Cross-adapter conformance included. |
-| Vector search / VectorPort | ⏳ Planned | Structural seam exists (NoOp); no vector retrieval yet |
-| TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
-| PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
-| Service tier (topology-c) | ⏳ Deferred | Multi-agent shared service; not in scope yet |
-| Published to crates.io / PyPI | ✅ Shipped — 0.3.0 is live | `cargo add mempill` (crates.io) · `pip install mempill` (PyPI) |
+Release-sequenced view of shipped and planned capability. See [CHANGELOG.md](./CHANGELOG.md)
+for full per-version detail.
+
+### 0.2.0 — first published release
+
+| Feature | Notes |
+|---|---|
+| Rust core engine (8 deterministic components, 12-state disposition model) | Bi-temporal append-only claim store, deterministic adjudication gate |
+| SQLite persistence adapter (topology-a) | Embedded, file-per-agent, WAL + FULL sync |
+| PostgreSQL adapter (topology-b) | sync postgres 0.19 + r2d2; PG 16 + 18 tested; NoTls |
+| Cross-adapter conformance suite | SQLite and PostgreSQL proven behaviorally identical |
+| Oracle resolution loop | `submit_adjudication` (Affirm/Deny/Unknown) + engine-enforced TTL + orphan sweep; works on both adapters |
+| Valid-time succession | Non-overlapping confident valid-time windows fold to the claim valid at the query instant |
+| Python PyO3 wheel (`mempill`) | maturin 1.14, PyO3 0.29, Python ≥ 3.11; includes Python oracle bridge |
+| MCP adapter (`mempill-mcp`) | FastMCP, 4 tools, stdio transport |
+| `mempill` facade crate | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
+| Bi-temporal history read (`query_history` / `history()`) | Full claim timeline of a subject line — values, effective valid-time windows, `Current`/`Superseded` status |
+| Published to crates.io / PyPI | `cargo add mempill` (crates.io) · `pip install mempill` (PyPI) |
+
+### 0.3.0
+
+| Feature | Notes |
+|---|---|
+| Valid-time as-of query (`valid_at`) | Point-in-time recall ("who was CEO in 2021?"); `valid_at` is a separate axis from `as_of_tx_time` — available in Rust, Python, and MCP |
+| Date precision / granularity | Per-endpoint `DateGranularity` (Year / Month / Day / Instant) on `ValidTime.start` and `ValidTime.end` independently. Honest display: Month→"2020-03", Year→"2020", Day→"2020-03-15"; no fabricated precision. Ergonomic `remember()` infers granularity from the supplied date string; structured ingest (raw `IngestClaimRequest`, Python dict, MCP) requires explicit granularity. Legacy rows (pre-feature) have `None` granularity and display as YYYY-MM-DD. Cross-adapter conformance included |
+| Subject-scoped enumeration (`query_subject`) | Resolved belief for every predicate known about a subject, in one call |
+
+### 0.4.0 (current)
+
+| Feature | Notes |
+|---|---|
+| Per-agent SQLite entry points (`open_default_for_agent`, `open_with_oracle_for_agent`) | **Breaking change.** File path always derived from `agent_id` — structurally prevents two agents sharing one database file. See [CHANGELOG.md](./CHANGELOG.md#040) |
+| Configurable PostgreSQL connection pool | `PoolConfig` (`max_size`, `connection_timeout`) via additive `with_pool_config()` constructor; defaults unchanged (20 / 5s) |
+| Ledger-scope correctness fix | Write/audit paths use uncapped, claim-scoped ledger lookup — fixes a silent-wrong-belief risk on agents with >10,000 ledger rows |
+| As-of / bi-temporal correctness benchmark | Reproducible `cargo run --release --example asof_correctness_benchmark -p mempill`; results published on the [documentation site](https://mempill.netlify.app/concepts/benchmark-results/) |
+
+### 0.5.0 — planned
+
+| Feature | Notes |
+|---|---|
+| Compliance wedge (audit/export tooling for regulated verticals) | Builds on the existing append-only ledger and `query_audit` — no new storage model required |
+| PostgreSQL TLS | Currently NoTls only (local/Docker) |
+| Vector search / VectorPort | Structural seam exists (NoOp); no vector retrieval yet |
+| TypeScript / napi-rs bindings (`mempill-ts`) | Empty stub crate; no binding logic |
+
+### Deferred
+
+| Feature | Notes |
+|---|---|
+| Service tier (topology-c) | Multi-agent shared service; not in scope yet |
 
 The HITL reference oracle and console/LangGraph agent demos live in the separate `mempill-demo` repository.
 
@@ -89,7 +126,7 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 
 ## Production readiness & scope
 
-mempill 0.3.0 is designed for **embedded and early-stage** use (bi-temporal fold, ACID writes,
+mempill 0.4.0 is designed for **embedded and early-stage** use (bi-temporal fold, ACID writes,
 cross-adapter conformance, append-only integrity — 501 Rust + 155 Python + 19 MCP tests on main).
 Read this before deploying it at scale.
 
@@ -111,8 +148,9 @@ Read this before deploying it at scale.
   lock, and reads error while a write transaction is open on that agent's file. Use the
   **PostgreSQL** adapter for write concurrency across agents.
 - **PostgreSQL is `NoTls` only** — do not expose the connection over an untrusted
-  network. The connection pool size is fixed (20) and not yet configurable. *(v0.3: TLS,
-  configurable pool.)*
+  network. *(0.5.0: TLS.)* The connection pool size and connection timeout are
+  configurable as of 0.4.0 via `PoolConfig` / `with_pool_config()` (default
+  unchanged: 20 connections, 5s timeout).
 - **No built-in observability** — there is no `tracing`/metrics instrumentation yet, so
   latency, error rates, and contention are not visible to an operator out of the box.
   *(v0.3.)*
@@ -124,7 +162,7 @@ automated write pipelines, networked PostgreSQL with real credentials (until TLS
 very high agent cardinality (the per-agent advisory lock uses a 32-bit hash).
 
 If your use case is outside the safe envelope, the core algorithm is implemented and tested;
-the gaps above are operational, not algorithmic. Treat 0.3.0 as an early release and pin a specific version.
+the gaps above are operational, not algorithmic. Treat 0.4.0 as an early release and pin a specific version.
 
 ---
 
@@ -185,12 +223,12 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-mempill = "0.3"                            # SQLite (default) — currently published version
-# mempill = { version = "0.3", features = ["postgres"] }
+mempill = "0.4"                            # SQLite (default) — currently published version
+# mempill = { version = "0.4", features = ["postgres"] }
 ```
 
 Power users can depend on individual crates directly from crates.io by version:
-`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.3"`.
+`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.4"`.
 
 ### Python wheel
 
@@ -214,7 +252,7 @@ Run the MCP server:
 
 ```sh
 export MEMPILL_AGENT_ID="my-agent"
-export MEMPILL_DB_PATH="/path/to/agent.db"   # omit for in-memory
+export MEMPILL_DB_DIR="/data"                # omit for in-memory; db file is derived as MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db
 mempill-mcp
 ```
 
@@ -298,7 +336,7 @@ Set environment variables and start the server:
 
 ```sh
 export MEMPILL_AGENT_ID="my-agent"
-export MEMPILL_DB_PATH="/data/my-agent.db"   # omit for in-memory (ephemeral)
+export MEMPILL_DB_DIR="/data"                # omit for in-memory (ephemeral); db file is derived as MEMPILL_DB_DIR/agent_{MEMPILL_AGENT_ID}.db
 mempill-mcp
 ```
 
@@ -399,7 +437,8 @@ materialized as a single "current value" row.
 
 ### PostgreSQL (topology-b) — shared database
 
-- r2d2 connection pool (max 20 connections) enables concurrent cross-agent transactions.
+- r2d2 connection pool (default max 20 connections, configurable as of 0.4.0 via
+  `PoolConfig` / `with_pool_config()`) enables concurrent cross-agent transactions.
 - Same-agent write serialization via `pg_advisory_xact_lock(hashtext(agent_id)::bigint)`.
 - OCC belt-and-suspenders: `UNIQUE(agent_id, stream_seq)` on `ledger_entries`.
 - `requires_global_write_serialization()` returns `false` — no global lock; true per-agent
@@ -482,7 +521,7 @@ adapters is a hard requirement.
 | `mempill-postgres` | Rust | PostgreSQL `PersistencePort` adapter; `PostgresEngine` alias | ✅ Shipped |
 | `mempill` (facade) | Rust | Thin re-export of core + adapters; `cargo add mempill` with `sqlite`/`postgres` features | ✅ Shipped |
 | `mempill-python` | Rust + Python | PyO3/maturin wheel (`mempill`); Python SDK with `Engine`, `Disposition`, `ProvenanceLabel` | ✅ Shipped |
-| `mempill-mcp` | Python | FastMCP server; 4 tools; stdio transport; `MEMPILL_AGENT_ID` + `MEMPILL_DB_PATH` env contract | ✅ Shipped |
+| `mempill-mcp` | Python | FastMCP server; 4 tools; stdio transport; `MEMPILL_AGENT_ID` + `MEMPILL_DB_DIR` env contract | ✅ Shipped |
 | `mempill-ts` | Rust | napi-rs TypeScript binding stub — **not yet implemented** | ⏳ Planned |
 
 ---
