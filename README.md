@@ -81,7 +81,7 @@ Key properties:
 | TypeScript / napi-rs bindings (`mempill-ts`) | ⏳ Planned | Empty stub crate; no binding logic |
 | PostgreSQL TLS | ⏳ Planned | Currently NoTls only (local/Docker) |
 | Service tier (topology-c) | ⏳ Deferred | Multi-agent shared service; not in scope yet |
-| Published to crates.io / PyPI | ⏳ 0.2.0 is the current published release; 0.3.0 publish is queued | `cargo add mempill` (crates.io) · `pip install mempill` (PyPI) — installs 0.2.0 today |
+| Published to crates.io / PyPI | ✅ Shipped — 0.3.0 is live | `cargo add mempill` (crates.io) · `pip install mempill` (PyPI) |
 
 The HITL reference oracle and console/LangGraph agent demos live in the separate `mempill-demo` repository.
 
@@ -185,12 +185,12 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-mempill = "0.2"                            # SQLite (default) — currently published version
-# mempill = { version = "0.2", features = ["postgres"] }
+mempill = "0.3"                            # SQLite (default) — currently published version
+# mempill = { version = "0.3", features = ["postgres"] }
 ```
 
 Power users can depend on individual crates directly from crates.io by version:
-`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.2"`. (0.3.0 publish is queued — pin `"0.3"` once it's live.)
+`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.3"`.
 
 ### Python wheel
 
