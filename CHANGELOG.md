@@ -71,6 +71,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.3.0]
 
+### Changed
+
+- **Reconciler succession classification for non-overlapping valid-time windows.** When two
+  claims with confident (>= 0.7) valid-time confidence assert different values on the same
+  subject/predicate with non-overlapping valid-time windows, they are now classified as a
+  succession: the incoming claim receives `Disposition::CommittedCheap`, and point-in-time
+  queries return `Resolved` — the claim valid at the query instant — instead of `Contested`.
+  This produces correct answers for historical state queries (e.g. "who was CEO in 2021?").
+  Overlapping valid-time windows, missing `valid_time`, or confidence below 0.7 continue to
+  yield `Contested` as before.
+
 ### Added
 
 - **Valid-time point-in-time query (`valid_at`)** — recall the belief as it was valid at a
