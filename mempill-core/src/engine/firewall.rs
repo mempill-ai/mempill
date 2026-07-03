@@ -220,7 +220,7 @@ mod tests {
         AmplificationGuard::new(Arc::new(EngineConfig::default()))
     }
 
-    // ── AMPLIFICATION ACID TEST — mem0 #4573 ─────────────────────────────────
+    // ── AMPLIFICATION ACID TEST — the 808-turn recall re-ingestion case ────────
     //
     // 808 identical RecallReEntry re-ingestions of the same content MUST collapse to
     // ONE underlying claim and 807 CorroborateByIdentity verdicts (NOT 808 new claims).
@@ -284,7 +284,7 @@ mod tests {
         }
 
         assert_eq!(new_claim_rows, 0,
-            "ACID: 808 re-ingestions must result in ZERO new claim rows (mem0 #4573 defence)");
+            "ACID: 808 re-ingestions must result in ZERO new claim rows (808-turn amplification defence)");
     }
 
     // ── BURST QUARANTINE ──────────────────────────────────────────────────────
