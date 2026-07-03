@@ -8,7 +8,7 @@ See the [repository README](https://github.com/mempill-ai/mempill) for the full 
 
 - `SqlitePersistenceStore` — `impl PersistencePort` backed by a single rusqlite connection.
 - `DefaultEngine` — type alias for `EngineHandle<SqlitePersistenceStore, NoOpOracle, NoOpVector>`.
-- `open_default(path)` — open a file-backed engine at the given path.
+- `open_default_for_agent(base_dir, agent_id)` — open a file-backed engine at `base_dir/agent_{agent_id}.db` (agent_id validated against `[A-Za-z0-9_-]`).
 - `open_default_in_memory()` — open an ephemeral in-memory engine (tests, MCP sessions).
 
 ## Usage

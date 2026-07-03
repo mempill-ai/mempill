@@ -17,6 +17,23 @@
 //! This is expected and documented behaviour. The durability guarantees (`synchronous=FULL`
 //! and `foreign_keys=ON`) are still applied and tested for in-memory connections.
 //! WAL mode is tested separately against a temporary file-backed database.
+//!
+//! ## Migrating a pre-0.4.0 shared-file database
+//! Before 0.4.0, the (then-public) `open(path)` function let callers point any number of
+//! `agent_id`s at one shared SQLite file. `open_for_agent(base_dir, agent_id)` does not
+//! read or migrate such a file automatically — pre-0.4.0 shared-file databases are left
+//! untouched on disk. To migrate manually:
+//! 1. Open the old shared file with the internal `open(path)` (test/migration-tooling use
+//!    only — not part of the public API).
+//! 2. For each distinct `agent_id` present in that file's `claims` / `validity_assertions`
+//!    / `ledger_entries` / `claim_edges` tables, `SELECT * ... WHERE agent_id = ?` and
+//!    `INSERT` the rows into a fresh per-agent file opened via
+//!    `open_for_agent(base_dir, agent_id)`.
+//! 3. Verify row counts match per table per `agent_id` before deleting the old shared file.
+//! No automated migration tool ships in 0.4.0; this is a manual, one-time step for anyone
+//! upgrading from a pre-0.4.0 shared-file deployment.
+
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Result as SqlResult};
 
@@ -25,12 +42,77 @@ use crate::migrations;
 /// Open a **file-backed** SQLite connection at `path`, apply mandatory PRAGMAs, then run
 /// any pending migrations.
 ///
-/// This is the production path for per-agent_id databases (one file per agent).
-pub fn open(path: &str) -> Result<Connection, crate::SqliteStoreError> {
+/// # Visibility
+/// This function is intentionally `pub(crate)` (not part of the public API). It accepts
+/// an arbitrary path string with no per-agent enforcement, which allows two different
+/// `agent_id`s to accidentally share one file — the exact footgun `open_for_agent`
+/// (see `mempill-sqlite/src/lib.rs`) was introduced to close structurally. It remains
+/// available for internal test use and migration tooling only.
+pub(crate) fn open(path: &str) -> Result<Connection, crate::SqliteStoreError> {
     let conn = Connection::open(path)?;
     apply_pragmas(&conn)?;
     migrations::apply_migrations(&conn)?;
     Ok(conn)
+}
+
+/// Derive the per-agent database file path as `base_dir/agent_{agent_id}.db`.
+///
+/// Validates that `agent_id` is filesystem-safe so that two distinct `agent_id`s can
+/// never normalize to the same on-disk filename. An `agent_id` is accepted only if it is
+/// non-empty and contains solely ASCII alphanumeric characters, `-`, or `_` — this rules
+/// out path separators (`/`, `\`), `..` traversal, NUL bytes, and any character that a
+/// filesystem could collapse or reject, which is what would otherwise let two different
+/// `agent_id`s collide on one file.
+///
+/// # Errors
+/// Returns [`crate::SqliteStoreError::InvalidAgentId`] if `agent_id` is empty or contains
+/// any character outside `[A-Za-z0-9_-]`.
+pub(crate) fn derive_agent_db_path(
+    base_dir: &Path,
+    agent_id: &str,
+) -> Result<PathBuf, crate::SqliteStoreError> {
+    if agent_id.is_empty() {
+        return Err(crate::SqliteStoreError::InvalidAgentId(
+            "agent_id must not be empty".to_string(),
+        ));
+    }
+    if !agent_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(crate::SqliteStoreError::InvalidAgentId(format!(
+            "agent_id {agent_id:?} contains characters outside [A-Za-z0-9_-]; \
+             this restriction guarantees two distinct agent_ids can never normalize \
+             to the same database filename"
+        )));
+    }
+    Ok(base_dir.join(format!("agent_{agent_id}.db")))
+}
+
+/// Open the per-agent SQLite database under `base_dir` for `agent_id`.
+///
+/// This is the production entry point for per-agent_id databases (one file per agent),
+/// and the only public way to obtain a file-backed connection. The file path is derived
+/// automatically as `base_dir/agent_{agent_id}.db` — there is no way to point two
+/// different `agent_id`s at the same file through this API.
+///
+/// # Errors
+/// Returns [`crate::SqliteStoreError::InvalidAgentId`] if `agent_id` contains characters
+/// that could cause a filename collision (see [`derive_agent_db_path`]). Returns other
+/// [`crate::SqliteStoreError`] variants if the connection cannot be opened or migrations fail.
+pub fn open_for_agent(
+    base_dir: &Path,
+    agent_id: &str,
+) -> Result<Connection, crate::SqliteStoreError> {
+    let path = derive_agent_db_path(base_dir, agent_id)?;
+    // path is always valid UTF-8 derived input joined onto a caller-supplied base_dir;
+    // fall back to a lossy conversion only in the pathological case of a non-UTF8 base_dir.
+    let path_str = path.to_str().ok_or_else(|| {
+        crate::SqliteStoreError::InvalidAgentId(format!(
+            "derived database path {path:?} is not valid UTF-8"
+        ))
+    })?;
+    open(path_str)
 }
 
 /// Open an **in-memory** SQLite connection, apply mandatory PRAGMAs (except WAL — see
@@ -170,5 +252,92 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "claims table must exist after open_in_memory");
+    }
+
+    // ── open_for_agent / derive_agent_db_path ───────────────────────────────────
+
+    #[test]
+    fn open_for_agent_creates_one_file_per_agent_under_base_dir() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let conn = open_for_agent(dir.path(), "agent-a")
+            .expect("open_for_agent should succeed for a valid agent_id");
+        drop(conn);
+
+        let expected = dir.path().join("agent_agent-a.db");
+        assert!(
+            expected.exists(),
+            "expected per-agent db file at {expected:?}"
+        );
+
+        let _ = fs::remove_file(dir.path().join("agent_agent-a.db-wal"));
+        let _ = fs::remove_file(dir.path().join("agent_agent-a.db-shm"));
+    }
+
+    #[test]
+    fn open_for_agent_gives_two_different_agent_ids_two_different_files() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let conn_a = open_for_agent(dir.path(), "agent-a")
+            .expect("open_for_agent(agent-a) should succeed");
+        let conn_b = open_for_agent(dir.path(), "agent-b")
+            .expect("open_for_agent(agent-b) should succeed");
+        drop(conn_a);
+        drop(conn_b);
+
+        let path_a = dir.path().join("agent_agent-a.db");
+        let path_b = dir.path().join("agent_agent-b.db");
+        assert!(path_a.exists(), "agent-a file must exist");
+        assert!(path_b.exists(), "agent-b file must exist");
+        assert_ne!(path_a, path_b, "different agent_ids must map to different files");
+
+        for suffix in ["-wal", "-shm"] {
+            let _ = fs::remove_file(dir.path().join(format!("agent_agent-a.db{suffix}")));
+            let _ = fs::remove_file(dir.path().join(format!("agent_agent-b.db{suffix}")));
+        }
+    }
+
+    #[test]
+    fn derive_agent_db_path_rejects_empty_agent_id() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let err = derive_agent_db_path(dir.path(), "")
+            .expect_err("empty agent_id must be rejected");
+        assert!(matches!(err, crate::SqliteStoreError::InvalidAgentId(_)));
+    }
+
+    #[test]
+    fn derive_agent_db_path_rejects_path_separator_in_agent_id() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        // "../evil" and "a/b" must be rejected — both could otherwise let a
+        // maliciously or accidentally crafted agent_id escape base_dir or collide
+        // with another agent's file.
+        let err = derive_agent_db_path(dir.path(), "../evil")
+            .expect_err("agent_id with path separators must be rejected");
+        assert!(matches!(err, crate::SqliteStoreError::InvalidAgentId(_)));
+
+        let err = derive_agent_db_path(dir.path(), "a/b")
+            .expect_err("agent_id with a forward slash must be rejected");
+        assert!(matches!(err, crate::SqliteStoreError::InvalidAgentId(_)));
+    }
+
+    #[test]
+    fn derive_agent_db_path_two_agent_ids_that_would_collide_are_rejected_not_silently_merged() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        // Two agent_ids that would otherwise normalize to the same filename if slashes
+        // were allowed (e.g. "a/b" and "a-b" both naively suggesting "agent_a-b.db")
+        // must not silently collide: "a/b" is rejected outright by validation, so the
+        // only way to get "agent_a-b.db" is the single valid agent_id "a-b".
+        let rejected = derive_agent_db_path(dir.path(), "a/b");
+        assert!(rejected.is_err(), "path-unsafe agent_id must fail loudly");
+
+        let accepted = derive_agent_db_path(dir.path(), "a-b")
+            .expect("agent_id with only [A-Za-z0-9_-] must be accepted");
+        assert_eq!(accepted, dir.path().join("agent_a-b.db"));
+    }
+
+    #[test]
+    fn derive_agent_db_path_accepts_alphanumeric_dash_underscore() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let path = derive_agent_db_path(dir.path(), "Agent_123-test")
+            .expect("alphanumeric + dash + underscore agent_id must be accepted");
+        assert_eq!(path, dir.path().join("agent_Agent_123-test.db"));
     }
 }

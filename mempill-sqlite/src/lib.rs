@@ -6,8 +6,11 @@
 //!
 //! # Crate organisation
 //!
-//! - [`connection`] — connection lifecycle: open file or in-memory, apply mandatory
-//!   PRAGMAs (`journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`), run migrations.
+//! - [`connection`] — connection lifecycle: [`connection::open_for_agent`] (the public,
+//!   structurally-enforced per-agent-file entry point) or `open_in_memory`, apply
+//!   mandatory PRAGMAs (`journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`), run
+//!   migrations. The raw path-based `connection::open` is `pub(crate)` only — not part
+//!   of the public API — to prevent two `agent_id`s from ever sharing one file.
 //! - [`migrations`] — deterministic, idempotent schema migration runner; embeds DDL via
 //!   `include_str!`.
 //! - [`txn`] — `SqliteTxn`: the concrete `Txn` handle scoped to one `agent_id`.
@@ -60,6 +63,13 @@ pub enum SqliteStoreError {
     /// `begin_atomic` called while a transaction is already active on this store instance.
     #[error("a transaction is already open on this store; commit or rollback before beginning a new one")]
     TxnAlreadyOpen,
+
+    /// `agent_id` supplied to `open_for_agent` (or `open_default_for_agent` /
+    /// `open_with_oracle_for_agent`) is empty or contains characters outside
+    /// `[A-Za-z0-9_-]`. Rejecting these characters guarantees two distinct `agent_id`s
+    /// can never normalize to the same on-disk database filename.
+    #[error("invalid agent_id: {0}")]
+    InvalidAgentId(String),
 }
 
 // Compile-time assertion: SqliteStoreError must be Send + Sync to satisfy
@@ -98,21 +108,25 @@ pub type OracleEngine<O> = mempill_core::EngineHandle<
 
 // ── open_with_oracle constructors ─────────────────────────────────────────────
 
-/// Open a **file-backed** SQLite engine wired with a real oracle.
+/// Open a **file-backed**, per-agent SQLite engine wired with a real oracle.
 ///
-/// The pending-adjudication store is constructed from the same SQLite connection,
-/// enabling full oracle resolution. `open_default` / `DefaultEngine` remain unchanged.
+/// The database file is derived automatically as `base_dir/agent_{agent_id}.db` — see
+/// [`connection::open_for_agent`]. The pending-adjudication store is constructed from the
+/// same SQLite connection, enabling full oracle resolution.
 ///
 /// # Errors
-/// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.
-pub fn open_with_oracle<O>(
-    path: &str,
+/// Returns [`SqliteStoreError::InvalidAgentId`] if `agent_id` contains characters that
+/// could cause a filename collision. Returns other `SqliteStoreError` variants if the
+/// connection cannot be opened or migrations fail.
+pub fn open_with_oracle_for_agent<O>(
+    base_dir: &std::path::Path,
+    agent_id: &str,
     oracle: std::sync::Arc<O>,
 ) -> Result<OracleEngine<O>, SqliteStoreError>
 where
     O: OraclePort + Send + Sync + 'static,
 {
-    let conn = connection::open(path)?;
+    let conn = connection::open_for_agent(base_dir, agent_id)?;
     let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
     let pending_store: std::sync::Arc<dyn mempill_core::ErasedPendingStore> =
         std::sync::Arc::new(mempill_core::ErasedPendingStoreAdapter::new(store.pending_store()));
@@ -127,7 +141,9 @@ where
 
 /// Open an **in-memory** SQLite engine wired with a real oracle.
 ///
-/// Useful for integration tests and ephemeral oracle-enabled contexts.
+/// Useful for integration tests and ephemeral oracle-enabled contexts. In-memory engines
+/// are always ephemeral and process-local, so there is no per-agent-file collision risk
+/// to enforce here — this constructor's signature is unchanged.
 ///
 /// # Errors
 /// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.
@@ -152,14 +168,24 @@ where
 
 // ── DefaultEngine constructors ────────────────────────────────────────────────
 
-/// Open a file-backed `DefaultEngine` at the given path.
+/// Open a file-backed, per-agent `DefaultEngine`.
+///
+/// The database file is derived automatically as `base_dir/agent_{agent_id}.db` — see
+/// [`connection::open_for_agent`]. This is the only public entry point for a file-backed
+/// `DefaultEngine`; there is no way to point two different `agent_id`s at the same file
+/// through this API.
 ///
 /// The connection is fully initialised (PRAGMAs + migrations) before the handle is returned.
 ///
 /// # Errors
-/// Returns `SqliteStoreError` if the connection cannot be opened or migrations fail.
-pub fn open_default(path: &str) -> Result<DefaultEngine, SqliteStoreError> {
-    let conn = connection::open(path)?;
+/// Returns [`SqliteStoreError::InvalidAgentId`] if `agent_id` contains characters that
+/// could cause a filename collision. Returns other `SqliteStoreError` variants if the
+/// connection cannot be opened or migrations fail.
+pub fn open_default_for_agent(
+    base_dir: &std::path::Path,
+    agent_id: &str,
+) -> Result<DefaultEngine, SqliteStoreError> {
+    let conn = connection::open_for_agent(base_dir, agent_id)?;
     let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
     Ok(mempill_core::EngineHandle::new(
         store,
@@ -262,4 +288,40 @@ mod tests {
         let engine = open_default_in_memory().unwrap();
         assert_is_default_engine(&engine);
     }
+
+    /// `open_default_for_agent` derives one file per agent under `base_dir` and two
+    /// distinct agent_ids never collide on the same file.
+    #[test]
+    fn open_default_for_agent_creates_per_agent_file() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let _engine_a = open_default_for_agent(dir.path(), "agent-a")
+            .expect("open_default_for_agent(agent-a) must succeed");
+        let _engine_b = open_default_for_agent(dir.path(), "agent-b")
+            .expect("open_default_for_agent(agent-b) must succeed");
+
+        assert!(dir.path().join("agent_agent-a.db").exists());
+        assert!(dir.path().join("agent_agent-b.db").exists());
+    }
+
+    /// Path-unsafe agent_id must fail loudly through the public `open_default_for_agent`
+    /// entry point too, not just at the lower-level `connection::derive_agent_db_path`.
+    #[test]
+    fn open_default_for_agent_rejects_path_unsafe_agent_id() {
+        // DefaultEngine does not implement Debug, so `expect_err` (which requires the Ok
+        // side to be Debug) cannot be used here — match on the Result explicitly instead.
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        match open_default_for_agent(dir.path(), "../escape") {
+            Ok(_) => panic!("path-unsafe agent_id must be rejected"),
+            Err(err) => assert!(matches!(err, SqliteStoreError::InvalidAgentId(_))),
+        }
+    }
 }
+
+// ── Compile-fail note: `connection::open` is not part of the public API ──────
+//
+// `mempill_sqlite::connection::open` is `pub(crate)` (see `connection.rs`). Any external
+// crate attempting `mempill_sqlite::connection::open("x.db")` fails to compile with
+// "function `open` is private". This is intentionally verified by the crate's visibility
+// modifier rather than a `trybuild`/compile-fail test harness — adding one here would
+// require a new dev-dependency for a property already guaranteed by the Rust visibility
+// system and checked on every `cargo build` of any external caller.

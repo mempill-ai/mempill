@@ -1,8 +1,8 @@
 //! End-to-end tests for the W7a public oracle constructors.
 //!
-//! Tests that `open_with_oracle` and `open_with_oracle_in_memory` produce a fully wired
-//! `EngineHandle` that can run the complete oracle resolution loop through the new public
-//! API surface (no direct `EngineHandle::new_with_pending_store` calls).
+//! Tests that `open_with_oracle_for_agent` and `open_with_oracle_in_memory` produce a
+//! fully wired `EngineHandle` that can run the complete oracle resolution loop through the
+//! new public API surface (no direct `EngineHandle::new_with_pending_store` calls).
 //!
 //! These are the FIRST tests to exercise the oracle via the public constructor API.
 
@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use mempill_core::ports::OraclePort;
 use mempill_core::application::{IngestClaimRequest, QueryMemoryRequest};
-use mempill_sqlite::{open_with_oracle, open_with_oracle_in_memory};
+use mempill_sqlite::{open_with_oracle_for_agent, open_with_oracle_in_memory};
 use mempill_types::{
     AgentId, AdjudicationResponse, AdjudicationVerdict, BeliefStatus, Cardinality,
     Confidence, Criticality, Disposition, ExternalKind, ProvenanceLabel,
@@ -134,21 +134,20 @@ async fn e2e_open_with_oracle_in_memory_affirm_resolution() {
         "AFTER Affirm: challenger 'Paris' must be the surfaced belief; got {primary_val:?}");
 }
 
-// ── Test 2: open_with_oracle (file-backed) smoke test ────────────────────────
+// ── Test 2: open_with_oracle_for_agent (file-backed) smoke test ──────────────
 
-/// Smoke test for the file-backed `open_with_oracle` constructor.
-/// Opens a temp file, ingests one claim, verifies the engine works end-to-end.
+/// Smoke test for the file-backed `open_with_oracle_for_agent` constructor.
+/// Opens a per-agent db under a temp dir, ingests one claim, verifies the engine
+/// works end-to-end.
 #[tokio::test]
 async fn e2e_open_with_oracle_file_backed_smoke() {
     let dir = tempfile::tempdir().expect("tempdir must succeed");
-    let path = dir.path().join("smoke.db");
-    let path_str = path.to_str().unwrap();
 
     let handle_id = uuid::Uuid::new_v4();
     let oracle = Arc::new(TestOracle { fixed_uuid: handle_id });
 
-    let engine = open_with_oracle(path_str, oracle)
-        .expect("open_with_oracle (file-backed) must succeed");
+    let engine = open_with_oracle_for_agent(dir.path(), "w7a-file-smoke-agent", oracle)
+        .expect("open_with_oracle_for_agent (file-backed) must succeed");
 
     let agent = AgentId("w7a-file-smoke-agent".into());
 

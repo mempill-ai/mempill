@@ -146,7 +146,8 @@ fn oracle_runtime() -> &'static tokio::runtime::Runtime {
 
 /// Sync Python handle to a mempill OracleEngine (SQLite, Python oracle, no vector).
 ///
-/// Obtain via `open_with_oracle(path, oracle)` or `open_with_oracle_in_memory(oracle)`.
+/// Obtain via `open_with_oracle_for_agent(base_dir, agent_id, oracle)` or
+/// `open_with_oracle_in_memory(oracle)`.
 /// The `oracle` argument is any Python object with a `request_adjudication` method
 /// matching the duck-typed protocol documented in this module.
 ///
@@ -405,7 +406,10 @@ impl PyOracleEngine {
 
 // ── Module-level constructors ─────────────────────────────────────────────────
 
-/// Open a file-backed mempill engine wired to a Python oracle.
+/// Open a file-backed, per-agent mempill engine wired to a Python oracle.
+///
+/// The database file is derived automatically as `base_dir/agent_{agent_id}.db` — there
+/// is no way to point two different `agent_id`s at the same file through this API.
 ///
 /// The `oracle` argument must be any Python object with a method:
 /// ```python
@@ -414,13 +418,20 @@ impl PyOracleEngine {
 /// The returned string must be a UUID that your oracle stores so it can later
 /// call `engine.submit_adjudication({"handle_id": ..., "verdict": ..., ...})`.
 ///
-/// Raises `StorageError` if the database cannot be opened or migrations fail.
+/// Raises `StorageError` if `agent_id` contains characters that could cause a filename
+/// collision, if the database cannot be opened, or if migrations fail.
 #[pyo3::pyfunction]
-#[pyo3(signature = (path, oracle))]
-pub fn open_with_oracle(py: Python<'_>, path: &str, oracle: Py<PyAny>) -> PyResult<PyOracleEngine> {
+#[pyo3(signature = (base_dir, agent_id, oracle))]
+pub fn open_with_oracle_for_agent(
+    py: Python<'_>,
+    base_dir: &str,
+    agent_id: &str,
+    oracle: Py<PyAny>,
+) -> PyResult<PyOracleEngine> {
     let bridge = Arc::new(PyOracleBridge::new(oracle));
+    let base_dir_path = std::path::Path::new(base_dir).to_owned();
     let engine = py
-        .detach(|| mempill_sqlite::open_with_oracle(path, bridge))
+        .detach(|| mempill_sqlite::open_with_oracle_for_agent(&base_dir_path, agent_id, bridge))
         .map_err(|e| StorageError::new_err(e.to_string()))?;
     Ok(PyOracleEngine { engine })
 }

@@ -40,7 +40,8 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 
 /// Sync Python handle to a mempill DefaultEngine (SQLite, no oracle, no vector).
 ///
-/// Obtain via `open_default(path)` or `open_in_memory()`. Thread-safe (Arc-backed).
+/// Obtain via `open_default_for_agent(base_dir, agent_id)` or `open_in_memory()`.
+/// Thread-safe (Arc-backed).
 #[pyclass(name = "PyEngine")]
 pub struct PyEngine {
     engine: DefaultEngine,
@@ -161,13 +162,17 @@ impl PyEngine {
 
 // ── Module-level constructors ─────────────────────────────────────────────────
 
-/// Open a file-backed mempill engine at `path`.
+/// Open a file-backed, per-agent mempill engine under `base_dir`.
 ///
-/// Raises `StorageError` if the database cannot be opened or migrations fail.
+/// The database file is derived automatically as `base_dir/agent_{agent_id}.db` — there
+/// is no way to point two different `agent_id`s at the same file through this API.
+///
+/// Raises `StorageError` if `agent_id` contains characters that could cause a filename
+/// collision, if the database cannot be opened, or if migrations fail.
 #[pyfunction]
-#[pyo3(signature = (path))]
-pub fn open_default(path: &str) -> PyResult<PyEngine> {
-    mempill_sqlite::open_default(path)
+#[pyo3(signature = (base_dir, agent_id))]
+pub fn open_default_for_agent(base_dir: &str, agent_id: &str) -> PyResult<PyEngine> {
+    mempill_sqlite::open_default_for_agent(std::path::Path::new(base_dir), agent_id)
         .map(|engine| PyEngine { engine })
         .map_err(|e| StorageError::new_err(e.to_string()))
 }

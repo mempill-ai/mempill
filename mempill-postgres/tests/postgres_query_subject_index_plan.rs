@@ -23,10 +23,12 @@ fn explain_json(conn_str: &str, sql: &str) -> String {
     let rows = client
         .query(&format!("EXPLAIN (FORMAT JSON) {sql}"), &[])
         .expect("EXPLAIN must succeed");
-    // EXPLAIN (FORMAT JSON) returns a single row with a single TEXT column.
+    // EXPLAIN (FORMAT JSON) returns a single row with a single JSON column
+    // (not TEXT), so it must be decoded via serde_json::Value.
     rows.first()
         .expect("EXPLAIN must return at least one row")
-        .get::<_, String>(0)
+        .get::<_, serde_json::Value>(0)
+        .to_string()
 }
 
 /// Assert EXPLAIN plan does not contain "Seq Scan" and uses an Index scan.
