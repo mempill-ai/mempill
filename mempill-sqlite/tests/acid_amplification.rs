@@ -1,4 +1,4 @@
-//! ACID test — mem0 #4573: write-path amplification defence (I6, C6, §7).
+//! ACID test — write-path amplification defence (I6, C6, §7): the 808-turn recall re-ingestion case.
 //!
 //! 808 re-ingestions of the same RecallReEntry content MUST collapse to EXACTLY ONE
 //! underlying claim row in the database. The amplification guard (firewall.rs C6)
@@ -38,7 +38,7 @@ const AMPLIFICATION_COUNT: usize = 808;
 
 /// Acid test: 808 RecallReEntry re-ingestions of the same content → exactly ONE claim row.
 ///
-/// This is the exact canonical count from the mem0 #4573 issue description.
+/// This is the exact count from the widely-reported real-world incident that motivated this defence (an agent re-ingesting its own recalled memory 808 times).
 /// The firewall MUST collapse all 808 into a single CorroborateByIdentity result.
 /// Asserted count: EXACTLY 1 (not 808, not 2).
 #[tokio::test]
@@ -152,7 +152,7 @@ async fn acid_amplification_808_recall_reentries_collapse_to_one_claim() {
     // All 808 re-ingestions must have been corroborated by identity (no new rows).
     assert_eq!(
         corroborate_count, AMPLIFICATION_COUNT,
-        "ACID I6 mem0 #4573: all {AMPLIFICATION_COUNT} RecallReEntry re-ingestions must return the EXISTING \
+        "ACID I6 amplification: all {AMPLIFICATION_COUNT} RecallReEntry re-ingestions must return the EXISTING \
          claim_ref (CorroborateByIdentity). Unexpected new refs: {unexpected_new_refs}"
     );
     assert_eq!(
