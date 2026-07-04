@@ -31,6 +31,8 @@ impl<P, O, V> EngineHandle<P, O, V> {
     pub fn new(persistence: Arc<P>, oracle: Option<Arc<O>>, vector: Option<Arc<V>>, config: EngineConfig) -> Self;
     pub async fn ingest_claim(&self, req: IngestClaimRequest) -> Result<IngestClaimResponse, MemError>;
     pub async fn query_memory(&self, req: QueryMemoryRequest) -> Result<QueryMemoryResponse, MemError>;
+    pub async fn query_subject(&self, req: QuerySubjectRequest) -> Result<QuerySubjectResponse, MemError>;
+    pub async fn query_history(&self, req: QueryHistoryRequest) -> Result<QueryHistoryResponse, MemError>;
     pub async fn reconcile(&self, req: ReconcileRequest) -> Result<ReconcileResponse, MemError>;
     pub async fn query_audit(&self, req: AuditQueryRequest) -> Result<AuditQueryResponse, MemError>;
 }
