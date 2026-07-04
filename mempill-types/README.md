@@ -11,14 +11,14 @@ Tokio or any persistence layer — only `chrono`, `serde`, `serde_json`, and `uu
 |---|---|
 | `provenance` | `ProvenanceLabel` (3-channel enum), `ExternalKind`, `ExternalAnchor` |
 | `disposition` | `Disposition` (12-state enum), `WriteOutcome` |
-| `claim` | `Claim`, `Cardinality`, `Confidence`, `Criticality` |
-| `validity` | `ValidTime`, `ValidityAssertion` |
-| `identity` | `ClaimRef` (UUID newtype), `AgentId` (String newtype) |
-| `belief` | `BeliefProjection`, `BeliefStatus`, `ProjectedFact` |
-| `ledger` | `LedgerEntry` |
+| `claim` | `Claim`, `Fact`, `Cardinality`, `Confidence`, `Criticality` |
+| `validity` | `ValidityAssertion`, `AssertionKind` |
+| `identity` | `ClaimRef` (UUID newtype), `AgentId` (String newtype), `SubjectLineRef` |
+| `belief` | `BeliefProjection`, `BeliefStatus`, `Belief` |
+| `ledger` | `LedgerEntry`, `LedgerEventKind` |
 | `edge` | `ClaimEdge`, `EdgeKind` |
-| `proposal` | `Proposal` (returned by oracle/extractor ports; never commits directly) |
-| `time` | Time helpers |
+| `proposal` | `ClaimProposal`, `AdjudicationRequest`/`Response`/`Outcome` (returned by oracle/extractor ports; never commits directly) |
+| `time` | `ValidTime`, `DateGranularity`, `TransactionTime` |
 
 ## License
 

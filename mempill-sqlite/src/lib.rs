@@ -99,7 +99,7 @@ pub type DefaultEngine = mempill_core::EngineHandle<
 
 /// An `EngineHandle` backed by SQLite persistence, a caller-supplied oracle, and no vector.
 ///
-/// Use `open_with_oracle` or `open_with_oracle_in_memory` to obtain one.
+/// Use `open_with_oracle_for_agent` or `open_with_oracle_in_memory` to obtain one.
 pub type OracleEngine<O> = mempill_core::EngineHandle<
     SqlitePersistenceStore,
     O,

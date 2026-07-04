@@ -70,9 +70,11 @@ for entry in h:
 ### File-backed engine
 
 ```python
-from mempill import open, remember, recall
+from mempill import open_for_agent, remember, recall
 
-engine = open("/path/to/agent.db")   # SQLite, persists across restarts
+# The database file is derived automatically as base_dir/agent_{agent_id}.db —
+# there is no way to point two different agent_ids at the same file through this API.
+engine = open_for_agent("/data", "my-agent")   # SQLite, persists across restarts
 remember(engine, "my-agent", "user", "city", "Berlin")
 ```
 

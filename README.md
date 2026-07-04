@@ -10,7 +10,7 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.4.0** · Apache-2.0 · MSRV 1.88 · 501 Rust + 155 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
+**0.4.0 (Unreleased)** · Latest published release: **0.3.0** · Apache-2.0 · MSRV 1.88 · 528 Rust (+3 ignored) + 159 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate + per-endpoint date granularity + configurable Postgres pool + as-of correctness benchmark.
 
 > **Breaking change in 0.4.0:** SQLite entry points are now per-agent.
@@ -86,7 +86,7 @@ for full per-version detail.
 | MCP adapter (`mempill-mcp`) | FastMCP, 4 tools, stdio transport |
 | `mempill` facade crate | `cargo add mempill`; thin re-export of core + adapters behind `sqlite`/`postgres` features |
 | Bi-temporal history read (`query_history` / `history()`) | Full claim timeline of a subject line — values, effective valid-time windows, `Current`/`Superseded` status |
-| Published to crates.io / PyPI | `cargo add mempill` (crates.io) · `pip install mempill` (PyPI) |
+| Published to crates.io | `cargo add mempill` (crates.io) — PyPI history starts at 0.2.1 |
 
 ### 0.3.0
 
@@ -96,7 +96,7 @@ for full per-version detail.
 | Date precision / granularity | Per-endpoint `DateGranularity` (Year / Month / Day / Instant) on `ValidTime.start` and `ValidTime.end` independently. Honest display: Month→"2020-03", Year→"2020", Day→"2020-03-15"; no fabricated precision. Ergonomic `remember()` infers granularity from the supplied date string; structured ingest (raw `IngestClaimRequest`, Python dict, MCP) requires explicit granularity. Legacy rows (pre-feature) have `None` granularity and display as YYYY-MM-DD. Cross-adapter conformance included |
 | Subject-scoped enumeration (`query_subject`) | Resolved belief for every predicate known about a subject, in one call |
 
-### 0.4.0 (current)
+### 0.4.0 (Unreleased — git main; latest published release is 0.3.0)
 
 | Feature | Notes |
 |---|---|
@@ -126,9 +126,10 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 
 ## Production readiness & scope
 
-mempill 0.4.0 is designed for **embedded and early-stage** use (bi-temporal fold, ACID writes,
-cross-adapter conformance, append-only integrity — 501 Rust + 155 Python + 19 MCP tests on main).
-Read this before deploying it at scale.
+mempill (0.4.0 on git main, unreleased; 0.3.0 latest published) is designed for **embedded
+and early-stage** use (bi-temporal fold, ACID writes, cross-adapter conformance, append-only
+integrity — 528 Rust (+3 ignored) + 159 Python + 19 MCP tests on main). Read this before
+deploying it at scale.
 
 **Safe today for:**
 
@@ -143,18 +144,18 @@ Read this before deploying it at scale.
   a subject-line on every read (it is never stored — that is the correctness model).
   There is no snapshot/compaction yet, so a long-lived, high-churn subject-line gets
   slower over time. Comfortable at hundreds of claims per subject-line; not yet tuned
-  for tens of thousands. *(v0.3: snapshotting.)*
+  for tens of thousands. *(Planned: snapshotting/compaction — see roadmap.)*
 - **SQLite serializes writes globally.** All agents' writes go through a single writer
   lock, and reads error while a write transaction is open on that agent's file. Use the
   **PostgreSQL** adapter for write concurrency across agents.
 - **PostgreSQL is `NoTls` only** — do not expose the connection over an untrusted
-  network. *(0.5.0: TLS.)* The connection pool size and connection timeout are
-  configurable as of 0.4.0 via `PoolConfig` / `with_pool_config()` (default
-  unchanged: 20 connections, 5s timeout).
+  network. *(Planned: TLS, 0.5.0 or later — see roadmap.)* The connection pool size
+  and connection timeout are configurable as of 0.4.0 via `PoolConfig` /
+  `with_pool_config()` (default unchanged: 20 connections, 5s timeout).
 - **No built-in observability** — there is no `tracing`/metrics instrumentation yet, so
   latency, error rates, and contention are not visible to an operator out of the box.
-  *(v0.3.)*
-- **No published load/stress benchmarks** — all 501 Rust + 155 Python + 19 MCP tests are correctness tests;
+  *(Planned; see roadmap.)*
+- **No published load/stress benchmarks** — all 528 Rust + 159 Python + 19 MCP tests are correctness tests;
   performance at large scale is not yet characterized.
 
 **Not recommended yet for:** public-facing multi-tenant services, high-frequency
@@ -162,7 +163,8 @@ automated write pipelines, networked PostgreSQL with real credentials (until TLS
 very high agent cardinality (the per-agent advisory lock uses a 32-bit hash).
 
 If your use case is outside the safe envelope, the core algorithm is implemented and tested;
-the gaps above are operational, not algorithmic. Treat 0.4.0 as an early release and pin a specific version.
+the gaps above are operational, not algorithmic. Treat mempill as an early release and pin a
+specific version.
 
 ---
 
@@ -212,6 +214,11 @@ The host supplies concrete implementations; the engine embeds none.
 
 ## Install
 
+> **Publish status:** the latest published release is **0.3.0** (crates.io + PyPI).
+> `main` is **0.4.0, unreleased** — the commands below install what is on the registries
+> *today* (0.3.0). See [MCP adapter](#mcp-adapter) below for the currently-required
+> local-build workaround if you need 0.4.0's `open_for_agent` API before it publishes.
+
 ### Rust
 
 ```sh
@@ -223,30 +230,39 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-mempill = "0.4"                            # SQLite (default) — currently published version
-# mempill = { version = "0.4", features = ["postgres"] }
+mempill = "0.3"                            # SQLite (default) — currently published version
+# mempill = { version = "0.3", features = ["postgres"] }
 ```
 
 Power users can depend on individual crates directly from crates.io by version:
-`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.4"`.
+`mempill-core`, `mempill-sqlite`, `mempill-postgres` are all published at `"0.3"`.
+(`main` is unreleased 0.4.0 — pins above will move to `"0.4"` when it publishes.)
 
 ### Python wheel
 
 ```sh
-pip install mempill           # Python ≥ 3.11; prebuilt wheel from PyPI
+pip install mempill           # Python ≥ 3.11; prebuilt wheel from PyPI — currently 0.3.0
 ```
 
 Contributors building from source: `cd mempill-python && maturin develop --release`
+(builds the unreleased 0.4.0 code on `main`, including `open_for_agent`).
 
 ### MCP adapter
 
-`mempill-mcp` is not on PyPI — install from source:
+`mempill-mcp` is not on PyPI — install from source. **Note:** `mempill-mcp` on `main`
+requires `mempill >= 0.4.0` (it calls `open_for_agent`), which is not yet published.
+Until 0.4.0 publishes, build the Python wheel from source first:
 
 ```sh
-# Install the Python wheel first: pip install mempill
+# 1. Build and install the unreleased 0.4.0 mempill wheel from source:
+cd mempill-python && maturin develop --release && cd ..
+
+# 2. Then install mempill-mcp from source:
 cd mempill-mcp
 pip install .
 ```
+
+Once 0.4.0 is published, plain `pip install mempill` (step 1) will be sufficient again.
 
 Run the MCP server:
 
@@ -475,7 +491,7 @@ testcontainers, so they require Docker and are gated behind the **`postgres-inte
 cargo feature (sqlx-style):
 
 ```sh
-cargo test -p mempill-postgres --features postgres-integration       # the 69 PG tests
+cargo test -p mempill-postgres --features postgres-integration       # the 86 PG tests
 cargo test --workspace --features mempill-postgres/postgres-integration   # full verification (everything)
 ```
 
