@@ -9,7 +9,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
-    "mempill>=0.2,<1",
+    "mempill>=0.4.0,<0.5",
     "mcp>=1.9,<2",
 ]
 

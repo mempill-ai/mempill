@@ -37,7 +37,7 @@ impl<P, O, V> EngineHandle<P, O, V> {
 ```
 
 Adapter crates (`mempill-sqlite`, `mempill-postgres`) provide concrete `PersistencePort`
-implementations and expose convenience constructors (`open_default`, `open_postgres`).
+implementations and expose convenience constructors (`open_default_for_agent`, `open_postgres`).
 `mempill-core` has no dependency on either adapter — the dependency direction is one-way.
 
 ## Feature flags

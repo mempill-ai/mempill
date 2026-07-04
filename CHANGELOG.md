@@ -4,7 +4,10 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.4.0]
+Version headings are dated at publish time. A version with no date and the
+`— Unreleased` suffix is on `main` but has not yet been published to crates.io/PyPI.
+
+## [0.4.0] — Unreleased
 
 ### Changed (Breaking)
 

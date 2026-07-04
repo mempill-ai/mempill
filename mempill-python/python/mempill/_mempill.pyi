@@ -178,6 +178,165 @@ class PyEngine:
         """
         ...
 
+    def query_history(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Query the full history timeline for a (subject, predicate) subject-line.
+
+        Args:
+            request: dict with: agent_id, subject, predicate.
+
+        Returns:
+            dict with:
+                - entries (list[dict]): all claims ordered oldest -> newest, each tagged
+                  with status ("Current" or "Superseded"), value, valid_from, valid_until,
+                  provenance, value_confidence, and claim_ref.
+
+        Raises:
+            ValidationError: bad request
+            StorageError: persistence layer failure
+        """
+        ...
+
+    def query_subject(self, request: dict[str, Any]) -> list[dict[str, Any]]:
+        """Query all resolved beliefs for every predicate stored under a subject.
+
+        Args:
+            request: dict with:
+                - agent_id (str)
+                - subject (str)
+                - valid_at (str | None): optional ISO-8601 string (valid-time axis)
+                - as_of_tx_time (str | None): optional ISO-8601 string (tx-time axis)
+
+        Returns:
+            list[dict]: one dict per distinct predicate, each with predicate, value
+            (str | None), status, valid_from_display (str | None),
+            valid_until_display (str | None), provenance, claim_ref (str | None),
+            conf (float | None). Sorted by predicate (alphabetical).
+
+        Raises:
+            ValidationError: bad request
+            StorageError: persistence layer failure
+        """
+        ...
+
+# ── PyOracleEngine ────────────────────────────────────────────────────────────
+
+@final
+class PyOracleEngine:
+    """Sync Python handle to a mempill OracleEngine (SQLite, Python oracle, no vector).
+
+    Obtain via ``open_with_oracle_for_agent(base_dir, agent_id, oracle)`` or
+    ``open_with_oracle_in_memory(oracle)``. The ``oracle`` argument is any Python
+    object with a ``request_adjudication(self, agent_id: str, request: dict) -> str``
+    method matching the duck-typed protocol.
+    """
+
+    def ingest_claim(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Ingest a claim into memory.
+
+        Behaves identically to ``PyEngine.ingest_claim``. When the claim conflicts
+        with an incumbent, the engine calls the Python oracle's
+        ``request_adjudication`` and records a ``QueuedForAdjudication`` disposition.
+
+        Returns a dict with ``claim_ref``, ``disposition``, and ``contested_with``.
+        """
+        ...
+
+    def query_memory(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Query the current belief for a (subject, predicate) pair.
+
+        Returns a dict with ``belief``. Each belief slot includes
+        ``valid_from_display``, ``valid_until_display``,
+        ``valid_time.start_granularity``, and ``valid_time.end_granularity``
+        (see ``PyEngine.query_memory`` for details).
+        """
+        ...
+
+    def reconcile(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Reconcile one or more subject lines for an agent.
+
+        Returns a dict with ``outcomes`` and ``oracle_escalations``.
+        """
+        ...
+
+    def query_history(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Query the full history timeline for a (subject, predicate) subject-line.
+
+        Args:
+            request: dict with: agent_id, subject, predicate.
+
+        Returns:
+            dict with ``entries`` — all claims ordered oldest -> newest, each tagged
+            with status ("Current" or "Superseded"), value, valid_from, valid_until,
+            provenance, value_confidence, and claim_ref.
+        """
+        ...
+
+    def query_audit(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Query the audit ledger for an agent.
+
+        Returns a dict with ``entries``.
+        """
+        ...
+
+    def submit_adjudication(self, response_dict: dict[str, Any]) -> dict[str, Any]:
+        """Submit an adjudication verdict back into the engine.
+
+        Args:
+            response_dict: dict matching the AdjudicationResponse shape:
+                {"handle_id": "<uuid string>", "verdict": "Affirm" | "Deny" | "Unknown",
+                 "evidence_provenance": {...}}
+
+        Returns:
+            dict: {"handle_id": "<uuid>", "disposition": "<Disposition>", "claim_ref": "<uuid>"}
+
+        Raises:
+            NotFoundError: if the handle is unknown, already resolved, or expired.
+            StorageError: if a persistence error occurs.
+        """
+        ...
+
+    def query_subject(self, request: dict[str, Any]) -> list[dict[str, Any]]:
+        """Query all resolved beliefs for every predicate stored under a subject.
+
+        Args:
+            request: dict with: agent_id, subject, valid_at (optional ISO-8601),
+                as_of_tx_time (optional ISO-8601).
+
+        Returns:
+            list[dict]: one per distinct predicate, sorted by predicate.
+        """
+        ...
+
+    def sweep_expired_adjudications(self) -> int:
+        """Sweep all expired pending-adjudication rows.
+
+        Call periodically to revert ``QueuedForAdjudication`` claims whose TTL has
+        elapsed without a verdict being submitted. Each swept claim transitions to
+        ``Contested``.
+
+        Returns:
+            int: the number of claims reverted.
+        """
+        ...
+
+    def list_pending_adjudications(
+        self, agent_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List all pending-adjudication rows awaiting human resolution.
+
+        Args:
+            agent_id: when ``None`` (the default), rows for ALL agents are returned.
+
+        Returns:
+            list[dict]: each dict has keys handle_id, agent_id, subject, predicate,
+            incumbent_value, challenger_value, queued_at, expires_at, status,
+            request_payload. Ordered by queued_at ASC (oldest first).
+
+        Raises:
+            StorageError: if a persistence error occurs.
+        """
+        ...
+
 # ── Module-level constructors ─────────────────────────────────────────────────
 
 def open_default_for_agent(base_dir: str, agent_id: str) -> PyEngine:
@@ -199,10 +358,42 @@ def open_in_memory() -> PyEngine:
     """
     ...
 
+def open_with_oracle_for_agent(
+    base_dir: str, agent_id: str, oracle: object
+) -> PyOracleEngine:
+    """Open a file-backed, per-agent mempill engine wired to a Python oracle.
+
+    The database file is derived automatically as ``base_dir/agent_{agent_id}.db``.
+
+    The ``oracle`` argument must be any Python object with:
+
+        def request_adjudication(self, agent_id: str, request: dict) -> str: ...
+
+    Raises:
+        StorageError: if ``agent_id`` contains characters that could cause a filename
+            collision, if the database cannot be opened, or if migrations fail.
+    """
+    ...
+
+def open_with_oracle_in_memory(oracle: object) -> PyOracleEngine:
+    """Open an ephemeral in-memory mempill engine wired to a Python oracle.
+
+    The ``oracle`` argument must be any Python object with:
+
+        def request_adjudication(self, agent_id: str, request: dict) -> str: ...
+
+    Raises:
+        StorageError: if initialisation fails.
+    """
+    ...
+
 __all__ = [
     "PyEngine",
+    "PyOracleEngine",
     "open_default_for_agent",
     "open_in_memory",
+    "open_with_oracle_for_agent",
+    "open_with_oracle_in_memory",
     "MempillError",
     "ValidationError",
     "NotFoundError",
