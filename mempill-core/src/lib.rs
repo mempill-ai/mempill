@@ -10,7 +10,7 @@
 //!   - [`ports::OraclePort`]      — Pull-based, non-blocking adjudication port.
 //!   - [`ports::ExtractorPort`]   — Stochastic proposer port (returns proposals, never commits).
 //!   - [`ports::EmbeddingPort`]   — BYO-embedding port for fuzzy candidate coverage.
-//!   - [`ports::VectorPort`]      — v0.1 compile-time seam (unimplemented; v0.2 sqlite-vec).
+//!   - [`ports::VectorPort`]      — compile-time seam (unimplemented; vector search is planned — see roadmap).
 //! - `config`  — [`EngineConfig`] struct with all tunable engine parameters.
 //! - `error`   — [`MemError`] enum (thiserror), [`WriteResult`], [`BeliefResult`] aliases.
 //! - `noop`    — [`noop::NoOpOracle`], [`noop::NoOpVector`] — do-nothing stubs for tests.

@@ -10,8 +10,8 @@
 //!
 //! ## TLS
 //!
-//! v0.3 uses `NoTls` (suitable for local Docker / CI environments).
-//! // v0.3.1: add TlsMode param to accept a `native_tls::TlsConnector` for cloud Postgres (RDS, Neon, Supabase).
+//! Currently uses `NoTls` (suitable for local Docker / CI environments).
+//! // Planned: add TlsMode param to accept a `native_tls::TlsConnector` for cloud Postgres (RDS, Neon, Supabase). See roadmap.
 //!
 //! ## Pool settings
 //!
