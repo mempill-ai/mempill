@@ -451,23 +451,40 @@ class HistoryEntry:
     """One slot in the history timeline for a subject-line.
 
     Attributes:
-        claim_ref:        UUID string identifying the underlying claim.
-        value:            The asserted value for this claim.
-        valid_from:       RFC3339 start of the valid-time window, or None if unknown.
-        valid_until:      Effective end of the slot (successor's ordering key), or
-                          None for the open-ended current slot.
-        status:           "Current" or "Superseded".
-        provenance:       Human-readable label, e.g. "External/UserAsserted".
-        value_confidence: Confidence in the claim's value (0.0–1.0).
+        claim_ref:                 UUID string identifying the underlying claim.
+        value:                     The asserted value for this claim.
+        valid_from:                RFC3339 start of the valid-time window, or None if unknown.
+        valid_until:               Effective end of the slot (successor's ordering key), or
+                                   None for the open-ended current slot.
+        status:                    "Current" or "Superseded".
+        provenance:                Human-readable label, e.g. "External/UserAsserted".
+        value_confidence:          Confidence in the claim's value (0.0–1.0).
+        valid_from_display:        `valid_from` pre-rendered at its recorded precision
+                                   (e.g. "2020-03" for Month, "2020" for Year). Identical
+                                   rendering to recall()/BeliefDetail-level display. None
+                                   when the start endpoint is unknown.
+        valid_until_display:       `valid_until` pre-rendered at its recorded precision.
+                                   DERIVED endpoint — rendered from the SUCCESSOR claim's
+                                   start_granularity (the honest source of the bound), not
+                                   this entry's own end_granularity. None when open-ended
+                                   or unknown.
+        valid_from_granularity:    Raw granularity string ("year"|"month"|"day"|"instant")
+                                   for `valid_from`, or None (absent/legacy row).
+        valid_until_granularity:   Raw granularity string for `valid_until`. Same
+                                   derived-endpoint semantics as valid_until_display.
     """
 
-    claim_ref:        str
-    value:            Any
-    valid_from:       Optional[str]
-    valid_until:      Optional[str]
-    status:           str
-    provenance:       str
-    value_confidence: float
+    claim_ref:               str
+    value:                   Any
+    valid_from:              Optional[str]
+    valid_until:             Optional[str]
+    status:                  str
+    provenance:               str
+    value_confidence:        float
+    valid_from_display:      Optional[str] = None
+    valid_until_display:     Optional[str] = None
+    valid_from_granularity:  Optional[str] = None
+    valid_until_granularity: Optional[str] = None
 
 
 class History:
@@ -520,7 +537,11 @@ def history(
     Entries are ordered oldest→newest by the canonical ordering key (same as the
     truth engine fold). Each entry carries `.status` ("Current" or "Superseded"),
     `.value`, `.valid_from`, `.valid_until`, `.provenance`, `.value_confidence`,
-    and `.claim_ref`.
+    `.claim_ref`, plus honest-precision display fields `.valid_from_display` /
+    `.valid_until_display` and raw granularity fields `.valid_from_granularity` /
+    `.valid_until_granularity`. `valid_until_*` are DERIVED from the successor
+    claim's start (see `HistoryEntry` docstring) — never fabricated from this
+    entry's own end_granularity.
 
     The `.current()` entry is guaranteed to agree with recall() — both use the
     same canonical fold at the engine level.
@@ -567,6 +588,10 @@ def history(
             status=status,
             provenance=e.get("provenance", ""),
             value_confidence=float(e.get("value_confidence", 0.0)),
+            valid_from_display=e.get("valid_from_display"),
+            valid_until_display=e.get("valid_until_display"),
+            valid_from_granularity=e.get("valid_from_granularity"),
+            valid_until_granularity=e.get("valid_until_granularity"),
         ))
 
     return History(entries)

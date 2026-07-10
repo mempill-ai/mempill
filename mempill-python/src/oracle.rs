@@ -130,7 +130,7 @@ use mempill_core::application::dto::{
 use mempill_sqlite::OracleEngine;
 use mempill_types::AdjudicationResponse;
 
-use crate::display::enrich_query_memory;
+use crate::display::{enrich_query_history, enrich_query_memory};
 use crate::errors::{mem_err_to_pyerr, StorageError, ValidationError};
 
 static ORACLE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -234,7 +234,9 @@ impl PyOracleEngine {
     ///
     /// Returns a dict with `entries` — all claims ordered oldest→newest, each tagged
     /// with `status` ("Current" or "Superseded"), `value`, `valid_from`, `valid_until`,
-    /// `provenance`, `value_confidence`, and `claim_ref`.
+    /// `provenance`, `value_confidence`, and `claim_ref`. Each entry also includes
+    /// `valid_from_display` / `valid_until_display` and `valid_from_granularity` /
+    /// `valid_until_granularity` (see `PyEngine.query_history` for details).
     #[pyo3(signature = (request))]
     fn query_history<'py>(
         &self,
@@ -247,7 +249,7 @@ impl PyOracleEngine {
         let resp = py
             .detach(|| oracle_runtime().block_on(engine.query_history(req)))
             .map_err(mem_err_to_pyerr)?;
-        Ok(pythonize::pythonize(py, &resp)?)
+        Ok(pythonize::pythonize(py, &enrich_query_history(resp))?)
     }
 
     /// Query the audit ledger for an agent.

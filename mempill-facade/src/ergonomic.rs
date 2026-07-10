@@ -1238,6 +1238,95 @@ mod tests {
         assert!(h.current().is_none());
     }
 
+    // ── TASK-32 — HistoryEntry granularity + derived-endpoint rule ────────────
+
+    /// End-to-end: history() entries carry the claim's own `valid_from_granularity`
+    /// verbatim (Month precision survives ingest → persist → fold → HistoryEntry).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn history_entry_carries_own_valid_from_granularity() {
+        use mempill_types::time::DateGranularity;
+        let engine = crate::open_default_in_memory().unwrap();
+
+        remember(
+            &engine,
+            "agent",
+            "person",
+            "birth_month",
+            "value",
+            RememberOptions::new().valid_from("2020-03").confidence(0.9),
+        )
+        .await
+        .unwrap();
+
+        let h = history(&engine, "agent", "person", "birth_month").await.unwrap();
+        assert_eq!(h.entries.len(), 1);
+        assert_eq!(
+            h.entries[0].valid_from_granularity,
+            Some(DateGranularity::Month),
+            "single entry must report its own start_granularity verbatim"
+        );
+        assert_eq!(
+            h.entries[0].valid_until_granularity, None,
+            "open-ended (only) entry has no bounding successor → None"
+        );
+    }
+
+    /// Supersession: the predecessor's `valid_until_granularity` must equal the
+    /// SUCCESSOR's `valid_from_granularity` (Year), not the predecessor's own
+    /// end_granularity (which is never set here — proving no fabrication either way).
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn history_entry_valid_until_granularity_uses_successor_start_granularity() {
+        use mempill_types::time::DateGranularity;
+        let engine = crate::open_default_in_memory().unwrap();
+
+        // Predecessor: Day-precision start, high confidence, open end.
+        remember(
+            &engine,
+            "agent",
+            "corp",
+            "ceo",
+            "Alice",
+            RememberOptions::new().valid_from("2019-06-15").confidence(0.9),
+        )
+        .await
+        .unwrap();
+
+        // Successor: Year-precision start, high confidence — becomes the new Current.
+        remember(
+            &engine,
+            "agent",
+            "corp",
+            "ceo",
+            "Bob",
+            RememberOptions::new().valid_from("2020").confidence(0.9),
+        )
+        .await
+        .unwrap();
+
+        let h = history(&engine, "agent", "corp", "ceo").await.unwrap();
+        assert_eq!(h.entries.len(), 2, "two claims → two entries");
+        assert_eq!(h.entries[0].value, serde_json::json!("Alice"), "oldest first");
+        assert_eq!(h.entries[1].value, serde_json::json!("Bob"), "newer second");
+
+        assert_eq!(
+            h.entries[0].valid_until_granularity,
+            Some(DateGranularity::Year),
+            "predecessor's valid_until_granularity must be the successor's (Bob's) \
+             start_granularity (Year) — the honest source of the derived bound"
+        );
+        assert_eq!(
+            h.entries[1].valid_from_granularity,
+            Some(DateGranularity::Year),
+            "successor's own valid_from_granularity must be Year"
+        );
+        assert_eq!(
+            h.entries[1].valid_until_granularity, None,
+            "last (open-ended / current) entry has no bounding successor → None"
+        );
+    }
+
     // ── W4/W5 — granularity survives ingest → SQLite persist → fold → DTO ────
 
     /// End-to-end: ingest with Month-precision valid_from("2020-03"), recall, assert

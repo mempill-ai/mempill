@@ -2399,3 +2399,271 @@ where
         "conformance[gran-t3]: end_granularity must remain None for legacy rows"
     );
 }
+
+// ── History granularity conformance harness (TASK-32) ─────────────────────────
+
+/// Run the `HistoryEntry` granularity/derived-endpoint conformance suite against `store`.
+///
+/// Exercises `QueryHistoryUseCase::execute_with_time` end-to-end (real persistence +
+/// real fold), proving that `valid_from_granularity` / `valid_until_granularity` round-trip
+/// honestly across both adapters, including the derived-endpoint rule for `valid_until`
+/// (successor's `start_granularity`, or `None` when the successor's ordering key falls
+/// back to `transaction_time`).
+///
+/// Requires `Arc<P>` (not `&P`) because `QueryHistoryUseCase::new` takes ownership of an
+/// `Arc` — mirrors `run_disposition_scope_conformance`'s calling convention.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_history_granularity_conformance<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    hist_gran_mixed_precision_timeline(std::sync::Arc::clone(store));
+    hist_gran_supersession_uses_successor_granularity(std::sync::Arc::clone(store));
+    hist_gran_legacy_none_granularity_row(std::sync::Arc::clone(store));
+}
+
+/// hist-gran-t1: a single claim with `start_granularity=Month` reports that granularity
+/// verbatim on `valid_from_granularity`; being the only (open-ended) entry,
+/// `valid_until_granularity` must be `None`.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_gran_mixed_precision_timeline<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::query_history::QueryHistoryUseCase;
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::DateGranularity;
+
+    let agent = AgentId("conformance-histgran-t1".into());
+    let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(30_000_000, 0).unwrap();
+    // "2020-03" → first-of-month midnight UTC.
+    let start = chrono::DateTime::<chrono::Utc>::from_timestamp(1583020800, 0).unwrap();
+
+    let claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact {
+            subject: "histgran-person".into(),
+            predicate: "birth_month".into(),
+            value: serde_json::json!("test-value"),
+        },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime {
+            start: Some(start),
+            end: None,
+            valid_time_confidence: 0.9,
+            start_granularity: Some(DateGranularity::Month),
+            end_granularity: None,
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[histgran-t1]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[histgran-t1]: append_claim");
+    store.commit(txn).expect("conformance[histgran-t1]: commit");
+
+    let uc = QueryHistoryUseCase::new(store, None::<std::sync::Arc<NoOpVector>>, EngineConfig::default());
+    let resp = uc
+        .execute_with_time(
+            crate::application::dto::QueryHistoryRequest {
+                agent_id: agent,
+                subject: "histgran-person".into(),
+                predicate: "birth_month".into(),
+            },
+            chrono::DateTime::<chrono::Utc>::from_timestamp(40_000_000, 0).unwrap(),
+        )
+        .expect("conformance[histgran-t1]: execute_with_time must not error");
+
+    assert_eq!(resp.entries.len(), 1, "conformance[histgran-t1]: one claim → one entry");
+    assert_eq!(
+        resp.entries[0].valid_from_granularity,
+        Some(DateGranularity::Month),
+        "conformance[histgran-t1]: valid_from_granularity must be the claim's own start_granularity"
+    );
+    assert_eq!(
+        resp.entries[0].valid_until_granularity, None,
+        "conformance[histgran-t1]: open-ended (only) entry must have None valid_until_granularity"
+    );
+}
+
+/// hist-gran-t2: two-claim succession where the successor has `start_granularity=Year`
+/// and high valid-time confidence. The predecessor's `valid_until` is bounded by the
+/// successor's `valid_time.start`, so `valid_until_granularity` must equal the
+/// SUCCESSOR's `start_granularity` (Year) — not the predecessor's own `end_granularity`
+/// (which is deliberately set to a different value, Day, to prove no cross-contamination).
+#[cfg(any(test, feature = "test-support"))]
+fn hist_gran_supersession_uses_successor_granularity<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::query_history::QueryHistoryUseCase;
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::DateGranularity;
+
+    let agent = AgentId("conformance-histgran-t2".into());
+
+    let tx_old = chrono::DateTime::<chrono::Utc>::from_timestamp(30_000_100, 0).unwrap();
+    let tx_new = chrono::DateTime::<chrono::Utc>::from_timestamp(30_000_200, 0).unwrap();
+    let vt_old_start = chrono::DateTime::<chrono::Utc>::from_timestamp(1560556800, 0).unwrap(); // 2019-06-15
+    let vt_new_start = chrono::DateTime::<chrono::Utc>::from_timestamp(1577836800, 0).unwrap(); // 2020-01-01
+
+    let old_claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "histgran-corp".into(), predicate: "ceo".into(), value: serde_json::json!("Alice") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx_old),
+        ValidTime {
+            start: Some(vt_old_start),
+            end: None,
+            valid_time_confidence: 0.9,
+            start_granularity: Some(DateGranularity::Day),
+            // Deliberately Day (not Year) to prove the effective valid_until_granularity
+            // is NOT this claim's own end_granularity.
+            end_granularity: Some(DateGranularity::Day),
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+
+    let new_claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "histgran-corp".into(), predicate: "ceo".into(), value: serde_json::json!("Bob") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx_new),
+        ValidTime {
+            start: Some(vt_new_start),
+            end: None,
+            valid_time_confidence: 0.9,
+            start_granularity: Some(DateGranularity::Year),
+            end_granularity: None,
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Medium,
+        vec![],
+        None,
+        None,
+    );
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[histgran-t2]: begin_atomic");
+    store.append_claim(&mut txn, &old_claim).expect("conformance[histgran-t2]: append old_claim");
+    store.append_claim(&mut txn, &new_claim).expect("conformance[histgran-t2]: append new_claim");
+    store.commit(txn).expect("conformance[histgran-t2]: commit");
+
+    let uc = QueryHistoryUseCase::new(store, None::<std::sync::Arc<NoOpVector>>, EngineConfig::default());
+    let resp = uc
+        .execute_with_time(
+            crate::application::dto::QueryHistoryRequest {
+                agent_id: agent,
+                subject: "histgran-corp".into(),
+                predicate: "ceo".into(),
+            },
+            chrono::DateTime::<chrono::Utc>::from_timestamp(40_000_000, 0).unwrap(),
+        )
+        .expect("conformance[histgran-t2]: execute_with_time must not error");
+
+    assert_eq!(resp.entries.len(), 2, "conformance[histgran-t2]: two claims → two entries");
+    assert_eq!(resp.entries[0].value, serde_json::json!("Alice"), "oldest first");
+    assert_eq!(resp.entries[1].value, serde_json::json!("Bob"), "newer second");
+
+    assert_eq!(
+        resp.entries[0].valid_until_granularity,
+        Some(DateGranularity::Year),
+        "conformance[histgran-t2]: predecessor's valid_until_granularity must be the \
+         SUCCESSOR's start_granularity (Year), not the predecessor's own end_granularity (Day)"
+    );
+    assert_eq!(
+        resp.entries[1].valid_until_granularity, None,
+        "conformance[histgran-t2]: last (open-ended) entry must have None valid_until_granularity"
+    );
+    assert_eq!(
+        resp.entries[1].valid_from_granularity,
+        Some(DateGranularity::Year),
+        "conformance[histgran-t2]: successor's own valid_from_granularity must be Year"
+    );
+}
+
+/// hist-gran-t3: legacy row with no granularity tracked (`start_granularity=None`,
+/// `end_granularity=None`) — both `HistoryEntry` granularity fields must remain `None`,
+/// never fabricated.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_gran_legacy_none_granularity_row<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::query_history::QueryHistoryUseCase;
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+
+    let agent = AgentId("conformance-histgran-t3".into());
+    let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(30_000_300, 0).unwrap();
+
+    let claim = Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: "histgran-legacy".into(), predicate: "event_time".into(), value: serde_json::json!("test-value") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime {
+            start: None,
+            end: None,
+            valid_time_confidence: 0.0,
+            start_granularity: None,
+            end_granularity: None,
+        },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    );
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[histgran-t3]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[histgran-t3]: append_claim");
+    store.commit(txn).expect("conformance[histgran-t3]: commit");
+
+    let uc = QueryHistoryUseCase::new(store, None::<std::sync::Arc<NoOpVector>>, EngineConfig::default());
+    let resp = uc
+        .execute_with_time(
+            crate::application::dto::QueryHistoryRequest {
+                agent_id: agent,
+                subject: "histgran-legacy".into(),
+                predicate: "event_time".into(),
+            },
+            chrono::DateTime::<chrono::Utc>::from_timestamp(40_000_000, 0).unwrap(),
+        )
+        .expect("conformance[histgran-t3]: execute_with_time must not error");
+
+    assert_eq!(resp.entries.len(), 1);
+    assert_eq!(
+        resp.entries[0].valid_from_granularity, None,
+        "conformance[histgran-t3]: legacy row must report None valid_from_granularity"
+    );
+    assert_eq!(
+        resp.entries[0].valid_until_granularity, None,
+        "conformance[histgran-t3]: legacy row (open-ended) must report None valid_until_granularity"
+    );
+}

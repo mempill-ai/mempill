@@ -249,6 +249,174 @@ class TestOracleEngineQueryHistory:
         assert h.entries[0].status == "Current"
 
 
+# ── TASK-32 — granularity / honest display fields ────────────────────────────
+#
+# NOTE: the pure-Python `remember()` ergonomic helper does not yet propagate
+# start_granularity/end_granularity on write (a pre-existing, separately-tracked
+# gap in `RememberOptions`/`_to_rfc3339` — see ergonomic.py's `_to_rfc3339`
+# docstring). These tests use the raw `engine.ingest_claim()` dict path (which
+# DOES support start_granularity/end_granularity verbatim, mirroring
+# test_granularity.py's `_ingest_with_granularity` helper) so the read-path
+# (`history()`) granularity plumbing under test here is exercised honestly.
+
+def _ingest_with_granularity(
+    engine: mempill.Engine,
+    agent_id: str,
+    subject: str,
+    predicate: str,
+    value: str,
+    *,
+    start_dt: str | None = None,
+    start_gran: str | None = None,
+    end_dt: str | None = None,
+    end_gran: str | None = None,
+    valid_time_confidence: float = 0.9,
+) -> dict:
+    vt: dict = {"valid_time_confidence": valid_time_confidence}
+    if start_dt is not None:
+        vt["start"] = start_dt
+    if start_gran is not None:
+        vt["start_granularity"] = start_gran
+    if end_dt is not None:
+        vt["end"] = end_dt
+    if end_gran is not None:
+        vt["end_granularity"] = end_gran
+
+    return engine.ingest_claim({
+        "agent_id": agent_id,
+        "subject": subject,
+        "predicate": predicate,
+        "value": value,
+        "provenance": {"type": "External", "kind": "UserAsserted"},
+        "cardinality": "Functional",
+        "valid_time": vt,
+        "confidence": {"value_confidence": 0.9, "valid_time_confidence": valid_time_confidence},
+        "criticality": "Low",
+        "derived_from": [],
+    })
+
+
+class TestHistoryGranularity:
+    """Cross-precision timeline: month/year/day granularities + one legacy row,
+    plus a supersession case asserting the derived valid_until carries the
+    SUCCESSOR-side granularity (not the predecessor's own end_granularity).
+    """
+
+    def test_single_entry_reports_own_start_granularity_month(self, engine: mempill.Engine) -> None:
+        _ingest_with_granularity(
+            engine, AGENT, "person", "birth_month", "value",
+            start_dt="2020-03-01T00:00:00Z", start_gran="month",
+        )
+        h = history(engine, AGENT, "person", "birth_month")
+        assert h.entries[0].valid_from_granularity == "month"
+        assert h.entries[0].valid_from_display == "2020-03"
+        # Open-ended (only) entry → no derived bound.
+        assert h.entries[0].valid_until_granularity is None
+        assert h.entries[0].valid_until_display is None
+
+    def test_single_entry_year_granularity(self, engine: mempill.Engine) -> None:
+        _ingest_with_granularity(
+            engine, AGENT, "person2", "founded", "value",
+            start_dt="2020-01-01T00:00:00Z", start_gran="year",
+        )
+        h = history(engine, AGENT, "person2", "founded")
+        assert h.entries[0].valid_from_granularity == "year"
+        assert h.entries[0].valid_from_display == "2020"
+
+    def test_single_entry_day_granularity(self, engine: mempill.Engine) -> None:
+        _ingest_with_granularity(
+            engine, AGENT, "person3", "event", "value",
+            start_dt="2020-03-15T00:00:00Z", start_gran="day",
+        )
+        h = history(engine, AGENT, "person3", "event")
+        assert h.entries[0].valid_from_granularity == "day"
+        assert h.entries[0].valid_from_display == "2020-03-15"
+
+    def test_legacy_row_no_granularity_has_none(self, engine: mempill.Engine) -> None:
+        """A row with dates but no granularity tag — legacy/unknown precision."""
+        _ingest_with_granularity(
+            engine, AGENT, "legacy-subj", "legacy-pred", "value",
+            start_dt="2020-03-15T00:00:00Z",
+        )
+        h = history(engine, AGENT, "legacy-subj", "legacy-pred")
+        assert h.entries[0].valid_from_granularity is None
+        # Legacy fallback still renders a day-form display (never fabricates precision text,
+        # but also doesn't withhold display entirely — matches format_valid_time_endpoint).
+        assert h.entries[0].valid_from_display == "2020-03-15"
+        assert h.entries[0].valid_until_granularity is None
+        assert h.entries[0].valid_until_display is None
+
+    def test_supersession_valid_until_uses_successor_granularity(self, engine: mempill.Engine) -> None:
+        """Predecessor (Day-precision start) superseded by successor (Year-precision
+        start): the predecessor's valid_until_granularity/_display must reflect the
+        SUCCESSOR's start precision (Year / "2020"), never the predecessor's own
+        end_granularity (which was never set).
+        """
+        _ingest_with_granularity(
+            engine, AGENT, "corp", "ceo", "Alice",
+            start_dt="2019-06-15T00:00:00Z", start_gran="day",
+        )
+        engine.reconcile({"agent_id": AGENT, "subject_lines": [["corp", "ceo"]]})
+        _ingest_with_granularity(
+            engine, AGENT, "corp", "ceo", "Bob",
+            start_dt="2020-01-01T00:00:00Z", start_gran="year",
+        )
+        engine.reconcile({"agent_id": AGENT, "subject_lines": [["corp", "ceo"]]})
+
+        h = history(engine, AGENT, "corp", "ceo")
+        assert [e.value for e in h.entries] == ["Alice", "Bob"]
+
+        alice, bob = h.entries
+        assert alice.valid_from_granularity == "day"
+        assert alice.valid_from_display == "2019-06-15"
+        assert alice.valid_until_granularity == "year", (
+            "Alice's valid_until_granularity must be Bob's (successor) start_granularity"
+        )
+        assert alice.valid_until_display == "2020", (
+            "Alice's valid_until_display must render at the successor's Year precision"
+        )
+
+        assert bob.valid_from_granularity == "year"
+        assert bob.valid_from_display == "2020"
+        assert bob.valid_until_granularity is None, "Bob (current, open-ended) has no bound"
+        assert bob.valid_until_display is None
+
+    def test_mixed_precision_three_way_succession(self, engine: mempill.Engine) -> None:
+        """Month → Day → Year succession: each predecessor's derived valid_until
+        must match its immediate successor's own start precision.
+        """
+        _ingest_with_granularity(
+            engine, AGENT, "mixed-corp", "ceo", "Alice",
+            start_dt="2010-01-01T00:00:00Z", start_gran="month",
+        )
+        engine.reconcile({"agent_id": AGENT, "subject_lines": [["mixed-corp", "ceo"]]})
+        _ingest_with_granularity(
+            engine, AGENT, "mixed-corp", "ceo", "John",
+            start_dt="2018-06-01T00:00:00Z", start_gran="day",
+        )
+        engine.reconcile({"agent_id": AGENT, "subject_lines": [["mixed-corp", "ceo"]]})
+        _ingest_with_granularity(
+            engine, AGENT, "mixed-corp", "ceo", "Bob",
+            start_dt="2023-01-01T00:00:00Z", start_gran="year",
+        )
+        engine.reconcile({"agent_id": AGENT, "subject_lines": [["mixed-corp", "ceo"]]})
+
+        h = history(engine, AGENT, "mixed-corp", "ceo")
+        assert [e.value for e in h.entries] == ["Alice", "John", "Bob"]
+        alice, john, bob = h.entries
+
+        assert alice.valid_from_granularity == "month"
+        assert alice.valid_until_granularity == "day", "Alice's bound = John's start precision"
+        assert alice.valid_until_display == "2018-06-01"
+
+        assert john.valid_from_granularity == "day"
+        assert john.valid_until_granularity == "year", "John's bound = Bob's start precision"
+        assert john.valid_until_display == "2023"
+
+        assert bob.valid_from_granularity == "year"
+        assert bob.valid_until_granularity is None
+
+
 # ── Inline timeline demo (runs as a test) ────────────────────────────────────
 
 class TestInlineDemo:

@@ -60,6 +60,25 @@ Version headings are dated at publish time. A version with no date and the
   or published. See `tasks/25-storage-and-roadmap-merged/AS_OF_CORRECTNESS_BENCHMARK.md`
   for the full results table and results published on the
   [documentation site](https://mempill.netlify.app/concepts/benchmark-results/).
+- **Date granularity on `query_history` / `history()`.** `HistoryEntry` gained two
+  additive fields, `valid_from_granularity` and `valid_until_granularity`
+  (`Option<DateGranularity>`), closing the one honest-display read path that
+  previously dropped stored precision (`query_memory` / `query_subject` already had
+  it). `valid_until_granularity` is a **derived** value: because `valid_until` is
+  bounded by the successor claim's canonical ordering key (supersession), not stored
+  on the entry itself, the honest granularity to report is the **successor's**
+  `start_granularity` — never this entry's own (never-populated) `end_granularity`.
+  When the successor's ordering key falls back to `transaction_time` (low valid-time
+  confidence), `valid_until_granularity` is `None`. The Rust facade's `history()`
+  passes both fields through verbatim (`HistoryEntry` is re-exported directly from
+  `mempill-core`, no facade change needed). The Python wheel's `query_history` is now
+  enriched the same way `query_memory` is (`enrich_query_history` mirrors
+  `enrich_query_memory`): every entry gains pre-rendered `valid_from_display` /
+  `valid_until_display` strings, plus the raw granularity fields; the ergonomic
+  `HistoryEntry` dataclass and `.pyi` stubs were updated (stubtest stays clean). New
+  `run_history_granularity_conformance` harness proves parity across SQLite and
+  Postgres (16 and 18), including a three-way Month→Day→Year succession asserting the
+  derived-endpoint rule. Non-breaking: additive fields only.
 
 ### Fixed
 
