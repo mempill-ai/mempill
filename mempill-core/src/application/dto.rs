@@ -4,8 +4,8 @@
 //! never cross this boundary; callers only see these structs.
 
 use mempill_types::{
-    AgentId, BeliefProjection, Cardinality, ClaimRef, Confidence, Criticality, Disposition,
-    HistoryEntryStatus, LedgerEntry, ProvenanceLabel, ValidTime,
+    AgentId, BeliefProjection, Cardinality, ClaimRef, Confidence, Criticality, DateGranularity,
+    Disposition, HistoryEntryStatus, LedgerEntry, ProvenanceLabel, ValidTime,
 };
 
 // ── INGEST CLAIM ──────────────────────────────────────────────────────────────
@@ -136,6 +136,29 @@ pub struct HistoryEntry {
     /// Effective end of the slot: equals the successor's canonical ordering key,
     /// or `None` for the open-ended current slot.
     pub valid_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Precision of the `valid_from` date, taken verbatim from this claim's own
+    /// `ValidTime::start_granularity`. `None` when the start is absent or predates
+    /// granularity tracking (legacy row).
+    ///
+    /// DISPLAY-ONLY — never used for ordering, matching, or fold selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from_granularity: Option<DateGranularity>,
+    /// Precision of the `valid_until` date.
+    ///
+    /// `valid_until` is a DERIVED endpoint (see `query_history.rs` module docs): it is
+    /// either the successor claim's canonical ordering-key granularity, or `None` for
+    /// the open-ended current slot. The rule this crate honours: **the granularity of
+    /// whichever timestamp produced the bound** —
+    ///   - when the successor's ordering key is its `valid_time.start`, this field is the
+    ///     successor's `start_granularity`;
+    ///   - when the successor's ordering key falls back to its `transaction_time` (low
+    ///     valid-time confidence), this field is `None` — a transaction-time stamp has no
+    ///     date-granularity concept, so fabricating a value here would misrepresent it as
+    ///     a user-supplied partial date.
+    ///
+    /// DISPLAY-ONLY — never used for ordering, matching, or fold selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until_granularity: Option<DateGranularity>,
     /// Whether this claim is the live belief or has been superseded.
     pub status: HistoryEntryStatus,
     /// Human-readable provenance label (e.g. `"External/UserAsserted"`).

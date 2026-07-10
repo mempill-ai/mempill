@@ -16,11 +16,33 @@
 //! The last (open-ended / current) entry has `valid_until = None`.
 //! This logic is extracted into the pure function `compute_effective_windows` so it
 //! can be unit-tested in isolation.
+//!
+//! ## Derived-endpoint granularity rule (TASK-32)
+//!
+//! `valid_until` is not this entry's own field — it is BOUNDED by the successor's
+//! canonical ordering key (see `compute_effective_windows` above). Attributing this
+//! entry's own `end_granularity` to a derived timestamp it did not produce would be
+//! dishonest (the field literally comes from claim i+1, not claim i). The rule this
+//! module follows, mirrored in `compute_effective_window_granularities`:
+//!
+//! - When the successor's ordering key is `successor.valid_time.start` (i.e. the
+//!   successor's `valid_time_confidence` meets the engine threshold), `valid_until`'s
+//!   granularity is the **successor's `start_granularity`** — the honest source of the
+//!   bounding instant.
+//! - When the successor's ordering key falls back to `successor.transaction_time`
+//!   (low valid-time confidence), the granularity is `None` — a machine-assigned
+//!   transaction timestamp has no user-supplied date precision to report.
+//!
+//! This mirrors `BeliefDetail::valid_until_granularity` (`mempill-facade/src/ergonomic.rs`)
+//! in spirit (DISPLAY-ONLY, additive, never used for fold/ordering) but differs in *source*:
+//! `BeliefDetail` reports a claim's OWN `end_granularity`; `HistoryEntry::valid_until_granularity`
+//! reports the SUCCESSOR's `start_granularity`, because the effective window boundary is a
+//! derived (successor-supplied), not stored, value.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use mempill_types::{Claim, ClaimRef, HistoryEntryStatus, ProvenanceLabel, ExternalKind};
+use mempill_types::{Claim, ClaimRef, DateGranularity, HistoryEntryStatus, ProvenanceLabel, ExternalKind};
 
 use crate::{
     application::ingest_claim::build_latest_disposition_map,
@@ -88,6 +110,47 @@ pub fn compute_effective_windows(
         }
     }
     windows
+}
+
+// ── Pure helper: compute effective valid_until granularities ──────────────────
+
+/// Compute the effective `valid_until_granularity` for each claim in the sorted timeline.
+///
+/// Companion to [`compute_effective_windows`] — same successor-bounding rule, same
+/// pre-sort precondition (oldest first). See the module-level "Derived-endpoint
+/// granularity rule" doc for the honesty rationale.
+///
+/// Rule: entry i's `valid_until_granularity` =
+///   - successor's `start_granularity`, when the successor's ordering key is its
+///     `valid_time.start` (valid_time_confidence ≥ threshold);
+///   - `None`, when the successor's ordering key falls back to its `transaction_time`.
+///
+/// The last entry (open-ended) has `valid_until_granularity = None`.
+///
+/// This function is PURE (no I/O, no clock) and is tested independently.
+pub fn compute_effective_window_granularities(
+    sorted: &[&Claim],
+    config: &EngineConfig,
+) -> Vec<Option<DateGranularity>> {
+    let n = sorted.len();
+    let mut grans = Vec::with_capacity(n);
+    for i in 0..n {
+        if i + 1 < n {
+            let successor = sorted[i + 1];
+            let uses_valid_time_start = successor.valid_time().valid_time_confidence
+                >= config.valid_time_confidence_threshold;
+            grans.push(if uses_valid_time_start {
+                successor.valid_time().start_granularity
+            } else {
+                // Ordering key fell back to transaction_time — no date-precision to report.
+                None
+            });
+        } else {
+            // Last entry — open-ended, no bounding successor.
+            grans.push(None);
+        }
+    }
+    grans
 }
 
 // ── Use-case ──────────────────────────────────────────────────────────────────
@@ -177,15 +240,17 @@ where
                 .then(a.claim_ref().0.as_u128().cmp(&b.claim_ref().0.as_u128()))
         });
 
-        // Compute effective valid_until windows.
+        // Compute effective valid_until windows + their derived granularities.
         let refs: Vec<&Claim> = sorted_claims.iter().collect();
         let windows = compute_effective_windows(&refs, &self.config);
+        let window_granularities = compute_effective_window_granularities(&refs, &self.config);
 
         // Map each claim to a HistoryEntry.
         let entries: Vec<HistoryEntry> = sorted_claims
             .iter()
             .zip(windows)
-            .map(|(claim, valid_until)| {
+            .zip(window_granularities)
+            .map(|((claim, valid_until), valid_until_granularity)| {
                 let status = if live_refs.contains(claim.claim_ref()) {
                     HistoryEntryStatus::Current
                 } else {
@@ -196,6 +261,8 @@ where
                     value: claim.fact().value.clone(),
                     valid_from: claim.valid_time().start,
                     valid_until,
+                    valid_from_granularity: claim.valid_time().start_granularity,
+                    valid_until_granularity,
                     status,
                     provenance: format_provenance(claim.provenance()),
                     value_confidence: claim.confidence().value_confidence,
@@ -624,6 +691,107 @@ mod tests {
         assert_eq!(windows[2], None);
     }
 
+    // ── Derived-endpoint granularity tests (TASK-32) ───────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_claim_gran(
+        agent_id: &AgentId,
+        subject: &str,
+        predicate: &str,
+        value: serde_json::Value,
+        tx: DateTime<Utc>,
+        vt_start: Option<DateTime<Utc>>,
+        vt_start_gran: Option<mempill_types::DateGranularity>,
+        vt_confidence: f32,
+    ) -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            agent_id.clone(),
+            Fact { subject: subject.into(), predicate: predicate.into(), value },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(tx),
+            ValidTime {
+                start: vt_start,
+                end: None,
+                valid_time_confidence: vt_confidence,
+                start_granularity: vt_start_gran,
+                end_granularity: None,
+            },
+            Confidence { value_confidence: 0.9, valid_time_confidence: vt_confidence },
+            Criticality::Medium,
+            vec![],
+            None,
+            None,
+        )
+    }
+
+    /// High-confidence successor whose ordering key is its `valid_time.start`:
+    /// predecessor's `valid_until_granularity` = successor's `start_granularity`.
+    #[test]
+    fn effective_window_granularity_uses_successor_start_granularity() {
+        use mempill_types::DateGranularity;
+
+        let config = EngineConfig::default();
+        let agent = agent();
+        let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
+
+        let c1 = make_claim_gran(&agent, "a", "b", serde_json::json!("v1"), t1, Some(t1), Some(DateGranularity::Day), 0.9);
+        let c2 = make_claim_gran(&agent, "a", "b", serde_json::json!("v2"), t2, Some(t2), Some(DateGranularity::Year), 0.9);
+
+        let sorted: Vec<&Claim> = vec![&c1, &c2];
+        let grans = compute_effective_window_granularities(&sorted, &config);
+
+        assert_eq!(grans.len(), 2);
+        assert_eq!(
+            grans[0],
+            Some(DateGranularity::Year),
+            "predecessor's valid_until_granularity must be successor's start_granularity"
+        );
+        assert_eq!(grans[1], None, "last entry (open-ended) has no bounding successor");
+    }
+
+    /// Low-confidence successor whose ordering key falls back to `transaction_time`:
+    /// predecessor's `valid_until_granularity` must be `None` (tx_time has no date precision).
+    #[test]
+    fn effective_window_granularity_none_when_successor_uses_tx_time_fallback() {
+        use mempill_types::DateGranularity;
+
+        let config = EngineConfig::default(); // threshold = 0.7
+        let agent = agent();
+        let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
+
+        let c1 = make_claim_gran(&agent, "a", "b", serde_json::json!("v1"), t1, Some(t1), Some(DateGranularity::Month), 0.9);
+        // Successor has valid_time_confidence below threshold → ordering key falls back to tx_time,
+        // even though start_granularity is set — it must NOT leak into valid_until_granularity.
+        let c2 = make_claim_gran(&agent, "a", "b", serde_json::json!("v2"), t2, Some(t2), Some(DateGranularity::Year), 0.0);
+
+        let sorted: Vec<&Claim> = vec![&c1, &c2];
+        let grans = compute_effective_window_granularities(&sorted, &config);
+
+        assert_eq!(
+            grans[0], None,
+            "successor's ordering key used tx_time fallback → valid_until_granularity must be None, not Year"
+        );
+    }
+
+    /// Empty and single-entry timelines produce empty / all-None granularity vectors.
+    #[test]
+    fn effective_window_granularities_empty_and_single() {
+        let config = EngineConfig::default();
+        assert!(compute_effective_window_granularities(&[], &config).is_empty());
+
+        let agent = agent();
+        let tx = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let c = make_claim(&agent, "a", "b", serde_json::json!("v"), tx, None, None, 0.0);
+        let sorted = vec![&c];
+        let grans = compute_effective_window_granularities(&sorted, &config);
+        assert_eq!(grans, vec![None]);
+    }
+
     // ── Additional: provenance format ─────────────────────────────────────────
 
     #[test]
@@ -642,5 +810,70 @@ mod tests {
         ).unwrap();
 
         assert_eq!(resp.entries[0].provenance, "External/UserAsserted");
+    }
+
+    // ── End-to-end: execute_with_time populates HistoryEntry granularity fields ─
+
+    #[test]
+    fn execute_with_time_populates_history_entry_granularity_fields() {
+        use mempill_types::DateGranularity;
+
+        let store = Arc::new(MockStore::default());
+        let agent = agent();
+        let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
+
+        let c1 = make_claim_gran(&agent, "acme", "ceo", serde_json::json!("Alice"), t1, Some(t1), Some(DateGranularity::Day), 0.9);
+        let c2 = make_claim_gran(&agent, "acme", "ceo", serde_json::json!("Bob"), t2, Some(t2), Some(DateGranularity::Year), 0.9);
+        store.claims.lock().unwrap().push(c1);
+        store.claims.lock().unwrap().push(c2);
+
+        let uc = uc(Arc::clone(&store));
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let resp = uc.execute_with_time(
+            QueryHistoryRequest { agent_id: agent, subject: "acme".into(), predicate: "ceo".into() },
+            now,
+        ).unwrap();
+
+        assert_eq!(resp.entries.len(), 2);
+        assert_eq!(
+            resp.entries[0].valid_from_granularity,
+            Some(DateGranularity::Day),
+            "Alice's own valid_from_granularity must be Day"
+        );
+        assert_eq!(
+            resp.entries[0].valid_until_granularity,
+            Some(DateGranularity::Year),
+            "Alice's valid_until_granularity is derived from Bob's (successor) start_granularity"
+        );
+        assert_eq!(
+            resp.entries[1].valid_from_granularity,
+            Some(DateGranularity::Year),
+            "Bob's own valid_from_granularity must be Year"
+        );
+        assert_eq!(
+            resp.entries[1].valid_until_granularity, None,
+            "Bob is the open-ended current entry → None"
+        );
+    }
+
+    /// Legacy row (no granularity tracked) → both fields None, never fabricated.
+    #[test]
+    fn execute_with_time_legacy_row_has_none_granularity() {
+        let store = Arc::new(MockStore::default());
+        let agent = agent();
+        let tx = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let claim = make_claim(&agent, "acme", "ceo", serde_json::json!("Alice"), tx, None, None, 0.0);
+        store.claims.lock().unwrap().push(claim);
+
+        let uc = uc(Arc::clone(&store));
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let resp = uc.execute_with_time(
+            QueryHistoryRequest { agent_id: agent, subject: "acme".into(), predicate: "ceo".into() },
+            now,
+        ).unwrap();
+
+        assert_eq!(resp.entries[0].valid_from_granularity, None);
+        assert_eq!(resp.entries[0].valid_until_granularity, None);
     }
 }

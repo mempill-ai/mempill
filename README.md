@@ -10,7 +10,7 @@
 
 **[Install](https://mempill.netlify.app/getting-started/install/) · [Documentation](https://mempill.netlify.app/) · [Concepts](https://mempill.netlify.app/concepts/temporal-validity-problem/) · [Examples](https://mempill.netlify.app/examples/) · [GitHub](https://github.com/mempill-ai/mempill)**
 
-**0.4.0 (Unreleased)** · Latest published release: **0.3.0** · Apache-2.0 · MSRV 1.88 · 528 Rust (+3 ignored) + 159 Python + 19 MCP tests (main; + Postgres integration via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
+**0.4.0 (Unreleased)** · Latest published release: **0.3.0** · Apache-2.0 · MSRV 1.88 · 536 Rust (+3 ignored) + 165 Python + 19 MCP tests (main; + 88 Postgres-gated integration tests via `--features`), 0 warnings (`clippy --all-targets -D warnings` + `missing_docs`)
 Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop + valid-time succession + Python wheel + MCP adapter + `mempill` facade crate + per-endpoint date granularity + configurable Postgres pool + as-of correctness benchmark.
 
 > **Breaking change in 0.4.0:** SQLite entry points are now per-agent.
@@ -128,7 +128,7 @@ The HITL reference oracle and console/LangGraph agent demos live in the separate
 
 mempill (0.4.0 on git main, unreleased; 0.3.0 latest published) is designed for **embedded
 and early-stage** use (bi-temporal fold, ACID writes, cross-adapter conformance, append-only
-integrity — 528 Rust (+3 ignored) + 159 Python + 19 MCP tests on main). Read this before
+integrity — 536 Rust (+3 ignored) + 165 Python + 19 MCP tests on main). Read this before
 deploying it at scale.
 
 **Safe today for:**
@@ -155,7 +155,7 @@ deploying it at scale.
 - **No built-in observability** — there is no `tracing`/metrics instrumentation yet, so
   latency, error rates, and contention are not visible to an operator out of the box.
   *(Planned; see roadmap.)*
-- **No published load/stress benchmarks** — all 528 Rust + 159 Python + 19 MCP tests are correctness tests;
+- **No published load/stress benchmarks** — all 536 Rust + 165 Python + 19 MCP tests are correctness tests;
   performance at large scale is not yet characterized.
 
 **Not recommended yet for:** public-facing multi-tenant services, high-frequency

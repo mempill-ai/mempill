@@ -3,7 +3,7 @@
 
 use mempill_core::testing::conformance::{
     run_disposition_scope_conformance, run_granularity_conformance, run_history_conformance,
-    run_persistence_conformance, run_valid_at_conformance,
+    run_history_granularity_conformance, run_persistence_conformance, run_valid_at_conformance,
 };
 use mempill_sqlite::{connection::open_in_memory, store::SqlitePersistenceStore};
 
@@ -49,4 +49,16 @@ fn sqlite_passes_granularity_conformance() {
     let conn = open_in_memory().expect("in-memory SQLite connection must open");
     let store = SqlitePersistenceStore::new(conn);
     run_granularity_conformance(&store);
+}
+
+/// `HistoryEntry` granularity + derived-endpoint conformance suite against SQLite (TASK-32).
+///
+/// Proves `valid_from_granularity` / `valid_until_granularity` round-trip honestly through
+/// `QueryHistoryUseCase`, including the supersession case where `valid_until_granularity`
+/// must carry the SUCCESSOR's `start_granularity`, not the predecessor's own `end_granularity`.
+#[test]
+fn sqlite_passes_history_granularity_conformance() {
+    let conn = open_in_memory().expect("in-memory SQLite connection must open");
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
+    run_history_granularity_conformance(&store);
 }

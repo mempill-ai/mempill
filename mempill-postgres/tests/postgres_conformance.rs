@@ -11,7 +11,7 @@ mod common;
 
 use mempill_core::testing::conformance::{
     run_disposition_scope_conformance, run_granularity_conformance, run_history_conformance,
-    run_persistence_conformance, run_valid_at_conformance,
+    run_history_granularity_conformance, run_persistence_conformance, run_valid_at_conformance,
 };
 
 /// Conformance suite against postgres:16.
@@ -110,5 +110,25 @@ fn postgres_granularity_conformance_pg16() {
 fn postgres_granularity_conformance_pg18() {
     common::with_pg("18", |store| {
         run_granularity_conformance(&*store);
+    });
+}
+
+/// `HistoryEntry` granularity + derived-endpoint conformance suite against postgres:16 (TASK-32).
+///
+/// Mirrors `sqlite_passes_history_granularity_conformance` — same scenarios, different
+/// adapter. Proves the supersession derived-endpoint rule (successor's `start_granularity`
+/// wins on `valid_until_granularity`) holds identically on Postgres.
+#[test]
+fn postgres_history_granularity_conformance_pg16() {
+    common::with_pg("16", |store| {
+        run_history_granularity_conformance(&store);
+    });
+}
+
+/// `HistoryEntry` granularity + derived-endpoint conformance suite against postgres:18 (TASK-32).
+#[test]
+fn postgres_history_granularity_conformance_pg18() {
+    common::with_pg("18", |store| {
+        run_history_granularity_conformance(&store);
     });
 }

@@ -22,11 +22,9 @@
 //! the Python dict, so Python/MCP code never needs to import `DateGranularity`
 //! or call format helpers — they just read `valid_from_display`.
 
-use mempill_core::application::dto::QueryMemoryResponse;
+use mempill_core::application::dto::{HistoryEntry, QueryHistoryResponse, QueryMemoryResponse};
 use mempill_types::time::format_valid_time_endpoint;
-use mempill_types::{
-    Belief, BeliefStatus, Criticality, CurrencyState, Marker, StalenessFlag,
-};
+use mempill_types::{Belief, BeliefStatus, Criticality, CurrencyState, Marker, StalenessFlag};
 
 /// A `QueryMemoryResponse` augmented with per-endpoint display strings.
 ///
@@ -128,6 +126,65 @@ pub fn enrich_query_memory(resp: QueryMemoryResponse) -> EnrichedQueryMemoryResp
             staleness: resp.belief.staleness,
             markers: resp.belief.markers,
         },
+    }
+}
+
+// ── query_history enrichment (TASK-32) ──────────────────────────────────────
+
+/// A `QueryHistoryResponse` augmented with per-entry display strings.
+///
+/// Produced by [`enrich_query_history`] and serialised to Python via `pythonize`.
+/// Shape is identical to `QueryHistoryResponse` except each [`EnrichedHistoryEntry`]
+/// carries two additional optional fields: `valid_from_display` and `valid_until_display`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnrichedQueryHistoryResponse {
+    /// Enriched history entries, oldest first (order preserved from the core response).
+    pub entries: Vec<EnrichedHistoryEntry>,
+}
+
+/// A single history slot with all core fields plus honest display strings.
+///
+/// All fields from the raw `HistoryEntry` are included verbatim via `#[serde(flatten)]`
+/// — this includes the raw `valid_from_granularity` / `valid_until_granularity` fields
+/// (see [`mempill_core::application::dto::HistoryEntry`] for the derived-endpoint rule
+/// governing `valid_until_granularity`). The new `valid_from_display` /
+/// `valid_until_display` fields are additive and rendered identically to belief-read
+/// display (`enrich_query_memory`) via the same [`format_valid_time_endpoint`] helper.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnrichedHistoryEntry {
+    /// All fields from the raw `HistoryEntry` (claim_ref, value, valid_from, valid_until,
+    /// valid_from_granularity, valid_until_granularity, status, provenance, value_confidence).
+    #[serde(flatten)]
+    pub core: HistoryEntry,
+    /// Start of the valid-time window rendered at its recorded precision.
+    ///
+    /// `None` / absent when the start endpoint is unknown (open).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_from_display: Option<String>,
+    /// End of the valid-time window rendered at its recorded precision.
+    ///
+    /// Rendered from `valid_until` + `valid_until_granularity` — the DERIVED endpoint
+    /// and its honest (successor-sourced) granularity. `None` / absent when the end is
+    /// unknown or open-ended (the Current entry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_until_display: Option<String>,
+}
+
+fn enrich_history_entry(e: HistoryEntry) -> EnrichedHistoryEntry {
+    let valid_from_display = format_valid_time_endpoint(e.valid_from, e.valid_from_granularity);
+    let valid_until_display = format_valid_time_endpoint(e.valid_until, e.valid_until_granularity);
+    EnrichedHistoryEntry { core: e, valid_from_display, valid_until_display }
+}
+
+/// Convert a raw `QueryHistoryResponse` into an enriched form that includes
+/// `valid_from_display` and `valid_until_display` on every entry.
+///
+/// Mirrors [`enrich_query_memory`]: same rendering helper, same additive-field
+/// contract. `status` (`HistoryEntryStatus::Current` / `Superseded`) is forwarded
+/// unchanged inside each entry via `#[serde(flatten)]`.
+pub fn enrich_query_history(resp: QueryHistoryResponse) -> EnrichedQueryHistoryResponse {
+    EnrichedQueryHistoryResponse {
+        entries: resp.entries.into_iter().map(enrich_history_entry).collect(),
     }
 }
 
