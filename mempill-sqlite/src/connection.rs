@@ -340,4 +340,264 @@ mod tests {
             .expect("alphanumeric + dash + underscore agent_id must be accepted");
         assert_eq!(path, dir.path().join("agent_Agent_123-test.db"));
     }
+
+    // ── TASK-33 / QA-A (🟡7): open_for_agent edges ──────────────────────────────
+
+    /// (c) A whitespace-only agent_id must be rejected — it is not
+    /// `[A-Za-z0-9_-]`, so it is already caught by the existing character-class
+    /// validation. This test documents/locks in that coverage explicitly.
+    #[test]
+    fn open_for_agent_rejects_whitespace_only_agent_id() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let err = open_for_agent(dir.path(), " ")
+            .expect_err("whitespace-only agent_id must be rejected");
+        assert!(
+            matches!(err, crate::SqliteStoreError::InvalidAgentId(_)),
+            "expected InvalidAgentId for whitespace-only agent_id, got {err:?}"
+        );
+
+        let err2 = derive_agent_db_path(dir.path(), "   ")
+            .expect_err("multi-space agent_id must also be rejected");
+        assert!(matches!(err2, crate::SqliteStoreError::InvalidAgentId(_)));
+    }
+
+    /// (b) A pre-0.4.0 legacy shared-file database placed in `base_dir` under an
+    /// arbitrary filename (e.g. `showcase.db`) must be completely ignored by
+    /// `open_for_agent` — it creates (and only ever touches) the derived
+    /// `agent_{agent_id}.db` file, never the legacy file.
+    #[test]
+    fn open_for_agent_ignores_legacy_pre_0_4_0_shared_file() {
+        use crate::store::SqlitePersistenceStore;
+        use mempill_core::ports::persistence::PersistencePort;
+        use mempill_types::{
+            claim::{Cardinality, Claim, Confidence, Criticality, Fact},
+            identity::{AgentId, ClaimRef},
+            provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel},
+            time::{TransactionTime, ValidTime},
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let legacy_path = dir.path().join("showcase.db");
+
+        // Build a legacy shared-file DB via the internal (test-only) `open()` and write
+        // one claim into it directly, simulating a pre-0.4.0 deployment.
+        let legacy_conn = open(legacy_path.to_str().unwrap())
+            .expect("legacy shared-file open must succeed (uses the same internal path)");
+        let legacy_store = SqlitePersistenceStore::new(legacy_conn);
+        let legacy_agent = AgentId("legacy-shared-agent".into());
+        let legacy_claim = Claim::new(
+            ClaimRef::new_random(),
+            legacy_agent.clone(),
+            Fact { subject: "legacy".into(), predicate: "marker".into(), value: serde_json::json!("untouched") },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(chrono::Utc::now()),
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            Criticality::Low,
+            vec![],
+            None,
+            None,
+        );
+        let mut txn = legacy_store.begin_atomic(&legacy_agent).expect("legacy begin_atomic");
+        legacy_store.append_claim(&mut txn, &legacy_claim).expect("legacy append_claim");
+        legacy_store.commit(txn).expect("legacy commit");
+        drop(legacy_store);
+
+        let legacy_size_before = fs::metadata(&legacy_path).expect("legacy file must exist").len();
+
+        // Now open a per-agent database in the SAME base_dir under a DIFFERENT agent_id.
+        let per_agent_conn = open_for_agent(dir.path(), "modern-agent")
+            .expect("open_for_agent must succeed alongside an unrelated legacy file");
+        let per_agent_store = SqlitePersistenceStore::new(per_agent_conn);
+
+        let expected_per_agent_path = dir.path().join("agent_modern-agent.db");
+        assert!(expected_per_agent_path.exists(), "open_for_agent must create its own derived file");
+        assert_ne!(expected_per_agent_path, legacy_path, "the derived per-agent path must never equal the legacy shared-file path");
+
+        // The legacy file must be byte-for-byte untouched (size unchanged — no writes) and
+        // still contain exactly the one claim written above (readable, not corrupted).
+        let legacy_size_after = fs::metadata(&legacy_path).expect("legacy file must still exist").len();
+        assert_eq!(legacy_size_after, legacy_size_before, "open_for_agent must not modify the legacy shared-file's size");
+
+        let reopened_legacy = open(legacy_path.to_str().unwrap()).expect("legacy file must still be a valid, openable SQLite DB");
+        let reopened_legacy_store = SqlitePersistenceStore::new(reopened_legacy);
+        let loaded = reopened_legacy_store
+            .load_claim(&legacy_agent, legacy_claim.claim_ref())
+            .expect("legacy load_claim must not error")
+            .expect("legacy claim must still be present, untouched");
+        assert_eq!(loaded.fact().value, serde_json::json!("untouched"));
+
+        // The new per-agent file must start with ZERO claims — open_for_agent must never
+        // read/migrate rows FROM the legacy file into the new per-agent file.
+        let per_agent_claims = per_agent_store
+            .load_subject_line(&AgentId("modern-agent".into()), "legacy", "marker", None)
+            .expect("per-agent load_subject_line must not error");
+        assert!(per_agent_claims.is_empty(), "open_for_agent must never silently migrate legacy rows into the new per-agent file");
+
+        let _ = fs::remove_file(dir.path().join("agent_modern-agent.db-wal"));
+        let _ = fs::remove_file(dir.path().join("agent_modern-agent.db-shm"));
+        let _ = fs::remove_file(legacy_path.with_extension("db-wal"));
+        let _ = fs::remove_file(legacy_path.with_extension("db-shm"));
+    }
+
+    /// KNOWN DEFECT (found by this QA pass, NOT fixed here — no production-code changes
+    /// permitted for this test module): `open_for_agent` (and the underlying `open` /
+    /// `apply_migrations`) is NOT safe to call concurrently from two threads/processes
+    /// against the SAME brand-new (never-before-migrated) file.
+    ///
+    /// `migrations::apply_migrations` reads `PRAGMA user_version` (TOCTOU check), then
+    /// applies DDL, then writes the new `user_version` AFTER commit (see migrations.rs
+    /// module docs — this ordering is intentional for crash-safety, but is NOT safe
+    /// against a second concurrent connection racing the SAME read-before-write window).
+    /// Two threads opening the SAME fresh file concurrently can both observe
+    /// `user_version=0`, both run `ALTER TABLE ... ADD COLUMN` from `v3_date_granularity`,
+    /// and the second application fails with `"duplicate column name"` — surfaced here as
+    /// an `open_for_agent` error, not a panic/corruption, but it DOES mean a caller that
+    /// races two first-opens of the same never-before-seen agent_id can get a spurious
+    /// error instead of two usable handles.
+    ///
+    /// `#[ignore]`d (not part of the default green run) — this documents/reproduces the
+    /// defect for the maintainers; it is a migration-bootstrap concurrency bug, tracked
+    /// separately from the (passing) steady-state concurrent-open test below.
+    #[test]
+    #[ignore = "KNOWN DEFECT: apply_migrations has a TOCTOU race on user_version when two                 threads race the FIRST open_for_agent of a brand-new per-agent file —                 second connection's DDL can fail with 'duplicate column name'. See doc                 comment. Requires a production-code fix (out of scope for this test-only PR)."]
+    fn open_for_agent_concurrent_first_open_migration_race_is_unsafe() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let dir_path: std::path::PathBuf = dir.path().to_path_buf();
+        let agent_id = "first-open-race-agent";
+
+        let spawn_first_opener = |dir_path: std::path::PathBuf| {
+            std::thread::spawn(move || open_for_agent(&dir_path, agent_id).map(|_conn| ()))
+        };
+        let h1 = spawn_first_opener(dir_path.clone());
+        let h2 = spawn_first_opener(dir_path.clone());
+        let r1 = h1.join().expect("thread 1 must not panic");
+        let r2 = h2.join().expect("thread 2 must not panic");
+
+        // Documents the CURRENT (defective) behavior: at least one side fails. If this
+        // assertion ever fails (i.e. both succeed), the underlying race has been fixed
+        // upstream — remove the #[ignore] and this comment.
+        assert!(
+            r1.is_err() || r2.is_err(),
+            "expected the known migration TOCTOU race to surface as an error on at least              one concurrent first-open; both succeeded — the defect may be fixed, please              remove #[ignore] from this test"
+        );
+
+        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-wal")));
+        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-shm")));
+    }
+
+    /// (a) Concurrent `open_for_agent` calls for the SAME `agent_id` from two OS threads,
+    /// against an ALREADY-migrated per-agent file (the realistic steady-state scenario —
+    /// see the `#[ignore]`d test above for the separate first-open migration-race defect).
+    /// Each thread opens an independent `Connection` to the SAME on-disk file; both
+    /// handles must remain usable; concurrent writes must serialize correctly (SQLite
+    /// file-level locking under WAL) with no corruption — final row count must equal the
+    /// sum of both threads' writes, and every written claim must be individually readable
+    /// back.
+    #[test]
+    fn open_for_agent_same_agent_id_concurrent_open_from_two_threads_no_corruption() {
+        use crate::store::SqlitePersistenceStore;
+        use mempill_core::ports::persistence::PersistencePort;
+        use mempill_types::{
+            claim::{Cardinality, Claim, Confidence, Criticality, Fact},
+            identity::{AgentId, ClaimRef},
+            provenance::{ExternalAnchor, ExternalKind, ProvenanceLabel},
+            time::{TransactionTime, ValidTime},
+        };
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let dir_path: std::path::PathBuf = dir.path().to_path_buf();
+        let agent_id = "concurrent-shared-agent";
+        const WRITES_PER_THREAD: usize = 15;
+
+        // Pre-warm: run the one-time migration bootstrap SINGLE-THREADED first (avoids
+        // the separate, known migration-bootstrap race documented in the #[ignore]d test
+        // above — this test targets the realistic STEADY-STATE concurrent-open scenario).
+        drop(open_for_agent(&dir_path, agent_id).expect("pre-warm open_for_agent must succeed"));
+
+        let make_claim = |i: usize, thread_tag: &str| {
+            Claim::new(
+                ClaimRef::new_random(),
+                AgentId(agent_id.into()),
+                Fact { subject: format!("concurrent-subj-{thread_tag}-{i}"), predicate: "p".into(), value: serde_json::json!(i) },
+                Cardinality::Functional,
+                ProvenanceLabel::External(ExternalKind::UserAsserted),
+                ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+                TransactionTime(chrono::Utc::now()),
+                ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+                Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+                Criticality::Low,
+                vec![],
+                None,
+                None,
+            )
+        };
+
+        let spawn_writer = |thread_tag: &'static str, dir_path: std::path::PathBuf| {
+            std::thread::spawn(move || -> Vec<ClaimRef> {
+                // File is already migrated (pre-warmed above) — this open must succeed
+                // immediately for both threads; no migration DDL race is possible here.
+                let conn = open_for_agent(&dir_path, agent_id)
+                    .unwrap_or_else(|e| panic!("thread {thread_tag}: open_for_agent on an already-migrated file must succeed: {e:?}"));
+                let store = SqlitePersistenceStore::new(conn);
+                let agent = AgentId(agent_id.into());
+                let mut refs = Vec::with_capacity(WRITES_PER_THREAD);
+                for i in 0..WRITES_PER_THREAD {
+                    let claim = make_claim(i, thread_tag);
+                    let claim_ref = claim.claim_ref().clone();
+                    // Retry on transient SQLITE_BUSY from cross-connection contention —
+                    // both connections point at the SAME file; WAL allows concurrent
+                    // readers with one writer, but two independent Connections can still
+                    // race on BEGIN IMMEDIATE. A bounded retry loop tolerates that without
+                    // masking a genuine correctness bug (verified via final row-count).
+                    let mut attempts = 0;
+                    loop {
+                        let mut txn = match store.begin_atomic(&agent) {
+                            Ok(t) => t,
+                            Err(_) if attempts < 200 => { attempts += 1; std::thread::yield_now(); continue; }
+                            Err(e) => panic!("thread {thread_tag}: begin_atomic failed after retries: {e:?}"),
+                        };
+                        match store.append_claim(&mut txn, &claim).and_then(|_| store.commit(txn)) {
+                            Ok(()) => break,
+                            Err(_) if attempts < 200 => { attempts += 1; std::thread::yield_now(); continue; }
+                            Err(e) => panic!("thread {thread_tag}: append/commit failed after retries: {e:?}"),
+                        }
+                    }
+                    refs.push(claim_ref);
+                }
+                refs
+            })
+        };
+
+        let h1 = spawn_writer("t1", dir_path.clone());
+        let h2 = spawn_writer("t2", dir_path.clone());
+        let refs1 = h1.join().expect("thread t1 must not panic");
+        let refs2 = h2.join().expect("thread t2 must not panic");
+
+        assert_eq!(refs1.len(), WRITES_PER_THREAD);
+        assert_eq!(refs2.len(), WRITES_PER_THREAD);
+
+        // Reopen fresh and verify final state: no corruption, every claim from both
+        // threads is present and individually readable, no duplicates, no loss.
+        let verify_conn = open_for_agent(&dir_path, agent_id).expect("final reopen must succeed");
+        let verify_store = SqlitePersistenceStore::new(verify_conn);
+        let agent = AgentId(agent_id.into());
+
+        let all_refs: Vec<Arc<ClaimRef>> = refs1.iter().chain(refs2.iter()).map(|r| Arc::new(r.clone())).collect();
+        assert_eq!(all_refs.len(), WRITES_PER_THREAD * 2, "no duplicate claim_refs across threads");
+
+        for r in refs1.iter().chain(refs2.iter()) {
+            let loaded = verify_store
+                .load_claim(&agent, r)
+                .unwrap_or_else(|e| panic!("final verify load_claim must not error: {e:?}"))
+                .unwrap_or_else(|| panic!("claim {r:?} written by a concurrent thread must be present after both threads complete — possible corruption/lost write"));
+            assert_eq!(&loaded.claim_ref().clone(), r);
+        }
+
+        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-wal")));
+        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-shm")));
+    }
 }

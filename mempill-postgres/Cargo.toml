@@ -89,3 +89,18 @@ required-features = ["postgres-integration"]
 name = "postgres_pool_config"
 path = "tests/postgres_pool_config.rs"
 required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_scope_isolation"
+path = "tests/postgres_scope_isolation.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_granularity_reopen"
+path = "tests/postgres_granularity_reopen.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_pool_exhaustion"
+path = "tests/postgres_pool_exhaustion.rs"
+required-features = ["postgres-integration"]
