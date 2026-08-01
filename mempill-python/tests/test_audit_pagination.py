@@ -12,10 +12,10 @@ SURFACE NOTE (not a defect fixed here, documented behaviour):
   is inclusive and there is no monotonic entry-id cursor, a naive continuation
   using `from_tx_time = last_seen_recorded_at` re-fetches the boundary entry on
   every page transition. This test walks pages using the correct continuation
-  strategy (cursor = the MOST RECENT recorded_at seen so far, i.e. the first
-  element of each DESC-ordered page) and de-duplicates by `entry_id` client-side
-  to prove full coverage with no loss — but the exposed API requires the CALLER
-  to do this de-duplication; there is no cursor/limit variant that returns each
+  strategy (cursor = max(recorded_at) over the just-fetched page, computed via
+  max() rather than assumed from element position/order) and de-duplicates by
+  `entry_id` client-side to prove full coverage with no loss — but the exposed API
+  requires the CALLER to do this de-duplication; there is no cursor/limit variant that returns each
   entry exactly once server-side. See RECOMMENDATIONS in the task-level report:
   a from_tx_time-exclusive variant or an entry_id-based cursor would remove this
   caller-side burden and the (rare, timestamp-collision) risk of a stalled walk
@@ -50,11 +50,15 @@ def _ingest_n(engine: mempill.Engine, agent_id: str, n: int) -> None:
 def _walk_all_pages(engine: mempill.Engine, agent_id: str, page_size: int) -> tuple[dict, int]:
     """Multi-page walk using limit + from_tx_time continuation, deduped by entry_id.
 
-    Cursor strategy: each page is returned in recorded_at DESCENDING order, so the
-    first element of a page is the most-recently-recorded entry fetched so far.
-    Using that as the next from_tx_time (inclusive lower bound) guarantees no
-    chronological gap between pages; the resulting single-entry overlap at each
-    page boundary is removed via entry_id de-duplication.
+    Cursor strategy: the next from_tx_time is the MAXIMUM recorded_at across the
+    just-fetched page (computed via max(), not by relying on the page's element
+    order/position). This is deliberately robust to which ordering query_audit
+    returns entries in (the observed behaviour is recorded_at DESCENDING, but the
+    documented core contract is chronological/ASC for replay -- see the module
+    docstring); using max() gives the correct forward-continuation cursor either
+    way. Because from_tx_time is an INCLUSIVE lower bound, this necessarily
+    re-fetches the boundary entry on the next page, so the resulting single-entry
+    overlap at each page transition is removed via entry_id de-duplication.
 
     Returns (seen: dict[entry_id -> entry], page_count: int).
     """
@@ -81,7 +85,7 @@ def _walk_all_pages(engine: mempill.Engine, agent_id: str, page_size: int) -> tu
         if len(page) < page_size:
             break  # short page => exhausted
 
-        next_cursor = page[0]["recorded_at"]
+        next_cursor = max(entry["recorded_at"] for entry in page)
         assert next_cursor != cursor, (
             "Pagination cursor failed to advance — page boundary entries all share "
             "the same recorded_at as the previous cursor; this would stall the walk."
