@@ -560,10 +560,24 @@ mod tests {
                             Err(_) if attempts < 200 => { attempts += 1; std::thread::yield_now(); continue; }
                             Err(e) => panic!("thread {thread_tag}: begin_atomic failed after retries: {e:?}"),
                         };
-                        match store.append_claim(&mut txn, &claim).and_then(|_| store.commit(txn)) {
-                            Ok(()) => break,
-                            Err(_) if attempts < 200 => { attempts += 1; std::thread::yield_now(); continue; }
-                            Err(e) => panic!("thread {thread_tag}: append/commit failed after retries: {e:?}"),
+                        // On append_claim failure the txn must be explicitly rolled back
+                        // BEFORE retrying — silently dropping it here (e.g. via a chained
+                        // `.and_then(|_| store.commit(txn))`) would leak the connection out
+                        // of the store's single-connection slot and leave every subsequent
+                        // call on this store permanently failing with `TxnAlreadyOpen`.
+                        match store.append_claim(&mut txn, &claim) {
+                            Ok(_) => match store.commit(txn) {
+                                Ok(()) => break,
+                                Err(_) if attempts < 200 => { attempts += 1; std::thread::yield_now(); continue; }
+                                Err(e) => panic!("thread {thread_tag}: commit failed after retries: {e:?}"),
+                            },
+                            Err(_) if attempts < 200 => {
+                                let _ = store.rollback(txn);
+                                attempts += 1;
+                                std::thread::yield_now();
+                                continue;
+                            }
+                            Err(e) => panic!("thread {thread_tag}: append_claim failed after retries: {e:?}"),
                         }
                     }
                     refs.push(claim_ref);
@@ -587,7 +601,9 @@ mod tests {
         let agent = AgentId(agent_id.into());
 
         let all_refs: Vec<Arc<ClaimRef>> = refs1.iter().chain(refs2.iter()).map(|r| Arc::new(r.clone())).collect();
-        assert_eq!(all_refs.len(), WRITES_PER_THREAD * 2, "no duplicate claim_refs across threads");
+        assert_eq!(all_refs.len(), WRITES_PER_THREAD * 2, "sanity: expected 2*WRITES_PER_THREAD total refs collected");
+        let unique_refs: std::collections::HashSet<ClaimRef> = refs1.iter().chain(refs2.iter()).cloned().collect();
+        assert_eq!(unique_refs.len(), WRITES_PER_THREAD * 2, "no duplicate claim_refs across threads (HashSet-verified uniqueness, not just vector length)");
 
         for r in refs1.iter().chain(refs2.iter()) {
             let loaded = verify_store
