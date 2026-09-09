@@ -503,55 +503,11 @@ mod tests {
         let _ = fs::remove_file(legacy_path.with_extension("db-shm"));
     }
 
-    /// KNOWN DEFECT (found by this QA pass, NOT fixed here — no production-code changes
-    /// permitted for this test module): `open_for_agent` (and the underlying `open` /
-    /// `apply_migrations`) is NOT safe to call concurrently from two threads/processes
-    /// against the SAME brand-new (never-before-migrated) file.
-    ///
-    /// `migrations::apply_migrations` reads `PRAGMA user_version` (TOCTOU check), then
-    /// applies DDL, then writes the new `user_version` AFTER commit (see migrations.rs
-    /// module docs — this ordering is intentional for crash-safety, but is NOT safe
-    /// against a second concurrent connection racing the SAME read-before-write window).
-    /// Two threads opening the SAME fresh file concurrently can both observe
-    /// `user_version=0`, both run `ALTER TABLE ... ADD COLUMN` from `v3_date_granularity`,
-    /// and the second application fails with `"duplicate column name"` — surfaced here as
-    /// an `open_for_agent` error, not a panic/corruption, but it DOES mean a caller that
-    /// races two first-opens of the same never-before-seen agent_id can get a spurious
-    /// error instead of two usable handles.
-    ///
-    /// `#[ignore]`d (not part of the default green run) — this documents/reproduces the
-    /// defect for the maintainers; it is a migration-bootstrap concurrency bug, tracked
-    /// separately from the (passing) steady-state concurrent-open test below.
-    #[test]
-    #[ignore = "KNOWN DEFECT: apply_migrations has a TOCTOU race on user_version when two                 threads race the FIRST open_for_agent of a brand-new per-agent file —                 second connection's DDL can fail with 'duplicate column name'. See doc                 comment. Requires a production-code fix (out of scope for this test-only PR)."]
-    fn open_for_agent_concurrent_first_open_migration_race_is_unsafe() {
-        let dir = tempfile::tempdir().expect("tempdir should create");
-        let dir_path: std::path::PathBuf = dir.path().to_path_buf();
-        let agent_id = "first-open-race-agent";
-
-        let spawn_first_opener = |dir_path: std::path::PathBuf| {
-            std::thread::spawn(move || open_for_agent(&dir_path, agent_id).map(|_conn| ()))
-        };
-        let h1 = spawn_first_opener(dir_path.clone());
-        let h2 = spawn_first_opener(dir_path.clone());
-        let r1 = h1.join().expect("thread 1 must not panic");
-        let r2 = h2.join().expect("thread 2 must not panic");
-
-        // Documents the CURRENT (defective) behavior: at least one side fails. If this
-        // assertion ever fails (i.e. both succeed), the underlying race has been fixed
-        // upstream — remove the #[ignore] and this comment.
-        assert!(
-            r1.is_err() || r2.is_err(),
-            "expected the known migration TOCTOU race to surface as an error on at least              one concurrent first-open; both succeeded — the defect may be fixed, please              remove #[ignore] from this test"
-        );
-
-        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-wal")));
-        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-shm")));
-    }
-
     /// (a) Concurrent `open_for_agent` calls for the SAME `agent_id` from two OS threads,
     /// against an ALREADY-migrated per-agent file (the realistic steady-state scenario —
-    /// see the `#[ignore]`d test above for the separate first-open migration-race defect).
+    /// the separate first-open migration-race is covered, with a stronger multi-thread /
+    /// multi-iteration harness plus post-migration schema verification, by
+    /// `mempill-sqlite/tests/migration_race.rs`).
     /// Each thread opens an independent `Connection` to the SAME on-disk file; both
     /// handles must remain usable; concurrent writes must serialize correctly (SQLite
     /// file-level locking under WAL) with no corruption — final row count must equal the
@@ -574,9 +530,9 @@ mod tests {
         let agent_id = "concurrent-shared-agent";
         const WRITES_PER_THREAD: usize = 15;
 
-        // Pre-warm: run the one-time migration bootstrap SINGLE-THREADED first (avoids
-        // the separate, known migration-bootstrap race documented in the #[ignore]d test
-        // above — this test targets the realistic STEADY-STATE concurrent-open scenario).
+        // Pre-warm: run the one-time migration bootstrap SINGLE-THREADED first — this test
+        // targets the realistic STEADY-STATE concurrent-open scenario; the first-open
+        // migration race itself is covered by `tests/migration_race.rs`.
         drop(open_for_agent(&dir_path, agent_id).expect("pre-warm open_for_agent must succeed"));
 
         let make_claim = |i: usize, thread_tag: &str| {
