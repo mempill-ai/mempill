@@ -454,9 +454,20 @@ class HistoryEntry:
         claim_ref:                 UUID string identifying the underlying claim.
         value:                     The asserted value for this claim.
         valid_from:                RFC3339 start of the valid-time window, or None if unknown.
-        valid_until:               Effective end of the slot (successor's ordering key), or
-                                   None for the open-ended current slot.
-        status:                    "Current" or "Superseded".
+        valid_until:               Effective end of the slot: this claim's own end when
+                                   present (never discarded in favor of a later successor
+                                   key), narrowed by a successor only for a genuine
+                                   non-overlapping succession; None for the open-ended
+                                   current slot or a genuine overlap (see `status`).
+        status:                    "Current" | "Superseded" | "Contested" | "Ended".
+                                   "Current": live, unconflicted, in effect now.
+                                   "Superseded": not live — explicitly bounded by the ledger.
+                                   "Contested": live and part of an unresolved conflict
+                                   (structural or a pairwise valid-time overlap) — never
+                                   silently narrowed or picked (I7).
+                                   "Ended": still live per the ledger (never explicitly
+                                   bounded) but its own window has expired with no live
+                                   successor covering the query instant.
         provenance:                Human-readable label, e.g. "External/UserAsserted".
         value_confidence:          Confidence in the claim's value (0.0–1.0).
         valid_from_display:        `valid_from` pre-rendered at its recorded precision
@@ -464,10 +475,12 @@ class HistoryEntry:
                                    rendering to recall()/BeliefDetail-level display. None
                                    when the start endpoint is unknown.
         valid_until_display:       `valid_until` pre-rendered at its recorded precision.
-                                   DERIVED endpoint — rendered from the SUCCESSOR claim's
-                                   start_granularity (the honest source of the bound), not
-                                   this entry's own end_granularity. None when open-ended
-                                   or unknown.
+                                   Reflects whichever timestamp actually bounded the window:
+                                   this entry's own end_granularity when its own end was
+                                   used (the common case), or the SUCCESSOR claim's
+                                   start_granularity only when the successor's ordering key
+                                   was used and itself came from valid_time.start. None when
+                                   open-ended, overlapping, or unknown.
         valid_from_granularity:    Raw granularity string ("year"|"month"|"day"|"instant")
                                    for `valid_from`, or None (absent/legacy row).
         valid_until_granularity:   Raw granularity string for `valid_until`. Same
@@ -502,7 +515,10 @@ class History:
     def current(self) -> Optional[HistoryEntry]:
         """Return the single Current entry, or None if none exists.
 
-        Guaranteed to agree with recall() — the same canonical fold is used.
+        Guaranteed to agree with recall() — the same canonical fold is used. Returns
+        None when the line is empty, all claims are superseded, the line is contested
+        (status "Contested" — never a silent pick), or the only live claim's own
+        window has closed with no live successor (status "Ended").
         """
         for e in self.entries:
             if e.status == "Current":
@@ -535,13 +551,15 @@ def history(
     """Return the full ordered history timeline for a (subject, predicate) pair.
 
     Entries are ordered oldest→newest by the canonical ordering key (same as the
-    truth engine fold). Each entry carries `.status` ("Current" or "Superseded"),
+    truth engine fold). Each entry carries `.status`
+    ("Current" | "Superseded" | "Contested" | "Ended" — see `HistoryEntry` docstring),
     `.value`, `.valid_from`, `.valid_until`, `.provenance`, `.value_confidence`,
     `.claim_ref`, plus honest-precision display fields `.valid_from_display` /
     `.valid_until_display` and raw granularity fields `.valid_from_granularity` /
-    `.valid_until_granularity`. `valid_until_*` are DERIVED from the successor
-    claim's start (see `HistoryEntry` docstring) — never fabricated from this
-    entry's own end_granularity.
+    `.valid_until_granularity`. An entry's own `valid_until` is honoured whenever
+    present (never discarded for a later successor key); `valid_until_*` fall back to
+    the successor claim's start only for a genuine non-overlapping succession (see
+    `HistoryEntry` docstring) — never fabricated over a real conflict.
 
     The `.current()` entry is guaranteed to agree with recall() — both use the
     same canonical fold at the engine level.

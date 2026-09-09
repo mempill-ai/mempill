@@ -2,47 +2,31 @@
 //! QueryHistoryUseCase — application layer read path for the history timeline.
 //!
 //! Read-only: no Txn opened, no writes. Returns all claims on a subject-line ordered
-//! by the canonical ordering key, with each entry tagged Current or Superseded.
+//! by the canonical ordering key, with each entry tagged `Current`, `Superseded`,
+//! `Contested`, or `Ended`.
 //!
-//! ## Correctness guarantee
+//! ## Correctness guarantee (I8 single source of truth)
 //!
-//! `Current` / `Superseded` is derived from `is_live` in the SAME `truth_engine::fold`
-//! call that `query_memory` uses (with `now` from the boundary), so `history()` and
-//! `recall()` / `query_memory` are guaranteed to agree on which entry is current.
+//! This use-case is a THIN MAPPER over `truth_engine::fold` + `truth_engine::compute_history_windows`
+//! — the SAME fold call (and the same succession/overlap primitives in `valid_time_helpers`)
+//! that `query_memory` uses. There is no second window/overlap algorithm here: window
+//! computation, succession-vs-overlap classification, and the has_conflict signal are all
+//! computed once, in the engine layer, and shared by both read paths. This guarantees
+//! `history()` and `recall()` / `query_memory` can never drift on which entry is current or
+//! which entries are contested — the historical class of bug this design eliminates.
 //!
-//! ## Effective-window computation
+//! ## Status semantics
 //!
-//! `valid_until` for entry i = the canonical ordering key of entry i+1.
-//! The last (open-ended / current) entry has `valid_until = None`.
-//! This logic is extracted into the pure function `compute_effective_windows` so it
-//! can be unit-tested in isolation.
-//!
-//! ## Derived-endpoint granularity rule (TASK-32)
-//!
-//! `valid_until` is not this entry's own field — it is BOUNDED by the successor's
-//! canonical ordering key (see `compute_effective_windows` above). Attributing this
-//! entry's own `end_granularity` to a derived timestamp it did not produce would be
-//! dishonest (the field literally comes from claim i+1, not claim i). The rule this
-//! module follows, mirrored in `compute_effective_window_granularities`:
-//!
-//! - When the successor's ordering key is `successor.valid_time.start` (i.e. the
-//!   successor's `valid_time_confidence` meets the engine threshold), `valid_until`'s
-//!   granularity is the **successor's `start_granularity`** — the honest source of the
-//!   bounding instant.
-//! - When the successor's ordering key falls back to `successor.transaction_time`
-//!   (low valid-time confidence), the granularity is `None` — a machine-assigned
-//!   transaction timestamp has no user-supplied date precision to report.
-//!
-//! This mirrors `BeliefDetail::valid_until_granularity` (`mempill-facade/src/ergonomic.rs`)
-//! in spirit (DISPLAY-ONLY, additive, never used for fold/ordering) but differs in *source*:
-//! `BeliefDetail` reports a claim's OWN `end_granularity`; `HistoryEntry::valid_until_granularity`
-//! reports the SUCCESSOR's `start_granularity`, because the effective window boundary is a
-//! derived (successor-supplied), not stored, value.
+//! See `mempill_types::HistoryEntryStatus` for the full per-variant contract. In short:
+//! `Superseded` = not raw-live (explicitly bounded); `Contested` = raw-live and part of an
+//! unresolved conflict (structural `has_conflict` or pairwise valid-time overlap); `Current` =
+//! raw-live, unconflicted, narrowed-selected, and its window contains `now`; `Ended` = raw-live
+//! but its own window has closed with no live successor covering `now` (the residual bucket).
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use mempill_types::{Claim, ClaimRef, DateGranularity, HistoryEntryStatus, ProvenanceLabel, ExternalKind};
+use mempill_types::{ClaimRef, HistoryEntryStatus, ProvenanceLabel, ExternalKind};
 
 use crate::{
     application::ingest_claim::build_latest_disposition_map,
@@ -53,18 +37,6 @@ use crate::{
 };
 
 use super::dto::{HistoryEntry, QueryHistoryRequest, QueryHistoryResponse};
-
-// ── Ordering key (pure) ───────────────────────────────────────────────────────
-
-/// Compute the canonical ordering key for a claim — mirrors `truth_engine::ordering_key`
-/// exactly so the sort order here matches the fold sort order.
-fn ordering_key_dt(claim: &Claim, config: &EngineConfig) -> DateTime<Utc> {
-    if claim.valid_time().valid_time_confidence >= config.valid_time_confidence_threshold {
-        claim.valid_time().start.unwrap_or(claim.transaction_time().0)
-    } else {
-        claim.transaction_time().0
-    }
-}
 
 // ── Provenance formatting ─────────────────────────────────────────────────────
 
@@ -82,75 +54,6 @@ fn format_provenance(p: &ProvenanceLabel) -> String {
         ProvenanceLabel::ModelDerived => "ModelDerived".to_owned(),
         _ => format!("{p:?}"),
     }
-}
-
-// ── Pure helper: compute effective valid_until windows ────────────────────────
-
-/// Compute the effective `valid_until` for each claim in the sorted timeline.
-///
-/// The timeline must be pre-sorted by the canonical ordering key (oldest first).
-///
-/// Rule: entry i's `valid_until` = the canonical ordering key of entry i+1.
-///       The last entry (most recent / open-ended) has `valid_until = None`.
-///
-/// This function is PURE (no I/O, no clock) and is tested independently.
-pub fn compute_effective_windows(
-    sorted: &[&Claim],
-    config: &EngineConfig,
-) -> Vec<Option<DateTime<Utc>>> {
-    let n = sorted.len();
-    let mut windows = Vec::with_capacity(n);
-    for i in 0..n {
-        if i + 1 < n {
-            // Successor's canonical ordering key closes this entry's window.
-            windows.push(Some(ordering_key_dt(sorted[i + 1], config)));
-        } else {
-            // Last entry — open-ended.
-            windows.push(None);
-        }
-    }
-    windows
-}
-
-// ── Pure helper: compute effective valid_until granularities ──────────────────
-
-/// Compute the effective `valid_until_granularity` for each claim in the sorted timeline.
-///
-/// Companion to [`compute_effective_windows`] — same successor-bounding rule, same
-/// pre-sort precondition (oldest first). See the module-level "Derived-endpoint
-/// granularity rule" doc for the honesty rationale.
-///
-/// Rule: entry i's `valid_until_granularity` =
-///   - successor's `start_granularity`, when the successor's ordering key is its
-///     `valid_time.start` (valid_time_confidence ≥ threshold);
-///   - `None`, when the successor's ordering key falls back to its `transaction_time`.
-///
-/// The last entry (open-ended) has `valid_until_granularity = None`.
-///
-/// This function is PURE (no I/O, no clock) and is tested independently.
-pub fn compute_effective_window_granularities(
-    sorted: &[&Claim],
-    config: &EngineConfig,
-) -> Vec<Option<DateGranularity>> {
-    let n = sorted.len();
-    let mut grans = Vec::with_capacity(n);
-    for i in 0..n {
-        if i + 1 < n {
-            let successor = sorted[i + 1];
-            let uses_valid_time_start = successor.valid_time().valid_time_confidence
-                >= config.valid_time_confidence_threshold;
-            grans.push(if uses_valid_time_start {
-                successor.valid_time().start_granularity
-            } else {
-                // Ordering key fell back to transaction_time — no date-precision to report.
-                None
-            });
-        } else {
-            // Last entry — open-ended, no bounding successor.
-            grans.push(None);
-        }
-    }
-    grans
 }
 
 // ── Use-case ──────────────────────────────────────────────────────────────────
@@ -209,9 +112,11 @@ where
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
 
-        // Canonical fold — SAME call as query_memory so Current/Superseded agrees with recall.
+        // Canonical fold — SAME call as query_memory so Current/Contested/Superseded agrees
+        // with recall. `fold.all_claims` is already sorted by the canonical ordering key
+        // (I8) — this use-case never re-sorts or re-derives windows.
         let fold = truth_engine::fold(
-            claims.clone(),
+            claims,
             |cref| {
                 self.persistence
                     .load_validity_assertions_for(&req.agent_id, cref)
@@ -223,46 +128,40 @@ where
             &latest_disposition,
         );
 
-        // Build a set of live claim refs (those that are Current).
+        // Narrowed-selection membership (post succession-narrowing) — required for `Current`.
         let live_refs: std::collections::HashSet<&ClaimRef> = fold
             .live_claims
             .iter()
             .map(|cs| cs.claim.claim_ref())
             .collect();
 
-        // Sort all claims by canonical ordering key (oldest first) — same sort as fold.
-        let mut sorted_claims = claims;
-        sorted_claims.sort_by(|a, b| {
-            let ka = ordering_key_dt(a, &self.config);
-            let kb = ordering_key_dt(b, &self.config);
-            ka.cmp(&kb)
-                .then(a.transaction_time().0.cmp(&b.transaction_time().0))
-                .then(a.claim_ref().0.as_u128().cmp(&b.claim_ref().0.as_u128()))
-        });
+        // Single engine-layer computation for windows + contested + contains-now, reusing the
+        // SAME primitives (`valid_time_helpers::claim_is_trusted` / `windows_non_overlapping`)
+        // the fold itself uses for succession narrowing — no second window algorithm.
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &self.config);
 
-        // Compute effective valid_until windows + their derived granularities.
-        let refs: Vec<&Claim> = sorted_claims.iter().collect();
-        let windows = compute_effective_windows(&refs, &self.config);
-        let window_granularities = compute_effective_window_granularities(&refs, &self.config);
-
-        // Map each claim to a HistoryEntry.
-        let entries: Vec<HistoryEntry> = sorted_claims
+        // Map each raw claim + its computed window to a HistoryEntry.
+        let entries: Vec<HistoryEntry> = fold.all_claims
             .iter()
-            .zip(windows)
-            .zip(window_granularities)
-            .map(|((claim, valid_until), valid_until_granularity)| {
-                let status = if live_refs.contains(claim.claim_ref()) {
+            .zip(windows.iter())
+            .map(|(cs, w)| {
+                let claim = &cs.claim;
+                let status = if !cs.is_live {
+                    HistoryEntryStatus::Superseded
+                } else if w.contested {
+                    HistoryEntryStatus::Contested
+                } else if live_refs.contains(claim.claim_ref()) && w.contains_now {
                     HistoryEntryStatus::Current
                 } else {
-                    HistoryEntryStatus::Superseded
+                    HistoryEntryStatus::Ended
                 };
                 HistoryEntry {
                     claim_ref: claim.claim_ref().clone(),
                     value: claim.fact().value.clone(),
                     valid_from: claim.valid_time().start,
-                    valid_until,
+                    valid_until: w.valid_until,
                     valid_from_granularity: claim.valid_time().start_granularity,
-                    valid_until_granularity,
+                    valid_until_granularity: w.valid_until_granularity,
                     status,
                     provenance: format_provenance(claim.provenance()),
                     value_confidence: claim.confidence().value_confidence,
@@ -527,7 +426,7 @@ mod tests {
         assert_eq!(resp.entries[1].value, serde_json::json!("Bob"), "newer second");
     }
 
-    // ── Test 4: effective-window correctness ──────────────────────────────────
+    // ── Test 4: window correctness via the engine-layer fold + compute_history_windows ──
 
     #[test]
     fn effective_window_successor_closes_prior_entry() {
@@ -539,19 +438,21 @@ mod tests {
         let c1 = make_claim(&agent, "a", "b", serde_json::json!("v1"), t1, None, None, 0.0);
         let c2 = make_claim(&agent, "a", "b", serde_json::json!("v2"), t2, None, None, 0.0);
 
-        let sorted: Vec<&Claim> = vec![&c1, &c2];
-        let windows = compute_effective_windows(&sorted, &config);
+        let now = t2 + chrono::Duration::seconds(1);
+        let fold = truth_engine::fold(vec![c1, c2], |_| vec![], now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
 
-        // c1's valid_until = ordering key of c2 (= t2 since low confidence uses tx_time)
-        assert_eq!(windows[0], Some(t2), "c1 closed by c2's ordering key");
+        // c1's valid_until = ordering key of c2 (= t2 since low confidence uses tx_time; no
+        // valid_time at all on either claim → legacy successor-key fallback, unchanged).
+        assert_eq!(windows[0].valid_until, Some(t2), "c1 closed by c2's ordering key");
         // c2 is last → open-ended
-        assert_eq!(windows[1], None, "last entry is open-ended");
+        assert_eq!(windows[1].valid_until, None, "last entry is open-ended");
     }
 
-    // ── Test 5: status-vs-recall consistency ──────────────────────────────────
+    // ── Test 5: status-vs-recall consistency — real conflict must be Contested, not Current ──
 
     #[test]
-    fn current_entry_value_matches_recall_primary() {
+    fn conflicting_claims_are_contested_not_silently_current() {
         let store = Arc::new(MockStore::default());
         let agent = agent();
         let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
@@ -569,10 +470,14 @@ mod tests {
             now,
         ).unwrap();
 
-        // With two conflicting functional claims (no valid_time), has_conflict=true.
-        // Both are "live" in the fold sense (contested). The test verifies at least one Current entry.
-        let current_entries: Vec<_> = resp.entries.iter().filter(|e| e.status == HistoryEntryStatus::Current).collect();
-        assert!(!current_entries.is_empty(), "at least one Current entry must exist");
+        // Two conflicting functional claims (no valid_time) → fold.has_conflict=true → BOTH
+        // raw-live entries must be Contested (I7: never silently narrowed or picked as Current).
+        assert_eq!(resp.entries.len(), 2);
+        for e in &resp.entries {
+            assert_eq!(e.status, HistoryEntryStatus::Contested,
+                "real conflict must surface as Contested on every raw-live entry, never Current");
+        }
+        assert!(resp.current().is_none(), "no Current entry when conflicted");
     }
 
     // ── Test 6: high-confidence ordering key uses valid_time_start ────────────
@@ -582,25 +487,25 @@ mod tests {
         let config = EngineConfig::default(); // threshold = 0.7
         let agent = agent();
 
-        // claim A: tx_time late, vt_start early, high confidence → orders by vt_start
+        // claim A: tx_time late, vt_start early, high confidence, no end → orders by vt_start.
         let tx_late = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
         let vt_early = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
         let claim_a = make_claim(&agent, "x", "y", serde_json::json!("A"), tx_late, Some(vt_early), None, 0.9);
 
-        // claim B: tx_time early, no vt_start, low confidence → orders by tx_time
+        // claim B: tx_time early, no vt_start, low confidence → orders by tx_time (untrusted, so
+        // overlap between A and B cannot be determined → legacy successor-key fallback fires).
         let tx_early = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let claim_b = make_claim(&agent, "x", "y", serde_json::json!("B"), tx_early, None, None, 0.0);
 
-        // A should sort before B because A's ordering key = vt_early (2020) < B's tx_early (2023)
-        let key_a = ordering_key_dt(&claim_a, &config);
-        let key_b = ordering_key_dt(&claim_b, &config);
-        assert!(key_a < key_b, "high-confidence A (vt=2020) must precede B (tx=2023)");
+        let now = tx_late + chrono::Duration::seconds(1);
+        let fold = truth_engine::fold(vec![claim_a, claim_b], |_| vec![], now, None, &config, &std::collections::HashMap::new());
+        // A should sort before B because A's ordering key = vt_early (2020) < B's tx_early (2023).
+        assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("A"));
+        assert_eq!(fold.all_claims[1].claim.fact().value, serde_json::json!("B"));
 
-        // Verify compute_effective_windows puts A's valid_until = B's key
-        let sorted: Vec<&Claim> = vec![&claim_a, &claim_b];
-        let windows = compute_effective_windows(&sorted, &config);
-        assert_eq!(windows[0], Some(key_b), "A's valid_until = B's ordering key");
-        assert_eq!(windows[1], None, "B is last → open-ended");
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+        assert_eq!(windows[0].valid_until, Some(tx_early), "A's valid_until = B's ordering key (tx fallback)");
+        assert_eq!(windows[1].valid_until, None, "B is last → open-ended");
     }
 
     // ── Test 7: reinstated/edge case — no live claims → all Superseded ────────
@@ -648,29 +553,32 @@ mod tests {
         assert!(resp.current().is_none(), "no current entry when all claims are bounded");
     }
 
-    // ── Tests for compute_effective_windows (pure function) ───────────────────
+    // ── Tests for truth_engine::compute_history_windows via fold (pure engine layer) ──
 
     #[test]
-    fn compute_effective_windows_empty() {
+    fn compute_history_windows_empty() {
         let config = EngineConfig::default();
-        let windows = compute_effective_windows(&[], &config);
+        let now = Utc::now();
+        let fold = truth_engine::fold(vec![], |_| vec![], now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
         assert!(windows.is_empty());
     }
 
     #[test]
-    fn compute_effective_windows_single() {
+    fn compute_history_windows_single() {
         let config = EngineConfig::default();
         let agent = agent();
         let tx = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let c = make_claim(&agent, "a", "b", serde_json::json!("v"), tx, None, None, 0.0);
-        let sorted = vec![&c];
-        let windows = compute_effective_windows(&sorted, &config);
+        let now = tx + chrono::Duration::seconds(1);
+        let fold = truth_engine::fold(vec![c], |_| vec![], now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0], None, "single claim → open-ended");
+        assert_eq!(windows[0].valid_until, None, "single claim → open-ended");
     }
 
     #[test]
-    fn compute_effective_windows_three_entries() {
+    fn compute_history_windows_three_entries_no_valid_time() {
         let config = EngineConfig::default();
         let agent = agent();
         let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
@@ -681,17 +589,18 @@ mod tests {
         let c2 = make_claim(&agent, "a", "b", serde_json::json!("v2"), t2, None, None, 0.0);
         let c3 = make_claim(&agent, "a", "b", serde_json::json!("v3"), t3, None, None, 0.0);
 
-        let sorted = vec![&c1, &c2, &c3];
-        let windows = compute_effective_windows(&sorted, &config);
+        let now = t3 + chrono::Duration::seconds(1);
+        let fold = truth_engine::fold(vec![c1, c2, c3], |_| vec![], now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
 
         assert_eq!(windows.len(), 3);
-        // Each entry closes at successor's tx_time (low confidence)
-        assert_eq!(windows[0], Some(t2));
-        assert_eq!(windows[1], Some(t3));
-        assert_eq!(windows[2], None);
+        // No valid_time at all on any claim → legacy successor-ordering-key fallback (tx_time).
+        assert_eq!(windows[0].valid_until, Some(t2));
+        assert_eq!(windows[1].valid_until, Some(t3));
+        assert_eq!(windows[2].valid_until, None);
     }
 
-    // ── Derived-endpoint granularity tests (TASK-32) ───────────────────────────
+    // ── Derived-endpoint granularity tests (TASK-32, updated for the fold-derived design) ──
 
     #[allow(clippy::too_many_arguments)]
     fn make_claim_gran(
@@ -727,8 +636,8 @@ mod tests {
         )
     }
 
-    /// High-confidence successor whose ordering key is its `valid_time.start`:
-    /// predecessor's `valid_until_granularity` = successor's `start_granularity`.
+    /// Predecessor's valid-time is UNTRUSTED (so overlap can't be determined and it has no own
+    /// end) → legacy fallback: the trusted successor's `start_granularity` wins.
     #[test]
     fn effective_window_granularity_uses_successor_start_granularity() {
         use mempill_types::DateGranularity;
@@ -738,58 +647,45 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
 
-        let c1 = make_claim_gran(&agent, "a", "b", serde_json::json!("v1"), t1, Some(t1), Some(DateGranularity::Day), 0.9);
+        // c1 untrusted (0.3 < threshold): overlap with c2 cannot be determined → fallback fires.
+        let c1 = make_claim_gran(&agent, "a", "b", serde_json::json!("v1"), t1, Some(t1), Some(DateGranularity::Day), 0.3);
         let c2 = make_claim_gran(&agent, "a", "b", serde_json::json!("v2"), t2, Some(t2), Some(DateGranularity::Year), 0.9);
 
-        let sorted: Vec<&Claim> = vec![&c1, &c2];
-        let grans = compute_effective_window_granularities(&sorted, &config);
+        let now = t2 + chrono::Duration::seconds(1);
+        let fold = truth_engine::fold(vec![c1, c2], |_| vec![], now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
 
-        assert_eq!(grans.len(), 2);
+        assert_eq!(windows.len(), 2);
         assert_eq!(
-            grans[0],
+            windows[0].valid_until_granularity,
             Some(DateGranularity::Year),
-            "predecessor's valid_until_granularity must be successor's start_granularity"
+            "predecessor's valid_until_granularity must be the trusted successor's start_granularity"
         );
-        assert_eq!(grans[1], None, "last entry (open-ended) has no bounding successor");
+        assert_eq!(windows[1].valid_until_granularity, None, "last entry (open-ended) has no bounding successor");
     }
 
-    /// Low-confidence successor whose ordering key falls back to `transaction_time`:
-    /// predecessor's `valid_until_granularity` must be `None` (tx_time has no date precision).
+    /// Both untrusted: successor's ordering key falls back to `transaction_time` — the
+    /// granularity must be `None` (tx_time has no date precision), never fabricated.
     #[test]
     fn effective_window_granularity_none_when_successor_uses_tx_time_fallback() {
-        use mempill_types::DateGranularity;
-
         let config = EngineConfig::default(); // threshold = 0.7
         let agent = agent();
         let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
 
-        let c1 = make_claim_gran(&agent, "a", "b", serde_json::json!("v1"), t1, Some(t1), Some(DateGranularity::Month), 0.9);
+        let c1 = make_claim_gran(&agent, "a", "b", serde_json::json!("v1"), t1, Some(t1), Some(mempill_types::DateGranularity::Month), 0.3);
         // Successor has valid_time_confidence below threshold → ordering key falls back to tx_time,
         // even though start_granularity is set — it must NOT leak into valid_until_granularity.
-        let c2 = make_claim_gran(&agent, "a", "b", serde_json::json!("v2"), t2, Some(t2), Some(DateGranularity::Year), 0.0);
+        let c2 = make_claim_gran(&agent, "a", "b", serde_json::json!("v2"), t2, Some(t2), Some(mempill_types::DateGranularity::Year), 0.0);
 
-        let sorted: Vec<&Claim> = vec![&c1, &c2];
-        let grans = compute_effective_window_granularities(&sorted, &config);
+        let now = t2 + chrono::Duration::seconds(1);
+        let fold = truth_engine::fold(vec![c1, c2], |_| vec![], now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
 
         assert_eq!(
-            grans[0], None,
+            windows[0].valid_until_granularity, None,
             "successor's ordering key used tx_time fallback → valid_until_granularity must be None, not Year"
         );
-    }
-
-    /// Empty and single-entry timelines produce empty / all-None granularity vectors.
-    #[test]
-    fn effective_window_granularities_empty_and_single() {
-        let config = EngineConfig::default();
-        assert!(compute_effective_window_granularities(&[], &config).is_empty());
-
-        let agent = agent();
-        let tx = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        let c = make_claim(&agent, "a", "b", serde_json::json!("v"), tx, None, None, 0.0);
-        let sorted = vec![&c];
-        let grans = compute_effective_window_granularities(&sorted, &config);
-        assert_eq!(grans, vec![None]);
     }
 
     // ── Additional: provenance format ─────────────────────────────────────────
@@ -823,7 +719,13 @@ mod tests {
         let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
 
-        let c1 = make_claim_gran(&agent, "acme", "ceo", serde_json::json!("Alice"), t1, Some(t1), Some(DateGranularity::Day), 0.9);
+        // Alice is UNTRUSTED (0.3 < threshold) and open-ended (no own end): overlap against Bob
+        // cannot be determined, so the legacy successor-key fallback fires and Bob's OWN
+        // start_granularity flows through as Alice's valid_until_granularity. (Two mutually
+        // TRUSTED open-ended claims would instead be a genuine overlap → Contested — see
+        // `conflicting_claims_are_contested_not_silently_current` — so this scenario requires
+        // one side untrusted to exercise the fallback path honestly.)
+        let c1 = make_claim_gran(&agent, "acme", "ceo", serde_json::json!("Alice"), t1, Some(t1), Some(DateGranularity::Day), 0.3);
         let c2 = make_claim_gran(&agent, "acme", "ceo", serde_json::json!("Bob"), t2, Some(t2), Some(DateGranularity::Year), 0.9);
         store.claims.lock().unwrap().push(c1);
         store.claims.lock().unwrap().push(c2);

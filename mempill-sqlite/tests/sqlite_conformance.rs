@@ -3,7 +3,10 @@
 
 use mempill_core::testing::conformance::{
     run_disposition_scope_conformance, run_granularity_conformance, run_history_conformance,
-    run_history_granularity_conformance, run_persistence_conformance, run_valid_at_conformance,
+    run_history_granularity_conformance, run_persistence_conformance,
+    run_reconcile_incumbent_selection_matches_query_memory_primary_conformance,
+    run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_conformance,
+    run_valid_at_conformance,
 };
 use mempill_sqlite::{connection::open_in_memory, store::SqlitePersistenceStore};
 
@@ -61,4 +64,22 @@ fn sqlite_passes_history_granularity_conformance() {
     let conn = open_in_memory().expect("in-memory SQLite connection must open");
     let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
     run_history_granularity_conformance(&store);
+}
+
+/// DIAG_silent_succession §6(b): reconcile's incumbent selection must agree with
+/// query_memory's primary/status view on a genuine 2-claim overlap (SQLite).
+#[test]
+fn sqlite_reconcile_incumbent_selection_matches_query_memory_primary() {
+    let conn = open_in_memory().expect("in-memory SQLite connection must open");
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
+    run_reconcile_incumbent_selection_matches_query_memory_primary_conformance(&store);
+}
+
+/// DIAG_silent_succession §6(b): sweep reverts without superseding; only
+/// submit_adjudication(Affirm) may supersede the incumbent (SQLite).
+#[test]
+fn sqlite_sweep_resolves_then_supersession_happens_only_via_submit_adjudication() {
+    let conn = open_in_memory().expect("in-memory SQLite connection must open");
+    let store = std::sync::Arc::new(SqlitePersistenceStore::new(conn));
+    run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_conformance(&store);
 }

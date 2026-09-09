@@ -157,6 +157,11 @@ pub use mempill_types::HistoryEntryStatus;
 /// key (valid_time_start when confidence ≥ threshold, else tx_time), exactly matching
 /// the sort order of `recall` / `query_memory`.
 ///
+/// Each entry's `status` is one of [`HistoryEntryStatus::Current`],
+/// [`HistoryEntryStatus::Superseded`], [`HistoryEntryStatus::Contested`], or
+/// [`HistoryEntryStatus::Ended`] — all derived from the SAME canonical fold that powers
+/// `recall`, so `history().current()` and `recall().primary` always agree.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -188,7 +193,10 @@ impl History {
     /// Returns the single `Current` entry, if any.
     ///
     /// The current entry is exactly the claim that [`recall`] would return as primary.
-    /// Returns `None` when the subject-line is empty or all claims have been superseded.
+    /// Returns `None` when the subject-line is empty, all claims have been superseded, the
+    /// line is contested (see [`HistoryEntryStatus::Contested`] — never a silent pick, I7),
+    /// or the only live claim's own window has closed without a live successor
+    /// (see [`HistoryEntryStatus::Ended`]).
     pub fn current(&self) -> Option<&HistoryEntry> {
         self.entries.iter().find(|e| e.status == HistoryEntryStatus::Current)
     }
@@ -713,18 +721,23 @@ pub async fn recall(
 /// Retrieve the full ordered history timeline for a subject+predicate.
 ///
 /// Returns a [`History`] containing all claims ever written to the (subject, predicate)
-/// subject-line, ordered oldest-first. Each entry is tagged [`HistoryEntryStatus::Current`]
-/// or [`HistoryEntryStatus::Superseded`] using the same canonical fold as [`recall`], so
-/// `history().current()` is guaranteed to agree with `recall().primary`.
+/// subject-line, ordered oldest-first. Each entry is tagged [`HistoryEntryStatus::Current`],
+/// [`HistoryEntryStatus::Superseded`], [`HistoryEntryStatus::Contested`], or
+/// [`HistoryEntryStatus::Ended`] using the SAME canonical fold as [`recall`] — window
+/// computation, succession-vs-overlap classification, and the conflict signal are computed
+/// once in the engine layer and shared by both, so `history().current()` is guaranteed to
+/// agree with `recall().primary`, and a genuinely conflicted line is never silently narrowed
+/// to a fabricated `Current` entry (I7).
 ///
 /// Each [`HistoryEntry`] also carries `valid_from_granularity` / `valid_until_granularity`
 /// (`Option<DateGranularity>`), display-only precision hints for the entry's `valid_from` /
 /// `valid_until` timestamps. `valid_from_granularity` is this claim's own stored
-/// `start_granularity`. `valid_until_granularity` is **derived**: it is the successor
-/// claim's `start_granularity` (since `valid_until` is itself derived from the successor's
-/// canonical ordering key), or `None` when the successor's ordering key fell back to
-/// transaction time (low valid-time confidence) — a transaction-time stamp has no
-/// date-granularity concept. See [`HistoryEntry`] for the full field-by-field contract.
+/// `start_granularity`. `valid_until_granularity` reports the granularity of whichever
+/// timestamp actually bounded the window: this claim's own `end_granularity` when its own
+/// end was used (the common case — an entry's own end is never discarded), the successor's
+/// `start_granularity` only when the successor's ordering key was used and itself came from
+/// `valid_time.start`, or `None` when the winning value came from a transaction-time fallback
+/// or is absent. See [`HistoryEntry`] for the full field-by-field contract.
 ///
 /// # Errors
 /// - `MempillDxError::Engine(_)` — persistence failure
@@ -1213,11 +1226,16 @@ mod tests {
             "Munich must be second (newer)"
         );
 
-        // Status correctness
+        // Status correctness. Berlin's own explicit end (2025-01-01) closes its window via a
+        // genuine trusted valid-time succession — but Berlin is never explicitly Bound (only
+        // HeavyPath / oracle-affirmed supersession writes a Bound assertion; a clean succession
+        // routes CheapPath and never supersedes). Berlin therefore stays raw-live: its correct
+        // status is `Ended` (window closed, no conflict, not the narrowed-current selection),
+        // NOT `Superseded` (which means "explicitly bounded/disposed") — this is bug C's fix.
         assert_eq!(
             h.entries[0].status,
-            mempill_types::HistoryEntryStatus::Superseded,
-            "Berlin must be Superseded"
+            mempill_types::HistoryEntryStatus::Ended,
+            "Berlin's own window has closed via succession but it was never explicitly Bound → Ended, not Superseded"
         );
         assert_eq!(
             h.entries[1].status,
@@ -1281,23 +1299,27 @@ mod tests {
         );
     }
 
-    /// Supersession: the predecessor's `valid_until_granularity` must equal the
-    /// SUCCESSOR's `valid_from_granularity` (Year), not the predecessor's own
-    /// end_granularity (which is never set here — proving no fabrication either way).
+    /// A genuine trusted, non-overlapping succession (own explicit end, at Day precision):
+    /// the predecessor's `valid_until_granularity` must be its OWN `end_granularity` (Day),
+    /// never the successor's `start_granularity` (Year) — own end always wins over a later
+    /// successor's key (bug A fix). Two mutually-TRUSTED claims with the predecessor open-ended
+    /// (no own end) would instead be a genuine valid-time overlap (Contested, no narrowing) —
+    /// this scenario is only reachable end-to-end once the predecessor has an explicit end,
+    /// which is why it now differs from the pre-fix test's premise.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
-    async fn history_entry_valid_until_granularity_uses_successor_start_granularity() {
+    async fn history_entry_valid_until_granularity_uses_own_end_granularity_when_set() {
         use mempill_types::time::DateGranularity;
         let engine = crate::open_default_in_memory().unwrap();
 
-        // Predecessor: Day-precision start, high confidence, open end.
+        // Predecessor: Day-precision start AND end, high confidence — genuine succession.
         remember(
             &engine,
             "agent",
             "corp",
             "ceo",
             "Alice",
-            RememberOptions::new().valid_from("2019-06-15").confidence(0.9),
+            RememberOptions::new().valid_from("2019-06-15").valid_until("2020-01-01").confidence(0.9),
         )
         .await
         .unwrap();
@@ -1321,9 +1343,9 @@ mod tests {
 
         assert_eq!(
             h.entries[0].valid_until_granularity,
-            Some(DateGranularity::Year),
-            "predecessor's valid_until_granularity must be the successor's (Bob's) \
-             start_granularity (Year) — the honest source of the derived bound"
+            Some(DateGranularity::Day),
+            "predecessor's valid_until_granularity must be its OWN end_granularity (Day), \
+             not the successor's (Bob's) start_granularity (Year) — own end always wins"
         );
         assert_eq!(
             h.entries[1].valid_from_granularity,

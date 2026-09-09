@@ -484,6 +484,83 @@ async fn overlapping_is_conflict() {
     println!("[overlapping_is_conflict] PASS: overlapping → Contested");
 }
 
+// ── overlapping_noncurrent_chain_member_is_conflict (3-claim, DIAG_silent_succession) ──
+
+/// A challenger overlapping a NON-current member of an EXISTING trusted succession chain must
+/// be SameLineConflict/Contested — never a silently cheap-pathed Succession. Regression for the
+/// silent chain-overlap defect: the succession classifier must check the challenger against
+/// EVERY raw-live claim on the subject-line, not just the one selected by valid-time narrowing.
+///
+/// Chain: Linda [2024-09-23, 2026-01-24) -> John [2026-01-24, ∞) — a clean trusted succession.
+/// Challenger: Joan [2024-09-01, 2025-11-01) — non-overlapping against John (the "current"
+/// member alone) but genuinely OVERLAPS Linda.
+#[tokio::test]
+async fn overlapping_noncurrent_chain_member_is_conflict() {
+    let engine = open_default_in_memory().unwrap();
+    let agent = AgentId("succ-chain-overlap".into());
+
+    engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("linda"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt("2024-09-23T00:00:00Z", Some("2026-01-24T00:00:00Z"))),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+
+    let r_john = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("john"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt("2026-01-24T00:00:00Z", None)),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+    assert_eq!(r_john.disposition, Disposition::CommittedCheap,
+        "John forms a clean trusted succession against Linda → CommittedCheap");
+
+    // Joan overlaps Linda (the non-current chain member), even though she is non-overlapping
+    // against John alone. The old 2-claim reconciler only ever compared against the single
+    // "current" incumbent (John) and would have silently cheap-pathed this as Succession.
+    let r_joan = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("joan"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(vt("2024-09-01T00:00:00Z", Some("2025-11-01T00:00:00Z"))),
+        confidence: confident(),
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.unwrap();
+
+    assert_eq!(r_joan.disposition, Disposition::Contested,
+        "Joan overlaps Linda (non-current chain member) → MUST be Contested, \
+         never a silently cheap-pathed Succession (I7)");
+
+    let qr = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        as_of_tx_time: None,
+        valid_at: None,
+    }).await.unwrap();
+    assert_eq!(qr.belief.status, BeliefStatus::Contested,
+        "query_memory must agree: primary is null while the chain-overlap is unresolved");
+    assert!(qr.belief.primary.is_none(), "no silent primary while contested");
+
+    println!("[overlapping_noncurrent_chain_member_is_conflict] PASS: chain overlap → Contested");
+}
+
 // ── low_confidence_is_conflict ────────────────────────────────────────────────
 
 /// Non-overlapping valid-time windows but confidence < 0.7 → I2 fallback → Contested.
@@ -589,8 +666,12 @@ async fn no_valid_time_regression() {
 
 // ── n_gt_1_incumbent ─────────────────────────────────────────────────────────
 
-/// Resolution #2: when N>1 live incumbents already exist (e.g., 2 Contested claims),
-/// adding a 3rd claim does NOT trigger succession check — stays SameLineConflict/Contested.
+/// N-wide succession check: when N>1 raw-live claims already exist and lack valid-time
+/// (untrusted), a 3rd confident claim cannot form a trusted succession against ALL of them
+/// (Alice/Bob fail `claim_is_trusted`) → stays SameLineConflict/Contested. This is no longer
+/// a special-cased "skip when N>1" flag (the old `n_gt_1_live_incumbents` resolution) — it
+/// falls out directly from `is_trusted_succession` requiring every member of the group to be
+/// trusted (`DIAG_silent_succession` fix).
 #[tokio::test]
 async fn n_gt_1_incumbent() {
     let engine = open_default_in_memory().unwrap();

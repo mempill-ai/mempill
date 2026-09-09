@@ -105,6 +105,7 @@ for full per-version detail.
 | Ledger-scope correctness fix | Write/audit paths use uncapped, claim-scoped ledger lookup — fixes a silent-wrong-belief risk on agents with >10,000 ledger rows |
 | As-of / bi-temporal correctness benchmark | Reproducible `cargo run --release --example asof_correctness_benchmark -p mempill`; results published on the [documentation site](https://mempill.netlify.app/concepts/benchmark-results/) |
 | Date granularity on `query_history` / `history()` | `HistoryEntry` gains `valid_from_granularity` / `valid_until_granularity`; the Python wheel's `query_history` gains honest-display `valid_from_display` / `valid_until_display`, matching `query_memory` / `query_subject` |
+| History read-path + succession correctness fix | `query_history` / `history()` no longer discards a claim's own valid-time end; `HistoryEntryStatus` gains `Contested` and `Ended` (additive). Succession classification checks a new claim against every live claim on the subject line, not only the current one. `reconcile` never writes supersessions — only `submit_adjudication` / `sweep_adjudications` resolve a contested line. See [CHANGELOG.md](./CHANGELOG.md) |
 
 ### 0.5.0 — planned
 
