@@ -62,6 +62,11 @@ const OPEN_MAX_ATTEMPTS: u32 = 10;
 /// on `SQLITE_BUSY` specifically, up to [`OPEN_MAX_ATTEMPTS`] times with a short linear
 /// backoff, before propagating the error.
 ///
+/// # Worst-case latency
+/// Linear backoff alone totals ~225 ms, but each attempt can additionally block up to the 5 s
+/// `busy_timeout` at `BEGIN IMMEDIATE`; a genuinely contended file may surface `SQLITE_BUSY`
+/// after roughly 45–50 s rather than 5 s.
+///
 /// # Visibility
 /// This function is intentionally `pub(crate)` (not part of the public API). It accepts
 /// an arbitrary path string with no per-agent enforcement, which allows two different
@@ -189,11 +194,10 @@ fn apply_pragmas(conn: &Connection) -> SqlResult<()> {
          PRAGMA synchronous  = FULL;\
          PRAGMA foreign_keys = ON;",
     )?;
-    // Explicit, self-documenting busy timeout (rusqlite already sets 5000ms by default on
-    // every new connection, but we pin it here so migrations.rs's BEGIN IMMEDIATE race
-    // window is guaranteed to have somewhere to wait, independent of rusqlite's default).
-    // A second connection racing the first open_for_agent() of a brand-new file blocks here
-    // (inside SQLite's busy handler) rather than failing outright with SQLITE_BUSY.
+    // Explicit 5s busy timeout: rusqlite already sets sqlite3_busy_timeout(db, 5000) by
+    // default on every open, but we pin it here for clarity. The first-open journal_mode=WAL
+    // conversion bypasses SQLite's busy handler entirely (a documented SQLite corner case),
+    // which is why the bounded retry loop in [`open`] wraps this whole operation.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }
