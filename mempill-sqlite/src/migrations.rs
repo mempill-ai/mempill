@@ -8,7 +8,7 @@
 //! - `PRAGMA synchronous=FULL;`  — full durability (mandatory; WAL+NORMAL can lose writes on power loss)
 //! - `PRAGMA foreign_keys=ON;`   — enforce FK constraints defined in DDL
 
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, Result, Transaction, TransactionBehavior};
 
 /// The target schema version this runner brings the database to.
 /// Increment this constant (and add a new migration step) for every future DDL change.
@@ -37,26 +37,41 @@ pub enum MigrationError {
 /// Apply all pending migrations to `conn` up to [`CURRENT_SCHEMA_VERSION`].
 ///
 /// Idempotent: calling this function on a fully-migrated database is a no-op.
-/// Each migration step runs inside its own transaction so a partial failure leaves the
-/// database at a consistent version boundary (each migration step is fully atomic).
+///
+/// The version check, all pending DDL steps, and the final `user_version` write run inside a
+/// single `BEGIN IMMEDIATE` transaction. `BEGIN IMMEDIATE` acquires SQLite's RESERVED lock
+/// up front (instead of lazily on first write, like the default DEFERRED behavior), so two
+/// connections racing the first `open_for_agent` of a brand-new per-agent file serialize at
+/// BEGIN time: the second connection blocks until the first commits (bounded by the
+/// `busy_timeout` set in `connection.rs::apply_pragmas`), then re-reads `user_version` inside
+/// its own transaction and observes it already at [`CURRENT_SCHEMA_VERSION`] — a correct
+/// no-op — instead of both connections reading `user_version = 0` concurrently and both
+/// issuing v3's `ALTER TABLE claims ADD COLUMN`, which fails on the second racer with
+/// `duplicate column name`. A partial failure inside the transaction rolls the whole thing
+/// back (the `Transaction`'s default drop behavior), so the database is never left at an
+/// inconsistent, partially-migrated version.
 ///
 /// Connection lifecycle and PRAGMA initialisation (`journal_mode=WAL`, `synchronous=FULL`,
-/// `foreign_keys=ON`) are the caller's responsibility (implemented in `connection.rs`).
+/// `foreign_keys=ON`, `busy_timeout`) are the caller's responsibility (implemented in
+/// `connection.rs`).
 pub fn apply_migrations(conn: &Connection) -> Result<(), MigrationError> {
-    let current = user_version(conn)?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+    let current = user_version(&tx)?;
 
     if current < 1 {
-        apply_v1(conn)?;
+        apply_v1(&tx)?;
     }
 
     if current < 2 {
-        apply_v2(conn)?;
+        apply_v2(&tx)?;
     }
 
     if current < 3 {
-        apply_v3(conn)?;
+        apply_v3(&tx)?;
     }
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -68,11 +83,10 @@ fn user_version(conn: &Connection) -> Result<u32, MigrationError> {
 
 /// Set the SQLite `user_version` PRAGMA.
 ///
-/// This PRAGMA write is intentionally NOT inside the DDL transaction because SQLite
-/// does not allow PRAGMA user_version inside a transaction on all versions. We set it
-/// after the DDL transaction commits, so a crash between DDL commit and PRAGMA write is
-/// safe: the DDL tables already exist and `CREATE TABLE IF NOT EXISTS` makes the next
-/// migration run a no-op even if user_version is still 0.
+/// `PRAGMA user_version` writes to the database header page, which participates in the
+/// enclosing transaction like any other page write — so this call is safe to issue inside
+/// the same `BEGIN IMMEDIATE` transaction as the DDL in [`apply_migrations`]: both the
+/// schema change and the version bump commit (or roll back) atomically together.
 fn set_user_version(conn: &Connection, version: u32) -> Result<(), MigrationError> {
     conn.execute_batch(&format!("PRAGMA user_version = {version};"))?;
     Ok(())

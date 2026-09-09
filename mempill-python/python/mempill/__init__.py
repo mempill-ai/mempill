@@ -68,6 +68,13 @@ from mempill.ergonomic import (
     HistoryEntry,
 )
 
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    __version__ = _pkg_version("mempill")
+except PackageNotFoundError:  # pragma: no cover - editable/unbuilt checkout
+    __version__ = "0.0.0+unknown"
+
 # Re-export PyEngine under the friendlier name Engine so callers use `Engine` in
 # type annotations while the compiled class is still named PyEngine internally.
 Engine = PyEngine
@@ -139,6 +146,8 @@ def open_oracle_in_memory(oracle: object) -> OracleEngine:
 
 
 __all__ = [
+    # Package metadata
+    "__version__",
     # No-oracle constructors
     "open_for_agent",
     "open_in_memory",
