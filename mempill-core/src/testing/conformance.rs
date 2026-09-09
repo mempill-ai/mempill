@@ -2667,3 +2667,813 @@ where
         "conformance[histgran-t3]: legacy row (open-ended) must report None valid_until_granularity"
     );
 }
+
+// ── Cross-agent scope-isolation conformance harness (TASK-33 / QA-A) ──────────
+//
+// Proves that two agents (A and B) sharing ONE store never see or affect each
+// other's data through any application-layer use-case. Uses value-level
+// assertions (exact sets/values), not just counts — a count-only assertion
+// would not catch e.g. B's claim leaking INTO A's result set replacing one of
+// A's own entries.
+//
+// A failing test in this harness is a publish-blocking cross-tenant data leak
+// or corruption bug in the engine — it must NEVER be "fixed" by loosening the
+// assertion. Report it loudly instead.
+
+/// Run the full cross-agent isolation conformance suite against `store`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_agent_isolation_conformance<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    iso_ingest_claim_incumbent_not_shared(std::sync::Arc::clone(store));
+    iso_query_memory_scoped(std::sync::Arc::clone(store));
+    iso_query_history_scoped(std::sync::Arc::clone(store));
+    iso_query_subject_scoped(std::sync::Arc::clone(store));
+    iso_query_ledger_scoped(std::sync::Arc::clone(store));
+    iso_reconcile_does_not_touch_other_agent(std::sync::Arc::clone(store));
+    iso_submit_adjudication_unknown_handle_is_clean_error(std::sync::Arc::clone(store));
+    iso_sweep_scoped_to_single_row(std::sync::Arc::clone(store));
+}
+
+/// iso-a: `ingest_claim` — A's incumbent/conflict classification is unaffected by B
+/// having a conflicting claim on the identical (subject, predicate). A ingests X=1,
+/// B ingests X=2 on the SAME subject-line name — both must be treated as fresh
+/// (no incumbent), i.e. both `CommittedCheap`, neither `Contested`.
+#[cfg(any(test, feature = "test-support"))]
+fn iso_ingest_claim_incumbent_not_shared<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{dto::IngestClaimRequest, ingest_claim::IngestClaimUseCase};
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpOracle;
+
+    let agent_a = AgentId("iso-agent-a".into());
+    let agent_b = AgentId("iso-agent-b".into());
+    let config = EngineConfig::default();
+
+    let uc = IngestClaimUseCase::new(std::sync::Arc::clone(&store), None::<std::sync::Arc<NoOpOracle>>, None, config);
+
+    let req_a = IngestClaimRequest {
+        agent_id: agent_a.clone(),
+        subject: "iso-subject".into(),
+        predicate: "iso-pred".into(),
+        value: serde_json::json!(1),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: None,
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        criticality: Criticality::Low,
+        derived_from: vec![],
+    };
+    let resp_a = uc.execute(req_a).expect("iso[a]: A's ingest must not error");
+    assert_eq!(
+        resp_a.disposition,
+        Disposition::CommittedCheap,
+        "ISOLATION DEFECT: A's fresh claim on subject-line 'iso-subject'/'iso-pred' must be \
+         CommittedCheap (no incumbent yet for A); got {:?}",
+        resp_a.disposition
+    );
+    assert!(resp_a.contested_with.is_empty(), "ISOLATION DEFECT: A's fresh ingest must not report contested_with");
+
+    // B ingests a CONFLICTING value on the identical subject-line NAME. If the engine
+    // were incorrectly scoping incumbent lookup across agents, B would see A's claim
+    // as its own incumbent and report Contested.
+    let req_b = IngestClaimRequest {
+        agent_id: agent_b.clone(),
+        subject: "iso-subject".into(),
+        predicate: "iso-pred".into(),
+        value: serde_json::json!(2),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: None,
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        criticality: Criticality::Low,
+        derived_from: vec![],
+    };
+    let resp_b = uc.execute(req_b).expect("iso[a]: B's ingest must not error");
+    assert_eq!(
+        resp_b.disposition,
+        Disposition::CommittedCheap,
+        "ISOLATION DEFECT: B's fresh claim on the SAME subject-line name as A's must still be \
+         CommittedCheap — A's claim must never be treated as B's incumbent; got {:?} contested_with={:?}",
+        resp_b.disposition, resp_b.contested_with
+    );
+    assert!(
+        resp_b.contested_with.is_empty(),
+        "ISOLATION DEFECT: B's ingest reported contested_with={:?} — B must never be contested \
+         against A's claim_ref {:?}",
+        resp_b.contested_with, resp_a.claim_ref
+    );
+    assert_ne!(resp_a.claim_ref, resp_b.claim_ref, "iso[a]: A and B must get distinct claim_refs");
+}
+
+/// iso-b: `query_memory` — A sees only A's belief, including the `as_of_tx_time` and
+/// `valid_at` variants.
+#[cfg(any(test, feature = "test-support"))]
+fn iso_query_memory_scoped<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{dto::QueryMemoryRequest, query_memory::QueryMemoryUseCase};
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::BeliefStatus;
+
+    let agent_a = AgentId("iso-agent-a-qm".into());
+    let agent_b = AgentId("iso-agent-b-qm".into());
+    let tx = chrono::Utc::now();
+
+    let claim_a = make_vt_free_claim(&agent_a, "iso-qm-subj", "iso-qm-pred", serde_json::json!("A-value"), tx);
+    let claim_b = make_vt_free_claim(&agent_b, "iso-qm-subj", "iso-qm-pred", serde_json::json!("B-value"), tx);
+
+    let mut txn = store.begin_atomic(&agent_a).expect("iso[b]: begin A");
+    store.append_claim(&mut txn, &claim_a).expect("iso[b]: append A");
+    store.commit(txn).expect("iso[b]: commit A");
+    let mut txn = store.begin_atomic(&agent_b).expect("iso[b]: begin B");
+    store.append_claim(&mut txn, &claim_b).expect("iso[b]: append B");
+    store.commit(txn).expect("iso[b]: commit B");
+
+    let config = EngineConfig::default();
+    let uc = QueryMemoryUseCase::new(std::sync::Arc::clone(&store), None::<std::sync::Arc<NoOpVector>>, config);
+    let now = chrono::Utc::now();
+
+    for (agent, expected_value) in [(&agent_a, "A-value"), (&agent_b, "B-value")] {
+        // Plain (backward-compat) query.
+        let resp = uc
+            .execute_with_time(
+                QueryMemoryRequest { agent_id: agent.clone(), subject: "iso-qm-subj".into(), predicate: "iso-qm-pred".into(), as_of_tx_time: None, valid_at: None },
+                now,
+            )
+            .expect("iso[b]: query_memory must not error");
+        // Claims here carry no explicit valid_time, so a single live claim legitimately
+        // projects as TimingUncertain (not Resolved) per the documented query_memory
+        // contract — assert on VALUE isolation, not the exact status label.
+        assert!(
+            matches!(resp.belief.status, BeliefStatus::Resolved | BeliefStatus::TimingUncertain),
+            "ISOLATION DEFECT: {agent:?} must resolve to a single belief (Resolved or TimingUncertain), \
+             not Contested/NoBelief — cross-agent leak suspected; got {:?}", resp.belief.status
+        );
+        let primary = resp.belief.primary.as_ref().expect("iso[b]: primary must be present");
+        assert_eq!(primary.fact.value, serde_json::json!(expected_value), "ISOLATION DEFECT: {agent:?}'s query_memory returned the wrong value — got {:?}, expected {expected_value:?}", primary.fact.value);
+
+        // as_of_tx_time variant.
+        let resp_asof = uc
+            .execute_with_time(
+                QueryMemoryRequest { agent_id: agent.clone(), subject: "iso-qm-subj".into(), predicate: "iso-qm-pred".into(), as_of_tx_time: Some(now), valid_at: None },
+                now,
+            )
+            .expect("iso[b]: query_memory as_of_tx_time must not error");
+        assert_eq!(resp_asof.belief.primary.as_ref().expect("primary").fact.value, serde_json::json!(expected_value), "ISOLATION DEFECT: {agent:?}'s as_of_tx_time query leaked cross-agent data");
+
+        // valid_at variant.
+        let resp_valid_at = uc
+            .execute_with_time(
+                QueryMemoryRequest { agent_id: agent.clone(), subject: "iso-qm-subj".into(), predicate: "iso-qm-pred".into(), as_of_tx_time: None, valid_at: Some(now) },
+                now,
+            )
+            .expect("iso[b]: query_memory valid_at must not error");
+        // valid_at with no valid_time set on either claim → NoBelief is the documented D2
+        // gap semantics for claims without an explicit window; skip value assertion, only
+        // assert no cross-agent VALUE leak if a primary IS surfaced.
+        if let Some(primary) = resp_valid_at.belief.primary.as_ref() {
+            assert_eq!(primary.fact.value, serde_json::json!(expected_value), "ISOLATION DEFECT: {agent:?}'s valid_at query leaked cross-agent data");
+        }
+    }
+}
+
+/// iso-c: `query_history` — A's timeline excludes B's claims entirely.
+#[cfg(any(test, feature = "test-support"))]
+fn iso_query_history_scoped<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{dto::QueryHistoryRequest, query_history::QueryHistoryUseCase};
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+
+    let agent_a = AgentId("iso-agent-a-hist".into());
+    let agent_b = AgentId("iso-agent-b-hist".into());
+    let t1 = chrono::Utc::now();
+    let t2 = t1 + chrono::Duration::seconds(1);
+
+    let a1 = make_vt_free_claim(&agent_a, "iso-hist-subj", "iso-hist-pred", serde_json::json!("A1"), t1);
+    let a2 = make_vt_free_claim(&agent_a, "iso-hist-subj", "iso-hist-pred", serde_json::json!("A2"), t2);
+    let b1 = make_vt_free_claim(&agent_b, "iso-hist-subj", "iso-hist-pred", serde_json::json!("B1"), t1);
+
+    let ref_a1 = a1.claim_ref().clone();
+    let ref_a2 = a2.claim_ref().clone();
+    let ref_b1 = b1.claim_ref().clone();
+
+    let mut txn = store.begin_atomic(&agent_a).expect("iso[c]: begin A");
+    store.append_claim(&mut txn, &a1).expect("iso[c]: append a1");
+    store.append_claim(&mut txn, &a2).expect("iso[c]: append a2");
+    store.commit(txn).expect("iso[c]: commit A");
+    let mut txn = store.begin_atomic(&agent_b).expect("iso[c]: begin B");
+    store.append_claim(&mut txn, &b1).expect("iso[c]: append b1");
+    store.commit(txn).expect("iso[c]: commit B");
+
+    let uc = QueryHistoryUseCase::new(std::sync::Arc::clone(&store), None::<std::sync::Arc<NoOpVector>>, EngineConfig::default());
+    let now = t2 + chrono::Duration::seconds(1);
+
+    let resp_a = uc
+        .execute_with_time(QueryHistoryRequest { agent_id: agent_a, subject: "iso-hist-subj".into(), predicate: "iso-hist-pred".into() }, now)
+        .expect("iso[c]: A history must not error");
+    let a_refs: std::collections::HashSet<_> = resp_a.entries.iter().map(|e| e.claim_ref.clone()).collect();
+    assert_eq!(a_refs, std::collections::HashSet::from([ref_a1, ref_a2]), "ISOLATION DEFECT: A's query_history entry set must be exactly {{A1, A2}} — got {a_refs:?}");
+    assert!(!a_refs.contains(&ref_b1), "ISOLATION DEFECT: A's query_history leaked B's claim_ref {ref_b1:?}");
+
+    let resp_b = uc
+        .execute_with_time(QueryHistoryRequest { agent_id: agent_b, subject: "iso-hist-subj".into(), predicate: "iso-hist-pred".into() }, now)
+        .expect("iso[c]: B history must not error");
+    let b_refs: std::collections::HashSet<_> = resp_b.entries.iter().map(|e| e.claim_ref.clone()).collect();
+    assert_eq!(b_refs, std::collections::HashSet::from([ref_b1]), "ISOLATION DEFECT: B's query_history entry set must be exactly {{B1}} — got {b_refs:?}");
+}
+
+/// iso-d: `query_subject` — A's predicate list excludes B's predicates on the same
+/// subject name, even when B has an EXTRA predicate A never wrote.
+#[cfg(any(test, feature = "test-support"))]
+fn iso_query_subject_scoped<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{dto::QuerySubjectRequest, query_subject::QuerySubjectUseCase};
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+
+    let agent_a = AgentId("iso-agent-a-qs".into());
+    let agent_b = AgentId("iso-agent-b-qs".into());
+    let tx = chrono::Utc::now();
+
+    let a_shared = make_vt_free_claim(&agent_a, "iso-qs-subj", "iso-qs-shared", serde_json::json!("A-shared"), tx);
+    let b_shared = make_vt_free_claim(&agent_b, "iso-qs-subj", "iso-qs-shared", serde_json::json!("B-shared"), tx);
+    let b_only = make_vt_free_claim(&agent_b, "iso-qs-subj", "iso-qs-b-only", serde_json::json!("B-only"), tx);
+
+    let mut txn = store.begin_atomic(&agent_a).expect("iso[d]: begin A");
+    store.append_claim(&mut txn, &a_shared).expect("iso[d]: append a_shared");
+    store.commit(txn).expect("iso[d]: commit A");
+    let mut txn = store.begin_atomic(&agent_b).expect("iso[d]: begin B");
+    store.append_claim(&mut txn, &b_shared).expect("iso[d]: append b_shared");
+    store.append_claim(&mut txn, &b_only).expect("iso[d]: append b_only");
+    store.commit(txn).expect("iso[d]: commit B");
+
+    let uc = QuerySubjectUseCase::new(std::sync::Arc::clone(&store), None::<std::sync::Arc<NoOpVector>>, EngineConfig::default());
+    let now = chrono::Utc::now();
+
+    let resp_a = uc
+        .execute_with_time(QuerySubjectRequest { agent_id: agent_a, subject: "iso-qs-subj".into(), valid_at: None, as_of_tx_time: None }, now)
+        .expect("iso[d]: A query_subject must not error");
+    let a_preds: std::collections::HashSet<_> = resp_a.entries.iter().map(|e| e.predicate.clone()).collect();
+    assert_eq!(a_preds, std::collections::HashSet::from(["iso-qs-shared".to_string()]), "ISOLATION DEFECT: A's query_subject predicate set must be exactly {{iso-qs-shared}} — got {a_preds:?} (B's 'iso-qs-b-only' must never leak into A)");
+    let a_shared_entry = resp_a.entries.iter().find(|e| e.predicate == "iso-qs-shared").expect("iso[d]: A shared entry");
+    assert_eq!(a_shared_entry.value.as_deref(), Some("A-shared"), "ISOLATION DEFECT: A's shared-predicate value must be A's own, not B's; got {:?}", a_shared_entry.value);
+
+    let resp_b = uc
+        .execute_with_time(QuerySubjectRequest { agent_id: agent_b, subject: "iso-qs-subj".into(), valid_at: None, as_of_tx_time: None }, now)
+        .expect("iso[d]: B query_subject must not error");
+    let b_preds: std::collections::HashSet<_> = resp_b.entries.iter().map(|e| e.predicate.clone()).collect();
+    assert_eq!(b_preds, std::collections::HashSet::from(["iso-qs-shared".to_string(), "iso-qs-b-only".to_string()]), "iso[d]: B's predicate set must be exactly {{iso-qs-shared, iso-qs-b-only}} — got {b_preds:?}");
+}
+
+/// iso-e: `query_ledger` (`AuditUseCase`) — A's ledger (full AND claim-scoped) has ZERO
+/// B entries. Also proves that auditing under agent B while passing A's real `claim_ref`
+/// does not leak A's ledger rows (the scoping must be agent_id-AND-claim_ref, not
+/// claim_ref alone).
+#[cfg(any(test, feature = "test-support"))]
+fn iso_query_ledger_scoped<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{audit::AuditUseCase, dto::AuditQueryRequest};
+
+    let agent_a = AgentId("iso-agent-a-ledger".into());
+    let agent_b = AgentId("iso-agent-b-ledger".into());
+
+    let claim_a = make_claim(&agent_a, "iso-ledger-subj", "iso-ledger-pred");
+    let claim_b = make_claim(&agent_b, "iso-ledger-subj", "iso-ledger-pred");
+    let ref_a = claim_a.claim_ref().clone();
+    let ref_b = claim_b.claim_ref().clone();
+    let ledger_a = make_ledger_entry(&agent_a, &ref_a);
+    let ledger_b = make_ledger_entry(&agent_b, &ref_b);
+
+    let mut txn = store.begin_atomic(&agent_a).expect("iso[e]: begin A");
+    store.append_claim(&mut txn, &claim_a).expect("iso[e]: append claim_a");
+    store.append_ledger_entry(&mut txn, &ledger_a).expect("iso[e]: append ledger_a");
+    store.commit(txn).expect("iso[e]: commit A");
+    let mut txn = store.begin_atomic(&agent_b).expect("iso[e]: begin B");
+    store.append_claim(&mut txn, &claim_b).expect("iso[e]: append claim_b");
+    store.append_ledger_entry(&mut txn, &ledger_b).expect("iso[e]: append ledger_b");
+    store.commit(txn).expect("iso[e]: commit B");
+
+    let uc = AuditUseCase::new(std::sync::Arc::clone(&store));
+
+    // Full-agent ledger query for A: must contain ONLY A's entries.
+    let resp_a_full = uc
+        .execute(AuditQueryRequest { agent_id: agent_a.clone(), claim_ref: None, from_tx_time: None, limit: 1000 })
+        .expect("iso[e]: A full ledger query must not error");
+    assert!(resp_a_full.entries.iter().all(|e| e.claim_ref != ref_b), "ISOLATION DEFECT: A's full ledger query returned B's claim_ref {ref_b:?}");
+    assert!(resp_a_full.entries.iter().any(|e| e.claim_ref == ref_a), "iso[e]: A's full ledger query must contain A's own entry");
+
+    // Claim-scoped query for A, requesting exactly ref_a: must not include ref_b.
+    let resp_a_scoped = uc
+        .execute(AuditQueryRequest { agent_id: agent_a.clone(), claim_ref: Some(ref_a.clone()), from_tx_time: None, limit: 1000 })
+        .expect("iso[e]: A claim-scoped ledger query must not error");
+    assert!(resp_a_scoped.entries.iter().all(|e| e.claim_ref == ref_a), "ISOLATION DEFECT: A's claim-scoped ledger query returned entries for a different claim_ref");
+
+    // CRITICAL cross-tenant probe: audit under agent_id=B but pass A's REAL claim_ref.
+    // If the adapter scopes by claim_ref alone (ignoring agent_id), this would leak A's
+    // ledger rows to a caller impersonating/auditing as B.
+    let resp_b_with_a_ref = uc
+        .execute(AuditQueryRequest { agent_id: agent_b.clone(), claim_ref: Some(ref_a.clone()), from_tx_time: None, limit: 1000 })
+        .expect("iso[e]: B-scoped query with A's claim_ref must not error");
+    assert!(
+        resp_b_with_a_ref.entries.is_empty(),
+        "ISOLATION DEFECT: querying the ledger as agent B while passing A's real claim_ref {ref_a:?} \
+         returned {} entries — the adapter is scoping load_ledger_for_claims by claim_ref alone, \
+         not (agent_id AND claim_ref). This is a cross-tenant ledger leak.",
+        resp_b_with_a_ref.entries.len()
+    );
+}
+
+/// iso-f: `reconcile` — A's reconcile pass does not touch B's existing Contested state.
+#[cfg(any(test, feature = "test-support"))]
+fn iso_reconcile_does_not_touch_other_agent<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{audit::AuditUseCase, dto::{AuditQueryRequest, ReconcileRequest}, reconcile::ReconcileUseCase};
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpOracle;
+
+    let agent_a = AgentId("iso-agent-a-recon".into());
+    let agent_b = AgentId("iso-agent-b-recon".into());
+    let tx = chrono::Utc::now();
+
+    // B: two claims already marked Contested directly (simulates pre-existing contested state).
+    let b1 = make_vt_free_claim(&agent_b, "iso-recon-subj", "iso-recon-pred", serde_json::json!("B1"), tx);
+    let b2 = make_vt_free_claim(&agent_b, "iso-recon-subj", "iso-recon-pred", serde_json::json!("B2"), tx + chrono::Duration::seconds(1));
+    let ref_b1 = b1.claim_ref().clone();
+    let ref_b2 = b2.claim_ref().clone();
+    let contested_b1 = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent_b.clone(), claim_ref: ref_b1.clone(), event_kind: LedgerEventKind::ValidityAsserted, disposition: Disposition::Contested, rationale: None, recorded_at: TransactionTime(tx) };
+    let contested_b2 = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent_b.clone(), claim_ref: ref_b2.clone(), event_kind: LedgerEventKind::ValidityAsserted, disposition: Disposition::Contested, rationale: None, recorded_at: TransactionTime(tx) };
+
+    let mut txn = store.begin_atomic(&agent_b).expect("iso[f]: begin B");
+    store.append_claim(&mut txn, &b1).expect("iso[f]: append b1");
+    store.append_claim(&mut txn, &b2).expect("iso[f]: append b2");
+    store.append_ledger_entry(&mut txn, &contested_b1).expect("iso[f]: contested_b1");
+    store.append_ledger_entry(&mut txn, &contested_b2).expect("iso[f]: contested_b2");
+    store.commit(txn).expect("iso[f]: commit B");
+
+    // A: a plain, uncontested claim on the SAME subject-line name.
+    let a1 = make_vt_free_claim(&agent_a, "iso-recon-subj", "iso-recon-pred", serde_json::json!("A1"), tx);
+    let mut txn = store.begin_atomic(&agent_a).expect("iso[f]: begin A");
+    store.append_claim(&mut txn, &a1).expect("iso[f]: append a1");
+    store.commit(txn).expect("iso[f]: commit A");
+
+    let audit_uc = AuditUseCase::new(std::sync::Arc::clone(&store));
+    let b_ledger_before = audit_uc
+        .execute(AuditQueryRequest { agent_id: agent_b.clone(), claim_ref: None, from_tx_time: None, limit: 1000 })
+        .expect("iso[f]: B ledger snapshot before").entries.len();
+
+    let config = EngineConfig::default();
+    let reconcile_uc = ReconcileUseCase::new(std::sync::Arc::clone(&store), None::<std::sync::Arc<NoOpOracle>>, config);
+    let resp = reconcile_uc
+        .execute(ReconcileRequest { agent_id: agent_a, subject_lines: vec![("iso-recon-subj".into(), "iso-recon-pred".into())] })
+        .expect("iso[f]: A's reconcile must not error");
+    let touched_refs: std::collections::HashSet<_> = resp.outcomes.iter().map(|(r, _)| r.clone()).collect();
+    assert!(!touched_refs.contains(&ref_b1) && !touched_refs.contains(&ref_b2), "ISOLATION DEFECT: A's reconcile() outcomes touched B's claim_refs {touched_refs:?}");
+
+    let b_ledger_after = audit_uc
+        .execute(AuditQueryRequest { agent_id: agent_b, claim_ref: None, from_tx_time: None, limit: 1000 })
+        .expect("iso[f]: B ledger snapshot after").entries.len();
+    assert_eq!(b_ledger_after, b_ledger_before, "ISOLATION DEFECT: A's reconcile() call appended ledger entries to agent B ({b_ledger_before} -> {b_ledger_after})");
+}
+
+/// iso-g: `submit_adjudication` — a caller without knowledge of B's real `handle_id`
+/// (i.e. supplying an unrelated/unknown UUID, as any agent that never received B's
+/// handle would) gets a clean `AdjudicationHandleNotFound` error, and B's real pending
+/// row / ledger are provably untouched by the attempt.
+///
+/// NOTE: `SubmitAdjudicationUseCase::execute` takes NO caller `agent_id` parameter —
+/// `handle_id` is the sole authorization token (a capability-token design, not an
+/// agent-authenticated one). This test proves the isolation property that DOES hold
+/// (an unknown handle is rejected cleanly, no cross-agent mutation) and flags the
+/// design property in RECOMMENDATIONS rather than treating the absence of a caller-
+/// agent check as something to "fix" here (out of scope — no production-code changes).
+#[cfg(any(test, feature = "test-support"))]
+fn iso_submit_adjudication_unknown_handle_is_clean_error<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::submit_adjudication::SubmitAdjudicationUseCase;
+    use crate::engine_handle::{ErasedPendingStore, ErasedPendingStoreAdapter};
+    use crate::MemError;
+    use crate::ports::pending_adjudication::{OrphanedQueuedClaim, PendingAdjudicationPort, PendingAdjudicationRow};
+    use std::sync::Mutex;
+
+    let agent_b = AgentId("iso-agent-b-adj".into());
+    let challenger = make_claim(&agent_b, "iso-adj-subj", "iso-adj-pred");
+    let ref_challenger = challenger.claim_ref().clone();
+    let incumbent = make_claim(&agent_b, "iso-adj-subj", "iso-adj-pred");
+    let ref_incumbent = incumbent.claim_ref().clone();
+    let real_handle_id = Uuid::new_v4();
+
+    let queued = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent_b.clone(), claim_ref: ref_challenger.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::QueuedForAdjudication, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let mut txn = store.begin_atomic(&agent_b).expect("iso[g]: begin");
+    store.append_claim(&mut txn, &challenger).expect("iso[g]: append challenger");
+    store.append_claim(&mut txn, &incumbent).expect("iso[g]: append incumbent");
+    store.append_ledger_entry(&mut txn, &queued).expect("iso[g]: append queued");
+    store.commit(txn).expect("iso[g]: commit");
+
+    struct StubPendingStore { rows: Mutex<Vec<PendingAdjudicationRow>> }
+    impl PendingAdjudicationPort for StubPendingStore {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> { self.rows.lock().unwrap().push(row.clone()); Ok(()) }
+        fn get_pending(&self, handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { Ok(self.rows.lock().unwrap().iter().find(|r| r.handle_id == handle_id).cloned()) }
+        fn list_pending(&self, _agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(self.rows.lock().unwrap().clone()) }
+        fn list_expired(&self, _now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> { for r in self.rows.lock().unwrap().iter_mut() { if r.handle_id == handle_id { r.status = "resolved".into(); } } Ok(()) }
+        fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> { for r in self.rows.lock().unwrap().iter_mut() { if r.handle_id == handle_id { r.status = "expired".into(); } } Ok(()) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { Ok(vec![]) }
+    }
+
+    let dummy_req = mempill_types::AdjudicationRequest {
+        subject_line: mempill_types::SubjectLineRef { agent_id: agent_b.clone(), subject: "iso-adj-subj".into(), predicate: "iso-adj-pred".into() },
+        incumbent: mempill_types::Belief {
+            claim_ref: ref_incumbent.clone(), fact: incumbent.fact().clone(), provenance: incumbent.provenance().clone(), valid_time: incumbent.valid_time().clone(), transaction_time: incumbent.transaction_time().clone(), confidence: incumbent.confidence().clone(),
+            currency_signal: mempill_types::CurrencySignal { last_refreshed_at: incumbent.transaction_time().clone(), state: mempill_types::CurrencyState::Fresh, corroboration_count: 0 },
+            criticality: incumbent.criticality().clone(),
+        },
+        challenger: challenger.clone(),
+        criticality: Criticality::Medium,
+        reason: mempill_types::OverturnReason::ExternalContradiction,
+    };
+    let pending_store = std::sync::Arc::new(StubPendingStore { rows: Mutex::new(vec![PendingAdjudicationRow {
+        handle_id: real_handle_id, agent_id: agent_b.clone(), subject: "iso-adj-subj".into(), predicate: "iso-adj-pred".into(),
+        challenger_claim_ref: ref_challenger.clone(), incumbent_claim_ref: ref_incumbent.clone(), request_payload: dummy_req,
+        queued_at: Utc::now(), expires_at: None, status: "pending".into(),
+    }]) });
+
+    struct Wrapper(std::sync::Arc<StubPendingStore>);
+    impl PendingAdjudicationPort for Wrapper {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> { self.0.insert_pending(row) }
+        fn get_pending(&self, h: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { self.0.get_pending(h) }
+        fn list_pending(&self, a: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { self.0.list_pending(a) }
+        fn list_expired(&self, n: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { self.0.list_expired(n) }
+        fn mark_resolved(&self, h: uuid::Uuid) -> Result<(), Self::Error> { self.0.mark_resolved(h) }
+        fn mark_expired(&self, h: uuid::Uuid) -> Result<(), Self::Error> { self.0.mark_expired(h) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { self.0.list_queued_orphan_claims() }
+    }
+    let erased: std::sync::Arc<dyn ErasedPendingStore> = std::sync::Arc::new(ErasedPendingStoreAdapter::new(Wrapper(std::sync::Arc::clone(&pending_store))));
+
+    let uc = SubmitAdjudicationUseCase::new(std::sync::Arc::clone(&store), std::sync::Arc::clone(&erased));
+
+    // An unrelated caller (no knowledge of B's real handle_id) submits with a random UUID.
+    let unknown_handle = Uuid::new_v4();
+    assert_ne!(unknown_handle, real_handle_id, "iso[g]: test invariant — the probe handle must differ from B's real handle");
+    let response = mempill_types::AdjudicationResponse { handle_id: unknown_handle, verdict: mempill_types::AdjudicationVerdict::Affirm, evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand) };
+    let result = uc.execute(unknown_handle, response, Utc::now());
+    assert!(
+        matches!(result, Err(MemError::AdjudicationHandleNotFound { .. })),
+        "ISOLATION DEFECT: submitting an unknown handle_id must return a clean AdjudicationHandleNotFound, not {result:?} \
+         (a non-HandleNotFound outcome here could indicate the handle-lookup accidentally matched a different row)"
+    );
+
+    // B's real row must be untouched (still pending) and B's ledger must not have gained
+    // any AdjudicationResolved entry from the failed probe.
+    let row_after = pending_store.get_pending(real_handle_id).expect("iso[g]: get_pending").expect("iso[g]: B's row must still exist");
+    assert_eq!(row_after.status, "pending", "ISOLATION DEFECT: an unrelated submit_adjudication call with an unknown handle_id mutated B's real pending row's status to {:?}", row_after.status);
+
+    let ledger_after = store.load_ledger_for_claims(&agent_b, &[ref_challenger.clone()], None).expect("iso[g]: load_ledger_for_claims");
+    assert!(
+        !ledger_after.iter().any(|e| e.event_kind == LedgerEventKind::AdjudicationResolved),
+        "ISOLATION DEFECT: an unrelated submit_adjudication call with an unknown handle_id wrote an \
+         AdjudicationResolved entry into B's ledger — cross-agent mutation from an unauthorized handle"
+    );
+}
+
+/// iso-h: sweep for A's expired pending row leaves B's separately-pending row untouched.
+#[cfg(any(test, feature = "test-support"))]
+fn iso_sweep_scoped_to_single_row<P>(store: std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::sweep_adjudications::SweepAdjudicationsUseCase;
+    use crate::engine_handle::{ErasedPendingStore, ErasedPendingStoreAdapter};
+    use crate::ports::pending_adjudication::{OrphanedQueuedClaim, PendingAdjudicationPort, PendingAdjudicationRow};
+
+    let agent_a = AgentId("iso-agent-a-sweep".into());
+    let agent_b = AgentId("iso-agent-b-sweep".into());
+
+    let claim_a = make_claim(&agent_a, "iso-sweep-subj", "iso-sweep-pred");
+    let ref_a = claim_a.claim_ref().clone();
+    let claim_b = make_claim(&agent_b, "iso-sweep-subj", "iso-sweep-pred");
+    let ref_b = claim_b.claim_ref().clone();
+
+    let queued_a = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent_a.clone(), claim_ref: ref_a.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::QueuedForAdjudication, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let queued_b = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent_b.clone(), claim_ref: ref_b.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::QueuedForAdjudication, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+
+    let mut txn = store.begin_atomic(&agent_a).expect("iso[h]: begin A");
+    store.append_claim(&mut txn, &claim_a).expect("iso[h]: append claim_a");
+    store.append_ledger_entry(&mut txn, &queued_a).expect("iso[h]: append queued_a");
+    store.commit(txn).expect("iso[h]: commit A");
+    let mut txn = store.begin_atomic(&agent_b).expect("iso[h]: begin B");
+    store.append_claim(&mut txn, &claim_b).expect("iso[h]: append claim_b");
+    store.append_ledger_entry(&mut txn, &queued_b).expect("iso[h]: append queued_b");
+    store.commit(txn).expect("iso[h]: commit B");
+
+    struct NoopPending;
+    impl PendingAdjudicationPort for NoopPending {
+        type Error = std::io::Error;
+        fn insert_pending(&self, _row: &PendingAdjudicationRow) -> Result<(), Self::Error> { Ok(()) }
+        fn get_pending(&self, _handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { Ok(None) }
+        fn list_pending(&self, _agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn list_expired(&self, _now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn mark_resolved(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> { Ok(()) }
+        fn mark_expired(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> { Ok(()) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { Ok(vec![]) }
+    }
+    let erased: std::sync::Arc<dyn ErasedPendingStore> = std::sync::Arc::new(ErasedPendingStoreAdapter::new(NoopPending));
+    let uc = SweepAdjudicationsUseCase::new(std::sync::Arc::clone(&store), erased);
+
+    let row_a = PendingAdjudicationRow {
+        handle_id: Uuid::new_v4(), agent_id: agent_a.clone(), subject: "iso-sweep-subj".into(), predicate: "iso-sweep-pred".into(),
+        challenger_claim_ref: ref_a.clone(), incumbent_claim_ref: ref_a.clone(),
+        request_payload: mempill_types::AdjudicationRequest {
+            subject_line: mempill_types::SubjectLineRef { agent_id: agent_a.clone(), subject: "iso-sweep-subj".into(), predicate: "iso-sweep-pred".into() },
+            incumbent: mempill_types::Belief { claim_ref: ref_a.clone(), fact: claim_a.fact().clone(), provenance: claim_a.provenance().clone(), valid_time: claim_a.valid_time().clone(), transaction_time: claim_a.transaction_time().clone(), confidence: claim_a.confidence().clone(), currency_signal: mempill_types::CurrencySignal { last_refreshed_at: claim_a.transaction_time().clone(), state: mempill_types::CurrencyState::Fresh, corroboration_count: 0 }, criticality: claim_a.criticality().clone() },
+            challenger: claim_a.clone(), criticality: Criticality::Medium, reason: mempill_types::OverturnReason::ExternalContradiction,
+        },
+        queued_at: Utc::now() - chrono::Duration::seconds(10), expires_at: Some(Utc::now() - chrono::Duration::seconds(1)), status: "pending".into(),
+    };
+
+    let reverted = uc.revert_expired_row(&row_a, Utc::now()).expect("iso[h]: revert_expired_row for A must not error");
+    assert!(reverted, "iso[h]: A's expired row must be reverted");
+
+    // A's claim is now Contested; B's must remain QueuedForAdjudication (untouched).
+    let ledger_a = store.load_ledger_for_claims(&agent_a, &[ref_a.clone()], None).expect("iso[h]: load A ledger");
+    let latest_a = ledger_a.iter().max_by_key(|e| e.recorded_at.0).expect("iso[h]: A ledger non-empty");
+    assert_eq!(latest_a.disposition, Disposition::Contested, "iso[h]: A's challenger must now be Contested after sweep");
+
+    let ledger_b = store.load_ledger_for_claims(&agent_b, &[ref_b.clone()], None).expect("iso[h]: load B ledger");
+    assert_eq!(ledger_b.len(), 1, "ISOLATION DEFECT: sweeping A's expired row appended an unexpected ledger entry to B (expected exactly 1, the original queued_b)");
+    assert_eq!(ledger_b[0].disposition, Disposition::QueuedForAdjudication, "ISOLATION DEFECT: sweeping A's expired pending row touched B's claim's disposition — got {:?}, expected still QueuedForAdjudication", ledger_b[0].disposition);
+}
+
+/// Build a `Claim` with no valid-time window set (backward-compatible tx_time ordering),
+/// mirroring `make_claim` but with a caller-supplied `tx_time` and `value`.
+#[cfg(any(test, feature = "test-support"))]
+fn make_vt_free_claim(agent_id: &AgentId, subject: &str, predicate: &str, value: serde_json::Value, tx_time: chrono::DateTime<Utc>) -> Claim {
+    Claim::new(
+        ClaimRef::new_random(),
+        agent_id.clone(),
+        Fact { subject: subject.to_owned(), predicate: predicate.to_owned(), value },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx_time),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    )
+}
+
+// ── Scale × tenancy conformance harness (TASK-33 / QA-A, 🔴2) ─────────────────
+
+/// Extends the `>10k`-row conformance scenario to TWO agents in one store: agent A
+/// accumulates an oversized (`>10_000`) noise ledger while agent B has a small ledger
+/// sharing subject/predicate NAMES with A. Proves neither agent's disposition
+/// computation is polluted or slowed-to-incorrectness by the other's scale.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_scale_tenancy_isolation_conformance<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{dto::{IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest}, ingest_claim::IngestClaimUseCase, query_history::QueryHistoryUseCase, query_memory::QueryMemoryUseCase};
+    use crate::config::EngineConfig;
+    use crate::noop::{NoOpOracle, NoOpVector};
+    use mempill_types::BeliefStatus;
+
+    let agent_a = AgentId("scaletenancy-agent-a".into());
+    let agent_b = AgentId("scaletenancy-agent-b".into());
+    let config = EngineConfig::default();
+
+    // ── 1. Flood agent A with >10_000 noise ledger rows (mirrors the existing single-agent
+    // scale proof — 1010 claims x 10 ledger entries = 10_100 rows) BEFORE B ever writes. ──
+    for i in 0..1010u32 {
+        let noise = Claim::new(
+            ClaimRef::new_random(), agent_a.clone(),
+            Fact { subject: format!("scale-noise-subject-{i}"), predicate: "scale-noise-predicate".into(), value: serde_json::json!(i) },
+            Cardinality::Functional, ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 }, TransactionTime(Utc::now()),
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 }, Criticality::Low, vec![], None, None,
+        );
+        let noise_ref = noise.claim_ref().clone();
+        let mut txn = store.begin_atomic(&agent_a).expect("scaletenancy: noise begin_atomic");
+        store.append_claim(&mut txn, &noise).expect("scaletenancy: noise append_claim");
+        for _ in 0..10 {
+            store.append_ledger_entry(&mut txn, &make_ledger_entry(&agent_a, &noise_ref)).expect("scaletenancy: noise ledger entry");
+        }
+        store.commit(txn).expect("scaletenancy: noise commit");
+    }
+
+    // ── 2. A ingests its OWN belief on a shared subject-line NAME. ──────────────────────
+    let ingest_uc = IngestClaimUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpOracle>>, None, config.clone());
+    let resp_a = ingest_uc
+        .execute(IngestClaimRequest { agent_id: agent_a.clone(), subject: "scale-org".into(), predicate: "scale-ceo".into(), value: serde_json::json!("A-Alice"), provenance: ProvenanceLabel::External(ExternalKind::UserAsserted), cardinality: Cardinality::Functional, valid_time: None, confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 }, criticality: Criticality::Medium, derived_from: vec![] })
+        .expect("scaletenancy: A's ingest must not error despite >10k noise rows");
+    assert_eq!(resp_a.disposition, Disposition::CommittedCheap, "scaletenancy: A's first claim on 'scale-org'/'scale-ceo' must be CommittedCheap");
+
+    // ── 3. B ingests, then supersedes, its OWN belief on the SAME subject-line name —
+    // B's ledger stays small; must resolve correctly (not Contested, not stale) despite
+    // sharing the store with A's flood. ─────────────────────────────────────────────────
+    let resp_b1 = ingest_uc
+        .execute(IngestClaimRequest { agent_id: agent_b.clone(), subject: "scale-org".into(), predicate: "scale-ceo".into(), value: serde_json::json!("B-Bob"), provenance: ProvenanceLabel::External(ExternalKind::UserAsserted), cardinality: Cardinality::Functional, valid_time: None, confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 }, criticality: Criticality::Medium, derived_from: vec![] })
+        .expect("scaletenancy: B's first ingest must not error");
+    assert_eq!(resp_b1.disposition, Disposition::CommittedCheap, "ISOLATION DEFECT: B's first claim must be CommittedCheap, unaffected by A's >10k-row ledger; got {:?} contested_with={:?}", resp_b1.disposition, resp_b1.contested_with);
+
+    // B's second write directly supersedes B1 (Bob) with B2 (Carol) via the store —
+    // mirrors the proven single-agent supersession pattern (see
+    // test_superseded_claim_excluded_despite_large_agent_ledger above), isolating THIS
+    // test to the read-path correctness question: does B's small ledger resolve
+    // correctly to Carol despite sharing the store with A's >10k-row flood?
+    let claim_b2 = Claim::new(
+        ClaimRef::new_random(), agent_b.clone(),
+        Fact { subject: "scale-org".into(), predicate: "scale-ceo".into(), value: serde_json::json!("B-Carol") },
+        Cardinality::Functional, ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 }, TransactionTime(Utc::now()),
+        ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.95, valid_time_confidence: 0.0 }, Criticality::Medium, vec![], None, None,
+    );
+    let ref_b2 = claim_b2.claim_ref().clone();
+    let ref_b1 = resp_b1.claim_ref.clone();
+    let ledger_b1_superseded = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent_b.clone(), claim_ref: ref_b1.clone(), event_kind: LedgerEventKind::ValidityAsserted, disposition: Disposition::Superseded, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let ledger_b2_committed = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent_b.clone(), claim_ref: ref_b2.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::CommittedCheap, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let mut txn = store.begin_atomic(&agent_b).expect("scaletenancy: begin B2");
+    store.append_claim(&mut txn, &claim_b2).expect("scaletenancy: append B2");
+    store.append_ledger_entry(&mut txn, &ledger_b1_superseded).expect("scaletenancy: supersede B1");
+    store.append_ledger_entry(&mut txn, &ledger_b2_committed).expect("scaletenancy: commit B2 ledger");
+    store.commit(txn).expect("scaletenancy: commit B2 txn");
+    let resp_b2_claim_ref = ref_b2;
+
+    // ── 4. Verify: A's belief is still A-Alice (unpolluted by its own flood or by B),
+    // and B's belief resolves correctly to its own latest write. ───────────────────────
+    let qm_uc = QueryMemoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config.clone());
+    let now = Utc::now();
+    let belief_a = qm_uc
+        .execute_with_time(QueryMemoryRequest { agent_id: agent_a.clone(), subject: "scale-org".into(), predicate: "scale-ceo".into(), as_of_tx_time: None, valid_at: None }, now)
+        .expect("scaletenancy: A's query_memory must not error");
+    assert!(
+        matches!(belief_a.belief.status, BeliefStatus::Resolved | BeliefStatus::TimingUncertain),
+        "ISOLATION DEFECT at scale: A's query_memory status must resolve to a single belief \
+         (Resolved or TimingUncertain — no explicit valid_time was set) despite >10k noise rows; got {:?}",
+        belief_a.belief.status
+    );
+    assert_eq!(belief_a.belief.primary.as_ref().expect("primary").fact.value, serde_json::json!("A-Alice"), "ISOLATION DEFECT at scale: A's belief value corrupted");
+
+    let qh_uc = QueryHistoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config);
+    let hist_b = qh_uc
+        .execute_with_time(QueryHistoryRequest { agent_id: agent_b.clone(), subject: "scale-org".into(), predicate: "scale-ceo".into() }, now)
+        .expect("scaletenancy: B's query_history must not error");
+    assert_eq!(hist_b.entries.len(), 2, "ISOLATION DEFECT at scale: B's history must have exactly 2 entries (Bob superseded, Carol current) despite sharing the store with A's >10k-row flood");
+    let current_b = hist_b.current().expect("scaletenancy: B must have a Current entry");
+    assert_eq!(current_b.value, serde_json::json!("B-Carol"), "ISOLATION DEFECT at scale: B's current belief must be B-Carol, not stale/wrong");
+
+    assert_ne!(&resp_a.claim_ref, &resp_b1.claim_ref, "scaletenancy: sanity — A and B claim_refs must differ");
+    assert_eq!(current_b.claim_ref, resp_b2_claim_ref, "ISOLATION DEFECT at scale: B's current history entry must reference B's own second (Carol) claim_ref");
+}
+
+// ── Ledger pagination conformance harness (TASK-33 / QA-A, 🟡9) ───────────────
+
+/// Proves `PersistencePort::load_ledger` supports correct page-walking via
+/// `limit` + `from_tx_time` continuation: full coverage, no skips, including a
+/// tie-boundary where two entries share the EXACT same `recorded_at`.
+///
+/// Contract exercised: `load_ledger(agent, from, limit)` returns entries with
+/// `recorded_at >= from` (inclusive), ordered ASC. Continuation sets
+/// `from = last_seen.recorded_at`, which means entries at an exact tie boundary
+/// may be returned again on the next page — callers MUST dedupe by `entry_id`.
+/// This test proves the inclusive-bound contract never SKIPS an entry (favors
+/// duplication over loss at tie boundaries), and that after de-duplication the
+/// walked set is exactly the full entry set with no omissions.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_ledger_pagination_conformance<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    let agent = AgentId("conformance-ledger-page-t1".into());
+    let base = chrono::DateTime::<Utc>::from_timestamp(50_000_000, 0).unwrap();
+
+    let mut expected_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let mut txn = store.begin_atomic(&agent).expect("ledger-page[t1]: begin_atomic");
+    // 20 entries at distinct, strictly increasing recorded_at (1s apart).
+    for i in 0..20i64 {
+        let claim = make_claim(&agent, "ledger-page-subj", &format!("pred-{i}"));
+        let claim_ref = claim.claim_ref().clone();
+        store.append_claim(&mut txn, &claim).expect("ledger-page[t1]: append_claim");
+        let entry = LedgerEntry {
+            entry_id: Uuid::new_v4(), agent_id: agent.clone(), claim_ref,
+            event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::CommittedCheap,
+            rationale: None, recorded_at: TransactionTime(base + chrono::Duration::seconds(i)),
+        };
+        expected_ids.insert(entry.entry_id);
+        store.append_ledger_entry(&mut txn, &entry).expect("ledger-page[t1]: append_ledger_entry");
+    }
+    // Tie: one more entry sharing the EXACT recorded_at of entry index 10 (base+10s).
+    let tie_claim = make_claim(&agent, "ledger-page-subj", "pred-tie");
+    let tie_ref = tie_claim.claim_ref().clone();
+    store.append_claim(&mut txn, &tie_claim).expect("ledger-page[t1]: append tie claim");
+    let tie_entry = LedgerEntry {
+        entry_id: Uuid::new_v4(), agent_id: agent.clone(), claim_ref: tie_ref,
+        event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::CommittedCheap,
+        rationale: None, recorded_at: TransactionTime(base + chrono::Duration::seconds(10)),
+    };
+    expected_ids.insert(tie_entry.entry_id);
+    store.append_ledger_entry(&mut txn, &tie_entry).expect("ledger-page[t1]: append tie entry");
+    store.commit(txn).expect("ledger-page[t1]: commit");
+
+    let total_expected = expected_ids.len();
+    assert_eq!(total_expected, 21, "ledger-page[t1]: test setup sanity — 21 distinct entries expected");
+
+    // Walk pages with a small limit that does NOT evenly divide the total, forcing the
+    // tie boundary to straddle a page split.
+    const PAGE_LIMIT: usize = 7;
+    let mut seen: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let mut from: Option<TransactionTime> = None;
+    let mut pages_walked = 0usize;
+    let mut duplicates_observed = 0usize;
+
+    loop {
+        pages_walked += 1;
+        assert!(pages_walked <= 20, "ledger-page[t1]: pagination did not terminate within 20 pages — possible infinite loop at the tie boundary");
+
+        let page = store
+            .load_ledger(&agent, from.as_ref(), PAGE_LIMIT)
+            .expect("ledger-page[t1]: load_ledger must not error");
+
+        if page.is_empty() {
+            break;
+        }
+
+        // ASC ordering within the page.
+        for w in page.windows(2) {
+            assert!(w[0].recorded_at.0 <= w[1].recorded_at.0, "ledger-page[t1]: page must be ASC-ordered by recorded_at");
+        }
+
+        for entry in &page {
+            if !seen.insert(entry.entry_id) {
+                duplicates_observed += 1;
+            }
+        }
+
+        let last = page.last().expect("ledger-page[t1]: page non-empty here");
+        let is_last_page = page.len() < PAGE_LIMIT;
+        from = Some(last.recorded_at.clone());
+
+        if is_last_page {
+            break;
+        }
+    }
+
+    let seen_expected_only: std::collections::HashSet<_> = seen.intersection(&expected_ids).cloned().collect();
+    assert_eq!(
+        seen_expected_only.len(), total_expected,
+        "ledger-page[t1]: pagination must achieve FULL COVERAGE with no skips — walked {} of {} expected entries; missing={:?}",
+        seen_expected_only.len(), total_expected,
+        expected_ids.difference(&seen).collect::<Vec<_>>()
+    );
+    // Documented pagination contract: `from` is an INCLUSIVE lower bound with no
+    // secondary tiebreak column, so each page boundary legitimately re-fetches the prior
+    // page's last `recorded_at` value (favoring duplication over silent loss at ties).
+    // Expect roughly one duplicate per page transition (pages_walked - 1); bound loosely
+    // to avoid flakiness from ORDER BY tie-ordering, while still catching a runaway
+    // over-duplication regression.
+    assert!(
+        duplicates_observed >= 1,
+        "ledger-page[t1]: expected at least one duplicate from inclusive page-boundary \
+         continuation (this is the DOCUMENTED contract callers must dedupe against by \
+         entry_id) — got zero, which would indicate `from` became exclusive unexpectedly"
+    );
+    assert!(
+        duplicates_observed <= pages_walked,
+        "ledger-page[t1]: duplicates_observed={duplicates_observed} exceeds pages_walked={pages_walked} \
+         — more duplication than one-per-page-transition; investigate pagination regression"
+    );
+}
