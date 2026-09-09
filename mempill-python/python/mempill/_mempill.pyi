@@ -260,6 +260,11 @@ class PyEngine:
         Returns:
             dict with claim_ref, assertion_ref (str | None), kind, effective_at
             (str | None, RFC3339), disposition ("Superseded" | "Reinstated"), no_op (bool).
+            no_op is True when no new write was made: an idempotent repeat of an
+            identical Bound, a Reopen with no active Bound to reverse, or a Bound whose
+            `at` is at/after the claim's own valid_time.end (has zero effect on the
+            derived window — effective_at then honestly reports min(at, own_end),
+            i.e. own_end, not the raw requested `at`).
 
         Raises:
             ValidationError: provenance not External(*), or `at` precedes the claim's

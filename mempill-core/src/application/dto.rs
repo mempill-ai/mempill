@@ -164,8 +164,11 @@ pub struct AssertValidityResponse {
     pub effective_at: Option<chrono::DateTime<chrono::Utc>>,
     /// `Superseded` for Bound, `Reinstated` for Reopen.
     pub disposition: Disposition,
-    /// `true` when no new write was made (idempotent repeat of an identical Bound, or a
-    /// Reopen with no active Bound to reverse).
+    /// `true` when no new write was made: an idempotent repeat of an identical Bound, a
+    /// Reopen with no active Bound to reverse, or a Bound whose `at` is at/after the
+    /// claim's own `valid_time.end` (has zero effect on the derived window — see
+    /// `assert_validity.rs` gate 5). In the last case `effective_at` honestly reports
+    /// `min(at, own_end)` (always `own_end`), not the raw requested `at`.
     pub no_op: bool,
 }
 

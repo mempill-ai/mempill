@@ -117,19 +117,45 @@ pub(crate) fn ordering_key(claim: &Claim, config: &EngineConfig) -> (DateTime<Ut
 
 // ── Validity resolution ───────────────────────────────────────────────────────
 
-/// Evaluate whether a claim is live at `as_of_tx_time` given the full set of
-/// validity assertions for that claim.
+/// The state of an active `AssertionKind::Bound` on a claim, evaluated at a tx-time cutoff.
+///
+/// Returned by [`active_bound_at`] — the SINGLE SOURCE OF TRUTH for the Bound/Reopen toggle
+/// walk (TASK-33-W4-LIB-R1 review #1). Previously `is_claim_live`, `active_bound_at`, and
+/// `assert_validity::latest_active_bound` each re-implemented this walk independently; they
+/// now all delegate to one function so the toggle logic can never drift between the read path
+/// (liveness, history windows) and the write path (idempotency / single-writer-per-target).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BoundState {
+    /// The valid-time instant at which the claim's validity ends (the `bound_at` of the
+    /// currently active `Bound` assertion).
+    pub bound_at: DateTime<Utc>,
+    /// The `assertion_ref` of the currently active `Bound` assertion — consumed by
+    /// `assert_validity.rs` for idempotency / single-writer-per-target checks (gate 4).
+    pub assertion_ref: uuid::Uuid,
+}
+
+/// Evaluate the active `Bound`, if any, at `as_of_tx_time` given the full set of validity
+/// assertions for a claim — SINGLE SOURCE OF TRUTH for the toggle walk (see [`BoundState`]).
 ///
 /// Rules (non-destructive: no deletes; fixed-history monotone: liveness is monotone for fixed history):
-///   - A `Bound` assertion with `bound_at <= as_of_tx_time` closes the claim (not live).
-///   - A subsequent `Reopen` with `reopen_at <= as_of_tx_time` re-opens it.
-///   - Assertions are processed in chronological order of their `asserted_at` timestamp.
-///   - The final state after processing all assertions determines liveness.
-pub(crate) fn is_claim_live(
+///   - A `Bound` assertion with `bound_at <= as_of_tx_time` closes the claim (sets the state).
+///   - A subsequent `Reopen` with `reopen_at <= as_of_tx_time` re-opens it (clears the state).
+///   - Assertions are processed in chronological order of their `asserted_at` timestamp
+///     (ties broken by `assertion_ref` UUID, I8 deterministic total order).
+///   - Only assertions with `asserted_at <= as_of_tx_time` are visible (bi-temporal rule).
+///   - The final state after processing all visible assertions is returned.
+///
+/// Returns `None` when the claim is currently open (never bounded, or bounded then reopened,
+/// as of `as_of_tx_time`); `Some(BoundState)` when a `Bound` is active.
+///
+/// Consumed by:
+/// - [`is_claim_live`] — delegates: `active_bound_at(...).is_none()`.
+/// - `fold` (this module) — needs `.bound_at` to narrow `compute_history_windows`.
+/// - `assert_validity::latest_active_bound` — needs both `.bound_at` and `.assertion_ref`.
+pub(crate) fn active_bound_at(
     assertions: &[ValidityAssertion],
     as_of_tx_time: DateTime<Utc>,
-) -> bool {
-    // Start live; each Bound/Reopen toggles state.
+) -> Option<BoundState> {
     // Sort by asserted_at ascending for deterministic processing (I8).
     let mut sorted: Vec<&ValidityAssertion> = assertions.iter().collect();
     sorted.sort_by(|a, b| {
@@ -137,7 +163,7 @@ pub(crate) fn is_claim_live(
             .then(a.assertion_ref.cmp(&b.assertion_ref)) // UUID tiebreaker for I8
     });
 
-    let mut live = true;
+    let mut state: Option<BoundState> = None;
     for assertion in sorted {
         // Only assertions at or before as_of_tx_time are visible (bi-temporal rule).
         if assertion.asserted_at.0 > as_of_tx_time {
@@ -146,59 +172,31 @@ pub(crate) fn is_claim_live(
         match &assertion.kind {
             AssertionKind::Bound { bound_at } => {
                 if *bound_at <= as_of_tx_time {
-                    live = false;
+                    state = Some(BoundState { bound_at: *bound_at, assertion_ref: assertion.assertion_ref });
                 }
             }
             AssertionKind::Reopen { reopen_at } => {
                 if *reopen_at <= as_of_tx_time {
-                    live = true;
+                    state = None;
                 }
             }
             // AssertionKind is #[non_exhaustive] — future assertion kinds are ignored (conservative: treat as no-op).
             _ => {}
         }
     }
-    live
+    state
 }
 
-/// Evaluate the active `bound_at`, if any, at `as_of_tx_time` — the SAME toggle rules as
-/// [`is_claim_live`] (Bound closes, Reopen re-opens, chronological by `asserted_at`,
-/// tx-time-gated), but returning the bound instant instead of a boolean (TASK-33 E2:
-/// `compute_history_windows` needs the value to narrow a bounded-but-open-ended claim's
-/// displayed `valid_until`, not just its liveness).
+/// Evaluate whether a claim is live at `as_of_tx_time` given the full set of
+/// validity assertions for that claim.
 ///
-/// Returns `None` when the claim is currently open (never bounded, or bounded then
-/// reopened, as of `as_of_tx_time`).
-pub(crate) fn active_bound_at(
+/// Delegates to [`active_bound_at`] (the single source of truth for the toggle walk,
+/// TASK-33-W4-LIB-R1 review #1): a claim is live iff there is no active `Bound`.
+pub(crate) fn is_claim_live(
     assertions: &[ValidityAssertion],
     as_of_tx_time: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    let mut sorted: Vec<&ValidityAssertion> = assertions.iter().collect();
-    sorted.sort_by(|a, b| {
-        a.asserted_at.0.cmp(&b.asserted_at.0)
-            .then(a.assertion_ref.cmp(&b.assertion_ref))
-    });
-
-    let mut bound_at: Option<DateTime<Utc>> = None;
-    for assertion in sorted {
-        if assertion.asserted_at.0 > as_of_tx_time {
-            continue;
-        }
-        match &assertion.kind {
-            AssertionKind::Bound { bound_at: ba } => {
-                if *ba <= as_of_tx_time {
-                    bound_at = Some(*ba);
-                }
-            }
-            AssertionKind::Reopen { reopen_at } => {
-                if *reopen_at <= as_of_tx_time {
-                    bound_at = None;
-                }
-            }
-            _ => {}
-        }
-    }
-    bound_at
+) -> bool {
+    active_bound_at(assertions, as_of_tx_time).is_none()
 }
 
 // ── Canonical fold ────────────────────────────────────────────────────────────
@@ -257,8 +255,14 @@ where
                 .map(|d| !is_non_live_disposition(d))
                 .unwrap_or(true); // no ledger entry = admitted (new claim before first write)
             let assertions = assertions_for(c.claim_ref());
-            let assertion_live = is_claim_live(&assertions, as_of_tx_time);
-            let bound_at = active_bound_at(&assertions, as_of_tx_time);
+            // PERF (TASK-33-W4-LIB-R1 review #5): a single call to `active_bound_at` (one
+            // sort + one walk of `assertions`) now yields BOTH the liveness flag and the
+            // bound instant — before the review's single-source-of-truth refactor this was
+            // two separate calls (`is_claim_live` + `active_bound_at`), each re-sorting and
+            // re-walking the same assertion slice per claim.
+            let active_bound = active_bound_at(&assertions, as_of_tx_time);
+            let assertion_live = active_bound.is_none();
+            let bound_at = active_bound.map(|s| s.bound_at);
             let live = assertion_live && disposition_live;
             ClaimWithStatus {
                 claim: c,
@@ -503,18 +507,22 @@ pub(crate) fn compute_history_windows(
                 let both_trusted = valid_time_helpers::claim_is_trusted(claim, threshold)
                     && valid_time_helpers::claim_is_trusted(succ, threshold);
                 // Overlap is evaluated against the BOUND-ADJUSTED own_end, not the raw claim
-                // (`valid_time_helpers::windows_non_overlapping` reads the raw, untouched row —
-                // it would otherwise still see a Bound incumbent as open-ended and misreport
-                // overlap, exactly DIAG-3's root cause). `claim_is_trusted` guarantees
-                // `.start` is `Some` on both sides whenever `both_trusted` is true, so the
-                // short-circuited block below never unwraps a `None`.
-                let overlapping = both_trusted && !{
-                    let a_start = claim.valid_time().start.expect("both_trusted guarantees Some");
-                    let b_start = succ.valid_time().start.expect("both_trusted guarantees Some");
-                    let a_ends_before_b_starts = own_end.is_some_and(|ae| ae <= b_start);
-                    let b_ends_before_a_starts = succ.valid_time().end.is_some_and(|be| be <= a_start);
-                    a_ends_before_b_starts || b_ends_before_a_starts
-                };
+                // (the raw, untouched row would otherwise still see a Bound incumbent as
+                // open-ended and misreport overlap, exactly DIAG-3's root cause).
+                // `claim_is_trusted` guarantees `.start` is `Some` on both sides whenever
+                // `both_trusted` is true, so the `.expect()`s below never unwrap a `None`.
+                //
+                // Delegates to `valid_time_helpers::windows_non_overlapping_bounds` — the SAME
+                // primitive `is_trusted_succession`'s `windows_non_overlapping` uses
+                // (TASK-33-W4-LIB-R1 review #2) — so a bound-narrowed window and an own-end
+                // window classify identically; no hand-copied comparison here.
+                let overlapping = both_trusted
+                    && !valid_time_helpers::windows_non_overlapping_bounds(
+                        claim.valid_time().start.expect("both_trusted guarantees Some"),
+                        own_end,
+                        succ.valid_time().start.expect("both_trusted guarantees Some"),
+                        succ.valid_time().end,
+                    );
                 match own_end {
                     Some(oe) if overlapping => (Some(oe), own_end_gran, true),
                     Some(oe) => {
@@ -884,6 +892,58 @@ mod tests {
         let is_live = is_claim_live(&assertions, now());
 
         assert!(is_live, "a claim that was bounded then reopened should be live");
+    }
+
+    // ── TASK-33-W4-LIB-R1 review #1: is_claim_live / active_bound_at agreement ──
+
+    /// Exhaustively enumerate short Bound/Reopen toggle sequences (asserted_at strictly
+    /// increasing) and assert `is_claim_live(...) == active_bound_at(...).is_none()` at every
+    /// tx-time cutoff that matters (before / exactly at / just after each assertion) — proves
+    /// the two functions can never drift now that `is_claim_live` delegates to
+    /// `active_bound_at` (single source of truth, TASK-33-W4-LIB-R1 review #1).
+    #[test]
+    fn is_claim_live_agrees_with_active_bound_at_over_all_toggle_sequences() {
+        let agent = agent();
+        let claim_ref = ClaimRef::new_random();
+        let base = Utc::now() - chrono::Duration::days(1);
+
+        for len in 0..=4u32 {
+            let combos = 1u32 << len; // 2^len toggle-kind patterns (bit i: 0=Bound, 1=Reopen)
+            for pattern in 0..combos {
+                let mut assertions = Vec::new();
+                let mut cutoffs = vec![base - chrono::Duration::minutes(1)]; // before everything
+                for i in 0..len {
+                    let t = base + chrono::Duration::hours(i as i64);
+                    let is_bound = (pattern >> i) & 1 == 0;
+                    let kind = if is_bound {
+                        AssertionKind::Bound { bound_at: t }
+                    } else {
+                        AssertionKind::Reopen { reopen_at: t }
+                    };
+                    assertions.push(ValidityAssertion {
+                        assertion_ref: uuid::Uuid::new_v4(),
+                        agent_id: agent.clone(),
+                        target_claim: claim_ref.clone(),
+                        kind,
+                        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+                        confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+                        asserted_at: TransactionTime(t),
+                    });
+                    cutoffs.push(t); // exactly at this assertion's asserted_at
+                    cutoffs.push(t + chrono::Duration::minutes(1)); // just after
+                }
+
+                for cutoff in &cutoffs {
+                    let live = is_claim_live(&assertions, *cutoff);
+                    let bound_state = active_bound_at(&assertions, *cutoff);
+                    assert_eq!(
+                        live,
+                        bound_state.is_none(),
+                        "is_claim_live/active_bound_at disagreed: pattern={pattern:#b} len={len} cutoff={cutoff:?}"
+                    );
+                }
+            }
+        }
     }
 
     // ── "now" injection: different now values yield different live sets ────────

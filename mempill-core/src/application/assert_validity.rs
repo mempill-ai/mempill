@@ -16,6 +16,20 @@
 //! 3. Coherence (Bound only): `at < target.valid_time.start` → `IncoherentTemporalWindow`.
 //! 4. Idempotency / single-writer-per-target: same `at` on an active Bound → no-op;
 //!    different `at` → `AlreadyBound` (never "later wins").
+//! 5. No-effect bound (Bound only): `at >= target.valid_time.end` → no-op (see
+//!    `execute`'s Bound arm for the derivation).
+//!
+//! ## Why gate 1 runs before gate 2 (provenance before target load)
+//!
+//! Provenance is checked BEFORE the target claim is loaded (rather than, say, checking
+//! target existence first and provenance second). This is deliberate: there is no existence
+//! oracle available to a caller with insufficient provenance. If gate 2 ran first, a caller
+//! whose provenance would be rejected could still distinguish "target exists" (→
+//! `InsufficientProvenanceForOverturn`) from "target missing" (→ `ClaimNotFound`) by
+//! observing which error comes back — an information leak about claim existence to a
+//! caller who is not entitled to modify that claim at all. Checking provenance first means
+//! every insufficiently-provenanced caller gets the SAME error regardless of whether the
+//! target exists, closing that oracle.
 //!
 //! # Transaction discipline
 //!
@@ -94,7 +108,7 @@ where
             .persistence
             .load_validity_assertions_for(&req.agent_id, &req.target)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
-        let active_bound = latest_active_bound(&existing_assertions);
+        let active_bound = latest_active_bound(&existing_assertions, now);
 
         match &req.assertion {
             ValidityAssertionInput::Bound { at } => {
@@ -125,6 +139,29 @@ where
                         target: req.target.clone(),
                         existing_bound_at: existing_at.to_rfc3339(),
                     });
+                }
+
+                // ── Gate 5: no-effect bound (TASK-33-W4-LIB-R1 review #3) ──────
+                // `compute_history_windows` (truth_engine.rs) only ever NARROWS a claim's
+                // displayed window via `min(bound_at, own_end)` — it never widens a narrower
+                // stated end (see that function's module docs). A Bound whose `at` is at or
+                // after the claim's own `valid_time.end` therefore has ZERO effect on the
+                // derived window: `min(at, own_end)` always resolves to `own_end` regardless
+                // of `at`. Previously this was still ledgered while the receipt dishonestly
+                // echoed `effective_at = at`. Skip the write (mirrors gate 4's no-op contract:
+                // `no_op = true` means no new write was made) and report the HONEST effective
+                // end (`min(at, own_end)`, which here is always `own_end`).
+                if let Some(own_end) = target_claim.valid_time().end {
+                    if own_end <= *at {
+                        return Ok(AssertValidityResponse {
+                            claim_ref: req.target.clone(),
+                            assertion_ref: None,
+                            kind: AssertionKind::Bound { bound_at: own_end },
+                            effective_at: Some(own_end),
+                            disposition: Disposition::Superseded,
+                            no_op: true,
+                        });
+                    }
                 }
 
                 // ── Writes: one atomic unit (I9) ────────────────────────────────
@@ -279,36 +316,20 @@ where
     }
 }
 
-/// Walk a claim's validity assertions in `asserted_at` order and return the active Bound's
-/// `(bound_at, assertion_ref)` if the claim currently carries one (no later Reopen),
-/// or `None` if the claim is currently open (never bounded, or last bounded then reopened).
+/// Return the active Bound's `(bound_at, assertion_ref)` if the claim currently carries one
+/// (no later Reopen), or `None` if the claim is currently open (never bounded, or last bounded
+/// then reopened).
 ///
-/// Mirrors `truth_engine::is_claim_live`'s toggle logic, but tracks the `(bound_at, ref)`
-/// pair instead of a boolean — this use-case needs the value to check idempotency /
-/// single-writer-per-target, not just liveness.
-fn latest_active_bound(assertions: &[ValidityAssertion]) -> Option<(DateTime<Utc>, uuid::Uuid)> {
-    let mut sorted: Vec<&ValidityAssertion> = assertions.iter().collect();
-    sorted.sort_by(|a, b| {
-        a.asserted_at
-            .0
-            .cmp(&b.asserted_at.0)
-            .then(a.assertion_ref.cmp(&b.assertion_ref))
-    });
-
-    let mut state: Option<(DateTime<Utc>, uuid::Uuid)> = None;
-    for assertion in sorted {
-        match &assertion.kind {
-            AssertionKind::Bound { bound_at } => {
-                state = Some((*bound_at, assertion.assertion_ref));
-            }
-            AssertionKind::Reopen { .. } => {
-                state = None;
-            }
-            // AssertionKind is #[non_exhaustive] — future kinds are ignored (conservative no-op).
-            _ => {}
-        }
-    }
-    state
+/// Delegates to `truth_engine::active_bound_at` — the SINGLE SOURCE OF TRUTH for the
+/// Bound/Reopen toggle walk (TASK-33-W4-LIB-R1 review #1) — evaluated `as_of_tx_time = now`.
+/// All existing assertions were persisted before this call, so `asserted_at <= now` always
+/// holds and every stored assertion is visible; this is equivalent to the previous
+/// unconditional (non-tx-gated) walk, now unified with the read-path implementation.
+fn latest_active_bound(
+    assertions: &[ValidityAssertion],
+    now: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, uuid::Uuid)> {
+    truth_engine::active_bound_at(assertions, now).map(|s| (s.bound_at, s.assertion_ref))
 }
 
 /// Resolve a (subject, predicate) subject-line to the single live claim `end_fact` should

@@ -67,11 +67,8 @@ pub(crate) fn claim_is_trusted(claim: &Claim, threshold: f32) -> bool {
     vt.valid_time_confidence >= threshold && vt.start.is_some()
 }
 
-/// Returns `true` iff two claims have NON-OVERLAPPING valid-time windows under
-/// the half-open interval semantics [start, end):
-///
-///   - A = [a_start, a_end)  (a_end = None → ∞)
-///   - B = [b_start, b_end)  (b_end = None → ∞)
+/// Returns `true` iff two half-open valid-time windows `[a_start, a_end)` and
+/// `[b_start, b_end)` do NOT overlap (`None` end = ∞ / open-ended).
 ///
 /// Non-overlapping means: a_end <= b_start  OR  b_end <= a_start.
 /// When one end is None (= ∞), those two open-ended windows always overlap with
@@ -80,29 +77,42 @@ pub(crate) fn claim_is_trusted(claim: &Claim, threshold: f32) -> bool {
 ///   - if a_end is None (∞) and b_start >= a_start → they overlap.
 ///   - Similarly for b_end is None.
 ///
-/// Precondition: both claims must have `start` Some (ensured by caller via `claim_is_trusted`).
-pub(crate) fn windows_non_overlapping(a: &Claim, b: &Claim) -> bool {
-    let a_start = a.valid_time().start.unwrap(); // caller guarantees Some
-    let b_start = b.valid_time().start.unwrap();
-    let a_end = a.valid_time().end;
-    let b_end = b.valid_time().end;
-
+/// THE PRIMITIVE (TASK-33-W4-LIB-R1 review #2): this is the single overlap-comparison
+/// implementation. Both [`windows_non_overlapping`] (claims-based, raw stored ends, used by
+/// `is_trusted_succession`) and `truth_engine::compute_history_windows` (bound-adjusted
+/// `a_end` — a host-asserted `Bound` narrows `own_end` before this is called, but the
+/// comparison itself must be identical either way) delegate to this function, so a
+/// bound-narrowed window and an own-end window can never classify differently.
+pub(crate) fn windows_non_overlapping_bounds(
+    a_start: DateTime<Utc>,
+    a_end: Option<DateTime<Utc>>,
+    b_start: DateTime<Utc>,
+    b_end: Option<DateTime<Utc>>,
+) -> bool {
     // [a_start, a_end) does NOT overlap [b_start, b_end) iff:
     //   a_end <= b_start  OR  b_end <= a_start
     //
     // When a_end is None (∞): a runs to infinity, so a_end <= b_start is false (∞ > any b_start).
     // When b_end is None (∞): b runs to infinity, so b_end <= a_start is false.
-
-    let a_ends_before_b_starts = match a_end {
-        Some(ae) => ae <= b_start,
-        None => false, // a_end = ∞ > b_start
-    };
-    let b_ends_before_a_starts = match b_end {
-        Some(be) => be <= a_start,
-        None => false,
-    };
+    let a_ends_before_b_starts = a_end.is_some_and(|ae| ae <= b_start);
+    let b_ends_before_a_starts = b_end.is_some_and(|be| be <= a_start);
 
     a_ends_before_b_starts || b_ends_before_a_starts
+}
+
+/// Returns `true` iff two claims have NON-OVERLAPPING valid-time windows under
+/// the half-open interval semantics [start, end):
+///
+///   - A = [a_start, a_end)  (a_end = None → ∞)
+///   - B = [b_start, b_end)  (b_end = None → ∞)
+///
+/// Precondition: both claims must have `start` Some (ensured by caller via `claim_is_trusted`).
+///
+/// Delegates to [`windows_non_overlapping_bounds`] — the single overlap-comparison primitive.
+pub(crate) fn windows_non_overlapping(a: &Claim, b: &Claim) -> bool {
+    let a_start = a.valid_time().start.unwrap(); // caller guarantees Some
+    let b_start = b.valid_time().start.unwrap();
+    windows_non_overlapping_bounds(a_start, a.valid_time().end, b_start, b.valid_time().end)
 }
 
 /// Returns `true` iff all claims in `claims` form a trusted succession:
@@ -252,6 +262,41 @@ mod tests {
         let a = make_claim(Some(dt(2024, 1, 1)), Some(dt(2024, 3, 1)), 0.9);
         let b = make_claim(Some(dt(2024, 3, 1)), Some(dt(2024, 5, 1)), 0.9);
         assert!(windows_non_overlapping(&a, &b));
+    }
+
+    // ── windows_non_overlapping_bounds (TASK-33-W4-LIB-R1 review #2) ─────────
+
+    /// A bound-narrowed window and an own-end window with the SAME numeric end must
+    /// classify identically through `windows_non_overlapping_bounds` — both
+    /// `is_trusted_succession` (via `windows_non_overlapping`, raw claim `.end`) and
+    /// `truth_engine::compute_history_windows` (bound-adjusted `own_end`) call this one
+    /// primitive, so there is no longer a hand-copied second implementation that could drift.
+    #[test]
+    fn bound_narrowed_end_and_own_end_classify_identically() {
+        let a_start = dt(2024, 1, 1);
+        let b_start = dt(2024, 3, 1);
+        let b_end = None; // open-ended successor
+
+        // Scenario 1: claim's OWN stated end is exactly Mar 1 (no bound involved).
+        let own_end_result = windows_non_overlapping_bounds(a_start, Some(b_start), b_start, b_end);
+
+        // Scenario 2: claim's own end is open (∞), but a host-asserted Bound narrows it to
+        // the SAME Mar 1 instant (mirrors compute_history_windows's bound-adjusted own_end).
+        let bound_narrowed_result = windows_non_overlapping_bounds(a_start, Some(b_start), b_start, b_end);
+
+        assert_eq!(
+            own_end_result, bound_narrowed_result,
+            "identical effective end must classify identically regardless of whether it came \
+             from the claim's own stated end or a host-asserted Bound"
+        );
+        assert!(own_end_result, "touching at the boundary (Mar 1) is non-overlapping (half-open)");
+
+        // A bound that narrows to something EARLIER than an overlapping raw end must flip
+        // overlap → non-overlap, exactly the DIAG-3 scenario compute_history_windows guards.
+        let raw_overlap = !windows_non_overlapping_bounds(a_start, None, b_start, b_end); // both open-ended: overlap
+        let bound_resolves = windows_non_overlapping_bounds(a_start, Some(b_start), b_start, b_end); // narrowed: no overlap
+        assert!(raw_overlap, "two open-ended windows starting at different instants overlap");
+        assert!(bound_resolves, "narrowing a_end via Bound to b_start resolves the overlap");
     }
 
     // ── is_trusted_succession ─────────────────────────────────────────────────
