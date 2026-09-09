@@ -803,8 +803,9 @@ where
 
 /// Run the history timeline conformance suite against `store`.
 ///
-/// Exercises `compute_effective_windows` (pure) and `truth_engine::fold` via the real
-/// persistence backend. Uses DISTINCT agent_id namespace (`conformance-hist-*`).
+/// Exercises `truth_engine::fold` + `truth_engine::compute_history_windows` (the engine-layer
+/// single source of truth) via the real persistence backend. Uses DISTINCT agent_id namespace
+/// (`conformance-hist-*`).
 ///
 /// Panics on any contract violation with a descriptive message.
 #[cfg(any(test, feature = "test-support"))]
@@ -817,6 +818,12 @@ where
     hist_single_claim(store);
     hist_succession_ordering(store);
     hist_current_agrees_with_fold(store);
+    hist_own_end_never_discarded_when_no_overlap(store);
+    hist_overlap_marks_both_entries_contested_no_narrowing(store);
+    hist_current_requires_window_contains_now(store);
+    hist_ended_status_for_expired_unsuperseded_claim(store);
+    hist_duplicate_ordering_key_no_zero_length_window(store);
+    hist_granularity_follows_winning_endpoint_source(store);
 }
 
 /// Empty subject-line → `load_subject_line` returns empty (foundation for history).
@@ -843,8 +850,8 @@ where
     P: PersistencePort,
     P::Error: std::fmt::Debug,
 {
-    use crate::application::query_history::compute_effective_windows;
     use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
 
     let agent = AgentId("conformance-hist-t2".into());
     let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(10_000_000, 0).unwrap();
@@ -874,10 +881,11 @@ where
     assert_eq!(claims.len(), 1, "conformance[hist-t2]: must have 1 claim");
 
     let config = EngineConfig::default();
-    let refs: Vec<&Claim> = claims.iter().collect();
-    let windows = compute_effective_windows(&refs, &config);
+    let now = tx + chrono::Duration::seconds(1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
     assert_eq!(windows.len(), 1, "conformance[hist-t2]: 1 window");
-    assert_eq!(windows[0], None, "conformance[hist-t2]: single claim has open-ended window");
+    assert_eq!(windows[0].valid_until, None, "conformance[hist-t2]: single claim has open-ended window");
 }
 
 /// CEO succession: Alice→John→Bob — 3 entries ordered oldest first, windows correct.
@@ -888,8 +896,8 @@ where
     P: PersistencePort,
     P::Error: std::fmt::Debug,
 {
-    use crate::application::query_history::compute_effective_windows;
     use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
 
     let agent = AgentId("conformance-hist-t3".into());
 
@@ -925,30 +933,29 @@ where
     store.append_claim(&mut txn, &c_bob).expect("conformance[hist-t3]: append Bob");
     store.commit(txn).expect("conformance[hist-t3]: commit");
 
-    let mut claims = store
+    let claims = store
         .load_subject_line(&agent, "hist-corp", "ceo", None)
         .expect("conformance[hist-t3]: load_subject_line must not error");
     assert_eq!(claims.len(), 3, "conformance[hist-t3]: must have 3 claims (Alice, John, Bob)");
 
     let config = EngineConfig::default();
-    // Sort by canonical ordering key (tx_time — all low confidence).
-    claims.sort_by(|a, b| {
-        a.transaction_time().0.cmp(&b.transaction_time().0)
-            .then(a.claim_ref().0.as_u128().cmp(&b.claim_ref().0.as_u128()))
-    });
+    let now = t_bob + chrono::Duration::seconds(1);
+    // fold() performs the canonical sort internally (I8) — `all_claims` is already ordered.
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert_eq!(
+        fold.all_claims.iter().map(|cs| cs.claim.fact().value.clone()).collect::<Vec<_>>(),
+        vec![serde_json::json!("Alice"), serde_json::json!("John"), serde_json::json!("Bob")],
+        "conformance[hist-t3]: fold.all_claims must already be in canonical (oldest-first) order"
+    );
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
 
-    let refs: Vec<&Claim> = claims.iter().collect();
-    let windows = compute_effective_windows(&refs, &config);
+    // Windows: Alice closed by John's tx, John closed by Bob's tx, Bob open (no valid_time on
+    // any claim → legacy successor-ordering-key fallback, unchanged from the pre-fix behavior).
+    assert_eq!(windows[0].valid_until, Some(t_john), "conformance[hist-t3]: Alice's valid_until = John's ordering key");
+    assert_eq!(windows[1].valid_until, Some(t_bob),  "conformance[hist-t3]: John's valid_until = Bob's ordering key");
+    assert_eq!(windows[2].valid_until, None,          "conformance[hist-t3]: Bob is open-ended (current)");
 
-    // Windows: Alice closed by John's tx, John closed by Bob's tx, Bob open.
-    assert_eq!(windows[0], Some(t_john), "conformance[hist-t3]: Alice's valid_until = John's ordering key");
-    assert_eq!(windows[1], Some(t_bob),  "conformance[hist-t3]: John's valid_until = Bob's ordering key");
-    assert_eq!(windows[2], None,          "conformance[hist-t3]: Bob is open-ended (current)");
-
-    // Values in canonical order (oldest first).
-    assert_eq!(claims[0].fact().value, serde_json::json!("Alice"), "conformance[hist-t3]: oldest is Alice");
-    assert_eq!(claims[1].fact().value, serde_json::json!("John"),  "conformance[hist-t3]: middle is John");
-    assert_eq!(claims[2].fact().value, serde_json::json!("Bob"),   "conformance[hist-t3]: newest is Bob");
+    // Values in canonical order (oldest first) — already asserted via fold.all_claims above.
 }
 
 /// Current entry agrees with `truth_engine::fold` on which claim is live.
@@ -1011,6 +1018,318 @@ where
         fold.live_claims[0].claim.fact().value,
         serde_json::json!("Leader-A"),
         "conformance[hist-t4]: fold's live claim must match the single committed claim"
+    );
+}
+
+/// Helper: build a trusted valid-time claim for the history window-narrowing tests.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+fn hist_vt_claim(
+    agent: &AgentId,
+    subject: &str,
+    predicate: &str,
+    value: &str,
+    tx: chrono::DateTime<chrono::Utc>,
+    start: chrono::DateTime<chrono::Utc>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+) -> Claim {
+    Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: subject.to_owned(), predicate: predicate.to_owned(), value: serde_json::json!(value) },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime { start: Some(start), end, valid_time_confidence: 0.9, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    )
+}
+
+/// Bug A regression: a claim's own `valid_time.end` must never be discarded in favor of a
+/// LATER successor ordering key when it is genuinely non-overlapping and earlier.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_own_end_never_discarded_when_no_overlap<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+
+    let agent = AgentId("conformance-hist-t5".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Linda [Jan 1 - Jan 10) — genuine gap before John starts (Jan 24), non-overlapping.
+    let linda = hist_vt_claim(&agent, "hist-a-corp", "ceo", "Linda", dt(2024, 1, 1), dt(2024, 1, 1), Some(dt(2024, 1, 10)));
+    let john = hist_vt_claim(&agent, "hist-a-corp", "ceo", "John", dt(2024, 1, 2), dt(2024, 1, 24), None);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t5]: begin_atomic");
+    store.append_claim(&mut txn, &linda).expect("conformance[hist-t5]: append Linda");
+    store.append_claim(&mut txn, &john).expect("conformance[hist-t5]: append John");
+    store.commit(txn).expect("conformance[hist-t5]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-a-corp", "ceo", None)
+        .expect("conformance[hist-t5]: load_subject_line");
+    assert_eq!(claims.len(), 2, "conformance[hist-t5]: two claims");
+
+    let config = EngineConfig::default();
+    let now = dt(2025, 1, 1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Linda"));
+    assert_eq!(
+        windows[0].valid_until, Some(dt(2024, 1, 10)),
+        "conformance[hist-t5]: Linda's OWN end (Jan 10) must win, not John's later ordering key (Jan 24) — bug A regression"
+    );
+}
+
+/// Bug B regression: a trusted, genuinely OVERLAPPING adjacent pair must mark BOTH entries
+/// Contested with NO narrowing (own end preserved, not fabricated from the overlapping peer).
+#[cfg(any(test, feature = "test-support"))]
+fn hist_overlap_marks_both_entries_contested_no_narrowing<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+    use mempill_types::HistoryEntryStatus;
+
+    let agent = AgentId("conformance-hist-t6".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Joan [Sep 1 2024, Nov 1 2025) overlaps Linda [Sep 23 2024, Jan 24 2026).
+    let joan = hist_vt_claim(&agent, "hist-b-corp", "ceo", "Joan", dt(2024, 9, 1), dt(2024, 9, 1), Some(dt(2025, 11, 1)));
+    let linda = hist_vt_claim(&agent, "hist-b-corp", "ceo", "Linda", dt(2024, 9, 2), dt(2024, 9, 23), Some(dt(2026, 1, 24)));
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t6]: begin_atomic");
+    store.append_claim(&mut txn, &joan).expect("conformance[hist-t6]: append Joan");
+    store.append_claim(&mut txn, &linda).expect("conformance[hist-t6]: append Linda");
+    store.commit(txn).expect("conformance[hist-t6]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-b-corp", "ceo", None)
+        .expect("conformance[hist-t6]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2026, 6, 1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert!(fold.has_conflict, "conformance[hist-t6]: overlapping trusted claims must set has_conflict");
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Joan"));
+    assert_eq!(
+        windows[0].valid_until, Some(dt(2025, 11, 1)),
+        "conformance[hist-t6]: Joan's own end must be preserved (NOT narrowed by overlapping Linda)"
+    );
+    assert!(windows[0].contested, "conformance[hist-t6]: Joan must be Contested (overlap)");
+    assert!(windows[1].contested, "conformance[hist-t6]: Linda must also be Contested (has_conflict, structural)");
+    let _ = HistoryEntryStatus::Contested; // documents the status this window feeds
+}
+
+/// Bug C regression: `Current` requires the effective window to CONTAIN `now`, not merely
+/// membership in the raw live set. A predecessor whose own window has closed (superseded by
+/// valid-time succession) must not be mislabeled Current.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_current_requires_window_contains_now<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+
+    let agent = AgentId("conformance-hist-t7".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Clean succession: Alice [Jan 2020, Jan 2022) -> Bob [Jan 2022, ∞).
+    let alice = hist_vt_claim(&agent, "hist-c-corp", "ceo", "Alice", dt(2020, 1, 1), dt(2020, 1, 1), Some(dt(2022, 1, 1)));
+    let bob = hist_vt_claim(&agent, "hist-c-corp", "ceo", "Bob", dt(2020, 1, 2), dt(2022, 1, 1), None);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t7]: begin_atomic");
+    store.append_claim(&mut txn, &alice).expect("conformance[hist-t7]: append Alice");
+    store.append_claim(&mut txn, &bob).expect("conformance[hist-t7]: append Bob");
+    store.commit(txn).expect("conformance[hist-t7]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-c-corp", "ceo", None)
+        .expect("conformance[hist-t7]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2025, 1, 1); // well inside Bob's open window
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert!(fold.succession_selected, "conformance[hist-t7]: clean succession must narrow");
+    assert_eq!(fold.live_claims.len(), 1, "conformance[hist-t7]: narrowed to Bob only");
+
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Alice"));
+    assert!(
+        !windows[0].contains_now,
+        "conformance[hist-t7]: Alice's window (closed Jan 2022) must NOT contain 'now' (2025) — bug C regression"
+    );
+}
+
+/// New `Ended` status: a claim that is still raw-live (never explicitly Bound) but whose own
+/// valid-time window has expired, with no live successor, must be `Ended` — not `Current`.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_ended_status_for_expired_unsuperseded_claim<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+
+    let agent = AgentId("conformance-hist-t8".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Single claim whose own end has already passed — never Bound.
+    let claim = hist_vt_claim(&agent, "hist-d-corp", "role", "temp-lead", dt(2020, 1, 1), dt(2020, 1, 1), Some(dt(2020, 6, 1)));
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t8]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[hist-t8]: append");
+    store.commit(txn).expect("conformance[hist-t8]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-d-corp", "role", None)
+        .expect("conformance[hist-t8]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2026, 1, 1); // long after the claim's own end
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert_eq!(fold.live_claims.len(), 1, "conformance[hist-t8]: never Bound → still raw-live");
+    assert!(!fold.has_conflict);
+
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+    assert!(fold.all_claims[0].is_live, "conformance[hist-t8]: raw is_live must still be true (never Bound)");
+    assert!(
+        !windows[0].contains_now,
+        "conformance[hist-t8]: own window closed (Jun 2020) — must not contain 'now' (2026) → Ended, not Current"
+    );
+    assert!(!windows[0].contested);
+}
+
+/// Bug 2d regression: duplicate adjacent ordering keys must never yield a zero-length window
+/// (`valid_until == valid_from`) — the effective successor is the next STRICTLY-later key.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_duplicate_ordering_key_no_zero_length_window<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let agent = AgentId("conformance-hist-t9".into());
+    let t1 = chrono::DateTime::<chrono::Utc>::from_timestamp(13_000_000, 0).unwrap();
+    let t2 = chrono::DateTime::<chrono::Utc>::from_timestamp(13_000_100, 0).unwrap();
+
+    // Two claims sharing the SAME tx_time (no valid_time — ordering key is tx_time), plus a
+    // third claim with a strictly later tx_time.
+    let make_c = |val: &str, tx: chrono::DateTime<chrono::Utc>| -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            agent.clone(),
+            Fact { subject: "hist-e-corp".to_owned(), predicate: "lead".to_owned(), value: serde_json::json!(val) },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(tx),
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            Criticality::Low,
+            vec![],
+            None,
+            None,
+        )
+    };
+    let c_tie_a = make_c("TieA", t1);
+    let c_tie_b = make_c("TieB", t1);
+    let c_later = make_c("Later", t2);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t9]: begin_atomic");
+    store.append_claim(&mut txn, &c_tie_a).expect("conformance[hist-t9]: append TieA");
+    store.append_claim(&mut txn, &c_tie_b).expect("conformance[hist-t9]: append TieB");
+    store.append_claim(&mut txn, &c_later).expect("conformance[hist-t9]: append Later");
+    store.commit(txn).expect("conformance[hist-t9]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-e-corp", "lead", None)
+        .expect("conformance[hist-t9]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = t2 + chrono::Duration::seconds(1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    // Entries 0 and 1 (the tied pair) must NOT close against each other (zero-length) — both
+    // must skip ahead to entry 2's strictly-later key.
+    assert_eq!(windows[0].valid_until, Some(t2), "conformance[hist-t9]: first of the tied pair must skip to the strictly-later key");
+    assert_eq!(windows[1].valid_until, Some(t2), "conformance[hist-t9]: second of the tied pair must use the strictly-later key");
+    assert_eq!(windows[2].valid_until, None, "conformance[hist-t9]: last entry is open-ended");
+    assert_ne!(windows[0].valid_until, fold.all_claims[0].claim.valid_time().start,
+        "conformance[hist-t9]: no zero-length window (valid_until must not equal valid_from)");
+}
+
+/// Granularity attribution follows whichever endpoint value actually won: own `end_granularity`
+/// when the own end is used, successor's `start_granularity` only when the successor's
+/// ordering key is used AND itself sourced from `valid_time.start`.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_granularity_follows_winning_endpoint_source<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+    use mempill_types::DateGranularity;
+
+    let agent = AgentId("conformance-hist-t10".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Own end (Day granularity) wins over a later, non-overlapping successor (Year granularity).
+    let own_end_wins = Claim::new(
+        ClaimRef::new_random(), agent.clone(),
+        Fact { subject: "hist-f-corp".to_owned(), predicate: "ceo".to_owned(), value: serde_json::json!("Predecessor") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(dt(2024, 1, 1)),
+        ValidTime { start: Some(dt(2024, 1, 1)), end: Some(dt(2024, 1, 10)), valid_time_confidence: 0.9, start_granularity: None, end_granularity: Some(DateGranularity::Day) },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Low, vec![], None, None,
+    );
+    let successor = Claim::new(
+        ClaimRef::new_random(), agent.clone(),
+        Fact { subject: "hist-f-corp".to_owned(), predicate: "ceo".to_owned(), value: serde_json::json!("Successor") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(dt(2024, 1, 2)),
+        ValidTime { start: Some(dt(2024, 6, 1)), end: None, valid_time_confidence: 0.9, start_granularity: Some(DateGranularity::Year), end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Low, vec![], None, None,
+    );
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t10]: begin_atomic");
+    store.append_claim(&mut txn, &own_end_wins).expect("conformance[hist-t10]: append predecessor");
+    store.append_claim(&mut txn, &successor).expect("conformance[hist-t10]: append successor");
+    store.commit(txn).expect("conformance[hist-t10]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-f-corp", "ceo", None)
+        .expect("conformance[hist-t10]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2025, 1, 1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Predecessor"));
+    assert_eq!(
+        windows[0].valid_until_granularity, Some(DateGranularity::Day),
+        "conformance[hist-t10]: own end_granularity (Day) must win, NOT the successor's start_granularity (Year)"
     );
 }
 
@@ -2496,11 +2815,15 @@ where
     );
 }
 
-/// hist-gran-t2: two-claim succession where the successor has `start_granularity=Year`
-/// and high valid-time confidence. The predecessor's `valid_until` is bounded by the
-/// successor's `valid_time.start`, so `valid_until_granularity` must equal the
+/// hist-gran-t2: two-claim timeline where the predecessor is UNTRUSTED (confidence below
+/// threshold, no own end) and the successor has `start_granularity=Year` and high valid-time
+/// confidence. Since overlap cannot be determined when one side is untrusted, the legacy
+/// successor-key fallback fires: the predecessor's `valid_until_granularity` must equal the
 /// SUCCESSOR's `start_granularity` (Year) — not the predecessor's own `end_granularity`
 /// (which is deliberately set to a different value, Day, to prove no cross-contamination).
+/// (Two mutually-TRUSTED open-ended claims would instead be a genuine valid-time overlap —
+/// Contested, no narrowing — under the fold-derived history design; this scenario requires
+/// one side untrusted to honestly exercise the fallback path.)
 #[cfg(any(test, feature = "test-support"))]
 fn hist_gran_supersession_uses_successor_granularity<P>(store: std::sync::Arc<P>)
 where
@@ -2530,13 +2853,15 @@ where
         ValidTime {
             start: Some(vt_old_start),
             end: None,
-            valid_time_confidence: 0.9,
+            // UNTRUSTED (below the 0.7 default threshold): overlap against the successor
+            // cannot be determined, so the legacy successor-key fallback fires below.
+            valid_time_confidence: 0.3,
             start_granularity: Some(DateGranularity::Day),
             // Deliberately Day (not Year) to prove the effective valid_until_granularity
             // is NOT this claim's own end_granularity.
             end_granularity: Some(DateGranularity::Day),
         },
-        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.3 },
         Criticality::Medium,
         vec![],
         None,

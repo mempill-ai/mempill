@@ -53,7 +53,13 @@ fn run_reopen_scenario(pg_tag: &str) {
             // conformance suite. An open-ended claim1 would OVERLAP claim2's open window
             // and correctly NOT trigger succession — this test targets granularity
             // survival across reopen, not overlap/conflict semantics.
-            ValidTime { start: Some(start1), end: Some(start2), valid_time_confidence: 0.9, start_granularity: Some(DateGranularity::Month), end_granularity: None },
+            //
+            // end_granularity=Day: under the fold-derived history design, an entry's own
+            // explicit end always wins over a successor's ordering key (bug A fix), so
+            // valid_until_granularity is sourced from THIS claim's own end_granularity, not
+            // claim2's start_granularity. Set explicitly here so the test still proves
+            // granularity survives a full store-handle reopen (not fabricated as None).
+            ValidTime { start: Some(start1), end: Some(start2), valid_time_confidence: 0.9, start_granularity: Some(DateGranularity::Month), end_granularity: Some(DateGranularity::Day) },
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
             Criticality::Medium,
             vec![],
@@ -103,10 +109,19 @@ fn run_reopen_scenario(pg_tag: &str) {
         assert_eq!(resp.entries.len(), 2, "reopen[{pg_tag}]: must have 2 history entries after full store-handle reopen");
 
         let e1 = resp.entries.iter().find(|e| e.value == serde_json::json!("phase-1")).expect("reopen: phase-1 entry must be present");
-        assert_eq!(e1.status, HistoryEntryStatus::Superseded, "reopen[{pg_tag}]: phase-1 must be Superseded after reopen");
+        // phase-1's own explicit end (start2) closes its window via a genuine trusted
+        // valid-time succession, but no ValidityAssertion::Bound is ever written here (this
+        // test only calls append_claim) — a clean succession never supersedes (only
+        // HeavyPath / oracle-affirmed supersession writes a Bound assertion). phase-1
+        // therefore stays raw-live: its correct status is `Ended` (window closed, no
+        // conflict, not the narrowed-current selection), NOT `Superseded` (which means
+        // "explicitly bounded/disposed") — this is the fold-derived history design's bug C fix.
+        assert_eq!(e1.status, HistoryEntryStatus::Ended, "reopen[{pg_tag}]: phase-1's window has closed via succession but it was never explicitly Bound → Ended, not Superseded");
         assert_eq!(e1.valid_from_granularity, Some(DateGranularity::Month), "reopen[{pg_tag}]: phase-1's start_granularity (Month) must survive a full store-handle reopen");
-        // Derived endpoint rule: valid_until_granularity takes the SUCCESSOR's start_granularity (Day).
-        assert_eq!(e1.valid_until_granularity, Some(DateGranularity::Day), "reopen[{pg_tag}]: phase-1's derived valid_until_granularity must be the successor's (Day) start_granularity, surviving reopen");
+        // Derived endpoint rule: own end wins over the successor's key (bug A fix), so
+        // valid_until_granularity is phase-1's OWN end_granularity (Day), not phase-2's
+        // start_granularity — though both happen to be Day here by construction.
+        assert_eq!(e1.valid_until_granularity, Some(DateGranularity::Day), "reopen[{pg_tag}]: phase-1's own end_granularity (Day) must survive a full store-handle reopen");
 
         let e2 = resp.entries.iter().find(|e| e.value == serde_json::json!("phase-2")).expect("reopen: phase-2 entry must be present");
         assert_eq!(e2.status, HistoryEntryStatus::Current, "reopen[{pg_tag}]: phase-2 must be Current after reopen");

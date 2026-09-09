@@ -110,7 +110,15 @@ pub struct ReconcileResponse {
 ///
 /// Returns all claims ever written to the line, ordered by the canonical ordering key
 /// (valid_time_start when confidence ≥ threshold, else tx_time). Each entry is tagged
-/// `Current` or `Superseded` based on the same canonical fold that powers `query_memory`.
+/// `Current`, `Superseded`, `Contested`, or `Ended` based on the same canonical fold that
+/// powers `query_memory` — see `mempill_types::HistoryEntryStatus` for the full contract, and
+/// `query_history.rs` module docs for the single-source-of-truth design (I8).
+///
+/// AUDIT VIEW — DESIGN DECISION: `query_history` always loads with `as_of_tx_time = None`
+/// (every claim ever ingested, regardless of transaction time) and has no `valid_at`
+/// parameter. `query_memory`'s bi-temporal `as_of_tx_time`/`valid_at` narrowing is
+/// intentionally out of scope for this audit timeline — it exists to show the full claim
+/// history, not a point-in-time snapshot.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueryHistoryRequest {
     /// The agent whose history is queried.
@@ -123,8 +131,8 @@ pub struct QueryHistoryRequest {
 
 /// One slot in the history timeline for a subject-line.
 ///
-/// `status` is derived from `is_live` in the canonical fold — the `Current` entry is
-/// exactly the claim that `recall` / `query_memory` would return as primary.
+/// `status` is derived from the same canonical fold `query_memory` uses (`is_live`,
+/// `has_conflict`, and the narrowed live-selection) — see `mempill_types::HistoryEntryStatus`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HistoryEntry {
     /// Stable reference to the underlying claim (UUID).
@@ -133,8 +141,21 @@ pub struct HistoryEntry {
     pub value: serde_json::Value,
     /// Start of the valid-time window, or `None` if unknown.
     pub valid_from: Option<chrono::DateTime<chrono::Utc>>,
-    /// Effective end of the slot: equals the successor's canonical ordering key,
-    /// or `None` for the open-ended current slot.
+    /// Effective end of this entry's valid-time window.
+    ///
+    /// Derivation rule (see `truth_engine::compute_history_windows`, the single engine-layer
+    /// source of truth shared with `query_memory`'s succession selection):
+    ///   - This claim's OWN `valid_time.end` is honoured whenever present — it is narrowed
+    ///     towards an earlier successor ordering key via `min()`, but NEVER discarded outright
+    ///     in favor of a LATER successor key (the historical bug this design fixes).
+    ///   - When this claim and its (skip-duplicate) successor are both trusted and their
+    ///     windows genuinely OVERLAP, `valid_until` is this claim's own end (not narrowed by
+    ///     the overlapping successor) and the entry is flagged `Contested` — never a silent
+    ///     fabricated narrowing.
+    ///   - When this claim's own end is unknown (`None`) and overlap cannot be determined
+    ///     (confidence/start missing on either side), the legacy fallback applies: the
+    ///     successor's canonical ordering key closes the window.
+    ///   - The last entry (no strictly-later successor) uses its own end, `None` if open-ended.
     pub valid_until: Option<chrono::DateTime<chrono::Utc>>,
     /// Precision of the `valid_from` date, taken verbatim from this claim's own
     /// `ValidTime::start_granularity`. `None` when the start is absent or predates
@@ -145,21 +166,19 @@ pub struct HistoryEntry {
     pub valid_from_granularity: Option<DateGranularity>,
     /// Precision of the `valid_until` date.
     ///
-    /// `valid_until` is a DERIVED endpoint (see `query_history.rs` module docs): it is
-    /// either the successor claim's canonical ordering-key granularity, or `None` for
-    /// the open-ended current slot. The rule this crate honours: **the granularity of
-    /// whichever timestamp produced the bound** —
-    ///   - when the successor's ordering key is its `valid_time.start`, this field is the
-    ///     successor's `start_granularity`;
-    ///   - when the successor's ordering key falls back to its `transaction_time` (low
-    ///     valid-time confidence), this field is `None` — a transaction-time stamp has no
-    ///     date-granularity concept, so fabricating a value here would misrepresent it as
-    ///     a user-supplied partial date.
+    /// The granularity of whichever timestamp actually produced `valid_until` (see that
+    /// field's docs for the full derivation rule):
+    ///   - this claim's own `end_granularity`, when its own end was used (the common case now
+    ///     that own-end is honoured whenever present);
+    ///   - the successor's `start_granularity`, only when the successor's ordering key was
+    ///     used AND was itself sourced from `valid_time.start` (not a transaction-time fallback);
+    ///   - `None` when the winning value came from a transaction-time fallback (a machine
+    ///     timestamp has no user-supplied date precision) or is absent (open-ended / overlap).
     ///
     /// DISPLAY-ONLY — never used for ordering, matching, or fold selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_until_granularity: Option<DateGranularity>,
-    /// Whether this claim is the live belief or has been superseded.
+    /// Current / Superseded / Contested / Ended — see `mempill_types::HistoryEntryStatus`.
     pub status: HistoryEntryStatus,
     /// Human-readable provenance label (e.g. `"External/UserAsserted"`).
     pub provenance: String,
