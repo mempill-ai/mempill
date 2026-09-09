@@ -153,16 +153,30 @@ async def ingest_claim(
             "RecallReEntry", or "ModelDerived".
         cardinality: "Functional" (one value), "SetValued" (multiple), or "Unknown".
         confidence_value: Value confidence in [0, 1]. Default 0.9.
-        confidence_valid_time: Temporal confidence in [0, 1]. Default 0.9.
+        confidence_valid_time: NOT PERSISTED — currently a no-op. Both storage backends
+            (SQLite and Postgres) keep a single `valid_time_confidence` column per claim,
+            populated exclusively from `valid_time["valid_time_confidence"]`. This
+            parameter is forwarded into the request but silently dropped by storage: it
+            is never written, never read back, and has no effect on gating, succession,
+            or the returned belief. Do not rely on it; it may be removed or wired up in a
+            future release. Default 0.9 (irrelevant while unused).
         criticality: "Low", "Medium", "High", or "Critical".
         valid_time: Optional temporal bound: {"start"?: ISO-8601, "end"?: ISO-8601,
             "valid_time_confidence": float, "start_granularity"?: str,
-            "end_granularity"?: str}. "valid_time_confidence" is required whenever this
-            dict is supplied at all (no default). "start_granularity" /
-            "end_granularity" are optional display-only precision hints — one of
-            "year", "month", "day", "instant" — recording how precisely "start" / "end"
-            were known; never used for matching or ordering, only for honest display on
-            read (see query_memory's valid_from_display / valid_until_display).
+            "end_granularity"?: str}. "valid_time_confidence" (inside this dict) is the
+            AUTHORITATIVE temporal-confidence value — the only one persisted, the only
+            one that drives engine decisions (incoherence gating, succession detection,
+            valid-time ordering), and the one echoed back in both
+            belief["valid_time"]["valid_time_confidence"] and
+            belief["confidence"]["valid_time_confidence"] on query_memory. It is required
+            whenever this dict is supplied at all (no default — omit the whole
+            "valid_time" dict, not just this key, if you have no temporal confidence to
+            give; omitting the dict entirely defaults the stored confidence to 0.0, i.e.
+            "unknown"). "start_granularity" / "end_granularity" are optional
+            display-only precision hints — one of "year", "month", "day", "instant" —
+            recording how precisely "start" / "end" were known; never used for matching
+            or ordering, only for honest display on read (see query_memory's
+            valid_from_display / valid_until_display).
         derived_from: Optional list of source claim UUIDs.
 
     Returns:
