@@ -9,6 +9,10 @@ See the [repository README](https://github.com/mempill-ai/mempill) for the full 
 - `PostgresPersistenceStore` — `impl PersistencePort` backed by an r2d2 connection pool.
 - `PostgresEngine<O, V>` — type alias for `EngineHandle<PostgresPersistenceStore, O, V>`.
 - `open_postgres(conn_str, oracle, vector, config)` — open an engine connected to PostgreSQL.
+- `PoolConfig { max_size, connection_timeout }` — configure the underlying r2d2 pool
+  (defaults: `max_size = 20`, `connection_timeout = 5s`); pass to
+  `PostgresPersistenceStore::with_pool_config(conn_str, pool_config)`. Also re-exported
+  through the `mempill` facade as `mempill::postgres::PoolConfig`.
 
 ## Usage
 
@@ -26,7 +30,9 @@ let engine: PostgresEngine<NoOpOracle, NoOpVector> = open_postgres(
 
 ## Concurrency model
 
-- r2d2 connection pool (max 20 connections) — concurrent cross-agent transactions.
+- r2d2 connection pool (`max_size = 20`, `connection_timeout = 5s` by default;
+  configurable via `PoolConfig` / `with_pool_config`, see above) — concurrent
+  cross-agent transactions.
 - Same-agent write serialization: `pg_advisory_xact_lock(hashtext(agent_id)::bigint)`.
 - OCC belt-and-suspenders: `UNIQUE(agent_id, stream_seq)` on `ledger_entries`.
 - `requires_global_write_serialization()` returns `false` — `EngineHandle` skips the

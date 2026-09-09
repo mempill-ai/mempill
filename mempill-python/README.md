@@ -3,6 +3,11 @@
 Python bindings for the mempill AI-agent memory engine — temporal, contested-belief-aware
 fact storage for AI agents.
 
+> **Note:** 0.4.0 is unreleased on `main` as of this writing; the published PyPI wheel is
+> still 0.3.0 and does not have `open_for_agent` / `open_oracle_for_agent` (see the root
+> [CHANGELOG.md](../CHANGELOG.md) for the 0.3.0 → 0.4.0 migration note). This caveat resolves
+> itself once 0.4.0 is published.
+
 ## Install
 
 ```sh
@@ -64,7 +69,10 @@ remember(engine, "agent", "acme", "ceo", "Bob",
 
 h = history(engine, "agent", "acme", "ceo")
 for entry in h:
-    print(entry.value, entry.status, entry.valid_from, entry.valid_until)
+    # valid_from_display / valid_until_display render at the recorded precision
+    # (e.g. "2024" for Year, "2024-01" for Month) — prefer them over the raw
+    # valid_from / valid_until timestamps for honest display.
+    print(entry.value, entry.status, entry.valid_from_display, entry.valid_until_display)
 ```
 
 ### File-backed engine

@@ -34,13 +34,33 @@
 //! upgrading from a pre-0.4.0 shared-file deployment.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use rusqlite::{Connection, Result as SqlResult};
+use rusqlite::{Connection, ErrorCode, Result as SqlResult};
 
 use crate::migrations;
 
+/// Bound on retries for the brand-new-file WAL-initialization race handled by [`open`].
+/// Linear backoff (`5ms * attempt`) totals well under 1s for the full retry budget, which
+/// is generous relative to the sub-millisecond DDL runs this races against.
+const OPEN_MAX_ATTEMPTS: u32 = 10;
+
 /// Open a **file-backed** SQLite connection at `path`, apply mandatory PRAGMAs, then run
 /// any pending migrations.
+///
+/// # Concurrent first-open retry
+/// SQLite's very first conversion of a brand-new file to `journal_mode=WAL` (the `-wal` /
+/// `-shm` sidecar creation) has a documented corner case: a connection reading through a
+/// concurrently-initializing WAL file can get `SQLITE_BUSY` WITHOUT that wait going through
+/// the normal `sqlite3_busy_timeout` retry loop — verified empirically (busy_timeout alone
+/// leaves this failing in well under 1ms, i.e. not retried at all). This is distinct from,
+/// and in addition to, the `BEGIN IMMEDIATE` transaction in `migrations::apply_migrations`,
+/// which correctly serializes the version-check + DDL + version-bump once a connection has
+/// gotten past this initial WAL setup. To make concurrent first opens of a brand-new file
+/// reliable end to end, `open` retries the whole open-and-migrate sequence (fresh
+/// `Connection`, since a `SQLITE_BUSY` mid-sequence can leave the old one transaction-broken)
+/// on `SQLITE_BUSY` specifically, up to [`OPEN_MAX_ATTEMPTS`] times with a short linear
+/// backoff, before propagating the error.
 ///
 /// # Visibility
 /// This function is intentionally `pub(crate)` (not part of the public API). It accepts
@@ -49,10 +69,41 @@ use crate::migrations;
 /// (see `mempill-sqlite/src/lib.rs`) was introduced to close structurally. It remains
 /// available for internal test use and migration tooling only.
 pub(crate) fn open(path: &str) -> Result<Connection, crate::SqliteStoreError> {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match open_once(path) {
+            Ok(conn) => return Ok(conn),
+            Err(err) if attempt < OPEN_MAX_ATTEMPTS && is_sqlite_busy(&err) => {
+                std::thread::sleep(Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// One attempt at opening + PRAGMA-initializing + migrating `path`. See [`open`] for the
+/// retry wrapper around this.
+fn open_once(path: &str) -> Result<Connection, crate::SqliteStoreError> {
     let conn = Connection::open(path)?;
     apply_pragmas(&conn)?;
     migrations::apply_migrations(&conn)?;
     Ok(conn)
+}
+
+/// True if `err` ultimately wraps a `rusqlite` `SQLITE_BUSY` failure, whether it arrived via
+/// `SqliteStoreError::Sqlite` (raw connection/PRAGMA errors) or
+/// `SqliteStoreError::Migration` (errors from inside `migrations::apply_migrations`).
+fn is_sqlite_busy(err: &crate::SqliteStoreError) -> bool {
+    let inner = match err {
+        crate::SqliteStoreError::Sqlite(e) => Some(e),
+        crate::SqliteStoreError::Migration(migrations::MigrationError::Sqlite(e)) => Some(e),
+        _ => None,
+    };
+    matches!(
+        inner,
+        Some(rusqlite::Error::SqliteFailure(sqlite_err, _)) if sqlite_err.code == ErrorCode::DatabaseBusy
+    )
 }
 
 /// Derive the per-agent database file path as `base_dir/agent_{agent_id}.db`.
@@ -138,6 +189,12 @@ fn apply_pragmas(conn: &Connection) -> SqlResult<()> {
          PRAGMA synchronous  = FULL;\
          PRAGMA foreign_keys = ON;",
     )?;
+    // Explicit, self-documenting busy timeout (rusqlite already sets 5000ms by default on
+    // every new connection, but we pin it here so migrations.rs's BEGIN IMMEDIATE race
+    // window is guaranteed to have somewhere to wait, independent of rusqlite's default).
+    // A second connection racing the first open_for_agent() of a brand-new file blocks here
+    // (inside SQLite's busy handler) rather than failing outright with SQLITE_BUSY.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }
 

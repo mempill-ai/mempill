@@ -244,9 +244,26 @@ pub mod sqlite {
 ///
 /// Use [`postgres::open_postgres`] to open an engine connected to PostgreSQL.
 /// Note: NoTls only; TLS support is planned (see roadmap in the workspace README).
+///
+/// ## Pool configuration
+///
+/// The underlying r2d2 connection pool defaults to `max_size = 20`,
+/// `connection_timeout = 5s`. To customize it, build a [`postgres::PoolConfig`]
+/// and pass it to [`postgres::PostgresPersistenceStore::with_pool_config`]:
+///
+/// ```no_run
+/// use mempill::postgres::{PoolConfig, PostgresPersistenceStore};
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = PoolConfig { max_size: 50, connection_timeout: std::time::Duration::from_secs(10) };
+/// let store = PostgresPersistenceStore::with_pool_config("host=localhost user=mempill", config)?;
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "postgres")]
 pub mod postgres {
     pub use mempill_postgres::{
+        PoolConfig,
         PostgresEngine,
         PostgresPersistenceStore,
         PostgresPendingStore,

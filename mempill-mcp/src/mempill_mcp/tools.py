@@ -155,7 +155,14 @@ async def ingest_claim(
         confidence_value: Value confidence in [0, 1]. Default 0.9.
         confidence_valid_time: Temporal confidence in [0, 1]. Default 0.9.
         criticality: "Low", "Medium", "High", or "Critical".
-        valid_time: Optional temporal bound {"start"?: ISO-8601, "end"?: ISO-8601}.
+        valid_time: Optional temporal bound: {"start"?: ISO-8601, "end"?: ISO-8601,
+            "valid_time_confidence": float, "start_granularity"?: str,
+            "end_granularity"?: str}. "valid_time_confidence" is required whenever this
+            dict is supplied at all (no default). "start_granularity" /
+            "end_granularity" are optional display-only precision hints — one of
+            "year", "month", "day", "instant" — recording how precisely "start" / "end"
+            were known; never used for matching or ordering, only for honest display on
+            read (see query_memory's valid_from_display / valid_until_display).
         derived_from: Optional list of source claim UUIDs.
 
     Returns:

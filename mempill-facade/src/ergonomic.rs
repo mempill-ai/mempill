@@ -717,6 +717,15 @@ pub async fn recall(
 /// or [`HistoryEntryStatus::Superseded`] using the same canonical fold as [`recall`], so
 /// `history().current()` is guaranteed to agree with `recall().primary`.
 ///
+/// Each [`HistoryEntry`] also carries `valid_from_granularity` / `valid_until_granularity`
+/// (`Option<DateGranularity>`), display-only precision hints for the entry's `valid_from` /
+/// `valid_until` timestamps. `valid_from_granularity` is this claim's own stored
+/// `start_granularity`. `valid_until_granularity` is **derived**: it is the successor
+/// claim's `start_granularity` (since `valid_until` is itself derived from the successor's
+/// canonical ordering key), or `None` when the successor's ordering key fell back to
+/// transaction time (low valid-time confidence) — a transaction-time stamp has no
+/// date-granularity concept. See [`HistoryEntry`] for the full field-by-field contract.
+///
 /// # Errors
 /// - `MempillDxError::Engine(_)` — persistence failure
 pub async fn history(

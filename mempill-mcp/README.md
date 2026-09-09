@@ -64,7 +64,15 @@ Parameters:
 - `confidence_value` (float, default 0.9) — value confidence in [0, 1]
 - `confidence_valid_time` (float, default 0.9) — temporal confidence in [0, 1]
 - `criticality` (str, default `"Low"`) — `"Low"` | `"Medium"` | `"High"` | `"Critical"`
-- `valid_time` (dict, optional) — `{"start"?: ISO-8601, "end"?: ISO-8601}`
+- `valid_time` (dict, optional) — `{"start"?: ISO-8601, "end"?: ISO-8601, "valid_time_confidence": float, "start_granularity"?: str, "end_granularity"?: str}`.
+  `start` / `end` are optional (omit for unknown/open-ended). `valid_time_confidence` is
+  **required whenever the `valid_time` dict is supplied at all** (no default — omit the
+  whole `valid_time` dict, not just this key, if you have no temporal confidence to give).
+  `start_granularity` / `end_granularity` are optional display-only precision hints — one of
+  `"year"`, `"month"`, `"day"`, `"instant"` — recording how precisely `start` / `end` were
+  known (e.g. `"year"` for a bare `"2024"` normalised to a full timestamp); omit for full
+  ISO-8601 instants or when precision is unknown. They are never used for matching or
+  ordering, only for honest display on read (see `query_memory` below).
 - `derived_from` (list[str], optional) — source claim UUIDs
 
 Returns: `{"claim_ref": str, "disposition": str, "contested_with": [str]}`
@@ -80,7 +88,11 @@ Parameters:
 - `as_of_tx_time` (str, optional) — ISO-8601 UTC timestamp; rewinds the transaction-time axis
 - `valid_at` (str, optional) — ISO-8601 UTC timestamp; filters by real-world validity window (independent of `as_of_tx_time`)
 
-Returns: `{"belief": {...BeliefProjection...}}`
+Returns: `{"belief": {...BeliefProjection...}}`. Each belief slot (`belief.primary`,
+`belief.alternatives[i]`) also carries honest-display precision metadata:
+`valid_from_display` / `valid_until_display` (pre-rendered strings at the recorded
+precision, e.g. `"2020-03"` for Month, absent when the endpoint is unknown/open) and the
+raw `valid_time.start_granularity` / `valid_time.end_granularity` tags.
 
 ### `reconcile`
 

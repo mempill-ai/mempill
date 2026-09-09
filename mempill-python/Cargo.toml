@@ -1,6 +1,6 @@
 [package]
 name = "mempill-python"
-version = "0.4.0"
+version.workspace = true
 edition = "2021"
 license = "Apache-2.0"
 readme = "README.md"
