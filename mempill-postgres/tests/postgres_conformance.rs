@@ -10,6 +10,7 @@
 mod common;
 
 use mempill_core::testing::conformance::{
+    run_assert_validity_conformance,
     run_disposition_scope_conformance, run_granularity_conformance, run_history_conformance,
     run_history_granularity_conformance, run_persistence_conformance,
     run_reconcile_incumbent_selection_matches_query_memory_primary_conformance,
@@ -167,5 +168,21 @@ fn postgres_sweep_resolves_then_supersession_happens_only_via_submit_adjudicatio
 fn postgres_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_pg18() {
     common::with_pg("18", |store| {
         run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_conformance(&store);
+    });
+}
+
+/// TASK-33 E2: `assert_validity` + `end_fact` conformance suite against postgres:16.
+#[test]
+fn postgres_assert_validity_conformance_pg16() {
+    common::with_pg("16", |store| {
+        run_assert_validity_conformance(&store);
+    });
+}
+
+/// Mirrors the pg16 suite above on postgres:18.
+#[test]
+fn postgres_assert_validity_conformance_pg18() {
+    common::with_pg("18", |store| {
+        run_assert_validity_conformance(&store);
     });
 }

@@ -124,8 +124,8 @@ impl OraclePort for PyOracleBridge {
 use std::sync::OnceLock;
 
 use mempill_core::application::dto::{
-    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest,
-    QuerySubjectRequest, ReconcileRequest,
+    AssertValidityRequest, AuditQueryRequest, IngestClaimRequest, LiveClaimResolution,
+    QueryHistoryRequest, QueryMemoryRequest, QuerySubjectRequest, ReconcileRequest,
 };
 use mempill_sqlite::OracleEngine;
 use mempill_types::AdjudicationResponse;
@@ -404,6 +404,61 @@ impl PyOracleEngine {
             list.append(d)?;
         }
         Ok(list.into_any())
+    }
+
+    /// Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1 `assert_validity`,
+    /// TASK-33 E2). Identical contract to `PyEngine.assert_validity`.
+    #[pyo3(signature = (request))]
+    fn assert_validity<'py>(&self, py: Python<'py>, request: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let req: AssertValidityRequest = pythonize::depythonize(request)
+            .map_err(|e| ValidationError::new_err(format!("bad request: {e}")))?;
+        let engine = self.engine.clone();
+        let resp = py
+            .detach(|| oracle_runtime().block_on(engine.assert_validity(req)))
+            .map_err(mem_err_to_pyerr)?;
+        Ok(pythonize::pythonize(py, &resp)?)
+    }
+
+    /// Resolve a (subject, predicate) subject-line to the single live claim, if any.
+    /// Identical contract to `PyEngine.resolve_live_claim_for_line`.
+    #[pyo3(signature = (agent_id, subject, predicate))]
+    fn resolve_live_claim_for_line<'py>(
+        &self,
+        py: Python<'py>,
+        agent_id: String,
+        subject: String,
+        predicate: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine.clone();
+        let resolution = py
+            .detach(|| {
+                oracle_runtime().block_on(engine.resolve_live_claim_for_line(
+                    mempill_types::AgentId(agent_id),
+                    subject,
+                    predicate,
+                ))
+            })
+            .map_err(mem_err_to_pyerr)?;
+
+        let dict = pyo3::types::PyDict::new(py);
+        match resolution {
+            LiveClaimResolution::Empty => {
+                dict.set_item("status", "empty")?;
+                dict.set_item("claim_ref", py.None())?;
+                dict.set_item("live_count", py.None())?;
+            }
+            LiveClaimResolution::Single(claim_ref) => {
+                dict.set_item("status", "single")?;
+                dict.set_item("claim_ref", claim_ref.0.to_string())?;
+                dict.set_item("live_count", py.None())?;
+            }
+            LiveClaimResolution::Ambiguous(n) => {
+                dict.set_item("status", "ambiguous")?;
+                dict.set_item("claim_ref", py.None())?;
+                dict.set_item("live_count", n)?;
+            }
+        }
+        Ok(dict.into_any())
     }
 }
 

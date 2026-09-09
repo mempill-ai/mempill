@@ -4,8 +4,8 @@
 //! never cross this boundary; callers only see these structs.
 
 use mempill_types::{
-    AgentId, BeliefProjection, Cardinality, ClaimRef, Confidence, Criticality, DateGranularity,
-    Disposition, HistoryEntryStatus, LedgerEntry, ProvenanceLabel, ValidTime,
+    AgentId, AssertionKind, BeliefProjection, Cardinality, ClaimRef, Confidence, Criticality,
+    DateGranularity, Disposition, HistoryEntryStatus, LedgerEntry, ProvenanceLabel, ValidTime,
 };
 
 // ── INGEST CLAIM ──────────────────────────────────────────────────────────────
@@ -102,6 +102,88 @@ pub struct ReconcileResponse {
     pub outcomes: Vec<(ClaimRef, Disposition)>,
     /// Number of subject lines that required oracle escalation.
     pub oracle_escalations: u32,
+}
+
+// ── ASSERT VALIDITY (SDK_CONTRACT.md §3.1) ──────────────────────────────────
+
+/// The validity assertion the host wants to apply to `target` — bound (close) or reopen.
+///
+/// Deliberately distinct from `mempill_types::AssertionKind`: this is the *request* shape
+/// (the host supplies `at`; `Reopen` carries no timestamp — the engine stamps `now`),
+/// while `AssertionKind` is the persisted, engine-stamped record.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum ValidityAssertionInput {
+    /// Close `target`'s valid-time window as of `at`. Rejected if `at` precedes the
+    /// claim's own `valid_time.start` (`IncoherentTemporalWindow`).
+    ///
+    /// Adjacently-tagged JSON shape (Python-friendly, mirrors `ProvenanceLabel`):
+    /// `{"type": "Bound", "value": {"at": "2026-01-01T00:00:00Z"}}`.
+    Bound {
+        /// The UTC instant at which `target` stops being valid.
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Reverse the most recent active Bound on `target`, reopening its valid-time window.
+    ///
+    /// JSON shape: `{"type": "Reopen"}` (unit variant — no `"value"` key).
+    Reopen,
+}
+
+/// Request for `assert_validity` — the host-facing, oracle-free path to
+/// `Superseded`/`Invalidated`/`Reinstated` (SDK_CONTRACT.md §3.1, I11).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssertValidityRequest {
+    /// The agent that owns `target` and is submitting this assertion.
+    pub agent_id: AgentId,
+    /// The claim whose valid-time window is bounded or reopened. Must exist and belong
+    /// to `agent_id` — cross-agent targets are rejected as `ClaimNotFound` (I1 scoped lookup).
+    pub target: ClaimRef,
+    /// Bound or reopen.
+    pub assertion: ValidityAssertionInput,
+    /// Required. Only `External(*)` (first-hand) is eligible — mirrors the rule that only
+    /// first-hand external evidence may overturn a belief. Any other channel is rejected
+    /// with `InsufficientProvenanceForOverturn`.
+    pub provenance: ProvenanceLabel,
+    /// Confidence in this validity assertion.
+    pub confidence: Confidence,
+}
+
+/// Response from `assert_validity`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssertValidityResponse {
+    /// Echo of `target` — the claim this assertion was applied to.
+    pub claim_ref: ClaimRef,
+    /// Stable UUID of the appended (or, for a no-op, the pre-existing) validity assertion.
+    /// `None` only for a Reopen no-op where no active Bound existed to reverse.
+    pub assertion_ref: Option<uuid::Uuid>,
+    /// The engine-stamped assertion actually in effect after this call (echoes the
+    /// existing Bound on a same-instant no-op, rather than a synthetic re-derivation).
+    pub kind: AssertionKind,
+    /// The UTC instant the assertion takes effect (`bound_at` for Bound, the reopen
+    /// instant for Reopen). `None` for a Reopen no-op (nothing was reopened).
+    pub effective_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// `Superseded` for Bound, `Reinstated` for Reopen.
+    pub disposition: Disposition,
+    /// `true` when no new write was made: an idempotent repeat of an identical Bound, a
+    /// Reopen with no active Bound to reverse, or a Bound whose `at` is at/after the
+    /// claim's own `valid_time.end` (has zero effect on the derived window — see
+    /// `assert_validity.rs` gate 5). In the last case `effective_at` honestly reports
+    /// `min(at, own_end)` (always `own_end`), not the raw requested `at`.
+    pub no_op: bool,
+}
+
+/// Outcome of resolving a (subject, predicate) subject-line to the single claim `end_fact`
+/// should bound. Computed by the SAME canonical fold `recall`/`query_memory` use — never a
+/// heuristic re-derivation (I8 single source of truth).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveClaimResolution {
+    /// No live claim on the line.
+    Empty,
+    /// Exactly one live claim — safe to bound unambiguously.
+    Single(ClaimRef),
+    /// More than one live claim (Contested, or co-existing SetValued members). `end_fact`
+    /// refuses to guess; the count is surfaced in `AmbiguousLineForClose`.
+    Ambiguous(usize),
 }
 
 // ── QUERY HISTORY ────────────────────────────────────────────────────────────

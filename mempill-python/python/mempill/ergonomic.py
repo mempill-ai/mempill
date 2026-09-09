@@ -615,6 +615,124 @@ def history(
     return History(entries)
 
 
+# ── assert_validity / end_fact (SDK_CONTRACT.md §3.1, TASK-33 E2) ──────────────
+
+@dataclass
+class EndFactReceipt:
+    """Return value from end_fact().
+
+    Attributes:
+        claim_ref:     UUID string of the claim that was bounded.
+        disposition:   "Superseded" on a normal bound; unchanged on a no-op repeat.
+        effective_at:  RFC3339 string — the instant the closed fact's window now ends at.
+        no_op:         True when this call repeated an identical bound already in effect
+                       (I6 idempotent) — no new write was made.
+    """
+
+    claim_ref:    str
+    disposition:  str
+    effective_at: str
+    no_op:        bool
+
+
+def end_fact(
+    engine: Any,
+    agent_id: str,
+    subject: str,
+    predicate: str,
+    at: str,
+    provenance: Optional[dict] = None,
+    confidence: float = 1.0,
+) -> EndFactReceipt:
+    """End an open-ended fact: bound the incumbent claim on (subject, predicate) at `at`.
+
+    This is the corrected succession idiom — bounds the incumbent's own claim in place
+    (the row itself is never touched, only a validity assertion is appended), rather than
+    writing a duplicate "closed copy" claim. A later non-overlapping claim on the same
+    line then folds to a clean succession (CommittedCheap) with no oracle involved.
+
+    Resolution never guesses which claim to close — it uses
+    engine.resolve_live_claim_for_line(), backed by the SAME canonical fold
+    recall()/history() use (I8 single source of truth):
+
+        0 live claims  → mempill.NotFoundError
+        1 live claim   → bound at `at`; returns EndFactReceipt
+        >1 live claims → mempill.ValidationError (never guesses)
+
+    Because resolution runs against the LIVE set (same as recall()), once the sole claim
+    on a line is bounded it is no longer live — a REPEATED end_fact() call on a
+    now-fully-closed line correctly raises mempill.NotFoundError, not a no-op. True
+    idempotent re-bind (I6, EndFactReceipt.no_op == True) is a property of
+    engine.assert_validity() called directly with the already-known target claim_ref:
+    call it again with the SAME `at` (a no-op, I6) or a DIFFERENT `at` (raises
+    mempill.ConflictError — reopen first, via {"type": "Reopen"}, if the boundary
+    needs to move).
+
+    ``forget_since`` in prose/docs refers to this same operation.
+
+    Args:
+        engine:     A mempill Engine.
+        agent_id:   The agent's identity string.
+        subject:    Entity key.
+        predicate:  Property key.
+        at:         Lenient date string (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339) — the
+                    instant the fact stops being true.
+        provenance: Wire-shape provenance dict. Defaults to External/UserAsserted. Must
+                    be External(*) — any other channel raises mempill.ValidationError.
+        confidence: Confidence in this validity assertion (0.0-1.0). Defaults to 1.0.
+
+    Returns:
+        EndFactReceipt with claim_ref, disposition, effective_at, no_op.
+
+    Raises:
+        UnparsableDateError: if `at` cannot be normalized.
+        mempill.NotFoundError: zero live claims on the line (including a repeat call on
+            an already-fully-closed line — the bounded claim is no longer live).
+        mempill.ValidationError: more than one live claim, or provenance not External(*).
+
+    Note: mempill.ConflictError (AlreadyBound) is NOT reachable through end_fact() —
+    resolution only ever targets a currently-LIVE claim, and a claim with an active
+    bound is by definition not live. It is only reachable via engine.assert_validity()
+    called directly with an already-known target claim_ref.
+    """
+    from mempill._mempill import NotFoundError, ValidationError
+
+    at_rfc3339 = _to_rfc3339(at)
+
+    resolution = engine.resolve_live_claim_for_line(agent_id, subject, predicate)
+    status = resolution["status"]
+    if status == "empty":
+        raise NotFoundError(
+            f"No live claim found for (subject={subject!r}, predicate={predicate!r}) — "
+            "nothing to end_fact"
+        )
+    if status == "ambiguous":
+        live_count = resolution.get("live_count")
+        raise ValidationError(
+            f"Ambiguous close: {live_count} live claims on (subject={subject!r}, "
+            f"predicate={predicate!r}); resolve via engine.assert_validity() with an "
+            "explicit claim_ref"
+        )
+
+    target = resolution["claim_ref"]
+
+    request = {
+        "agent_id": agent_id,
+        "target": target,
+        "assertion": {"type": "Bound", "value": {"at": at_rfc3339}},
+        "provenance": provenance or {"type": "External", "kind": "UserAsserted"},
+        "confidence": {"value_confidence": confidence, "valid_time_confidence": confidence},
+    }
+    resp = engine.assert_validity(request)
+
+    return EndFactReceipt(
+        claim_ref=resp["claim_ref"],
+        disposition=resp["disposition"],
+        effective_at=resp.get("effective_at") or at_rfc3339,
+        no_op=bool(resp.get("no_op", False)),
+    )
+
+
 __all__ = [
     "UnparsableDateError",
     "RememberOptions",
@@ -627,4 +745,6 @@ __all__ = [
     "HistoryEntry",
     "History",
     "history",
+    "EndFactReceipt",
+    "end_fact",
 ]

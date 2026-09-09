@@ -55,6 +55,19 @@ pub enum MempillDxError {
     /// Engine-level error (pass-through with original message).
     #[error("Engine error: {0}")]
     Engine(#[from] MemError),
+
+    /// `end_fact` found zero live claims on the (subject, predicate) line — nothing to close.
+    ///
+    /// Not a `MemError::ClaimNotFound` (that variant requires a real `ClaimRef`, and there
+    /// is none here — the line simply has no live claim). Reused across the ergonomic tier
+    /// wherever a subject/predicate line resolves to "nothing to bound".
+    #[error("No live claim found for (subject={subject:?}, predicate={predicate:?}) — nothing to end_fact")]
+    NoLiveClaimForClose {
+        /// The subject of the empty subject-line.
+        subject: String,
+        /// The predicate of the empty subject-line.
+        predicate: String,
+    },
 }
 
 // ── Facade traits (object-safe thin seam over EngineHandle) ──────────────────
@@ -140,6 +153,52 @@ where
         req: QueryHistoryRequest,
     ) -> Result<mempill_core::QueryHistoryResponse, MemError> {
         self.query_history(req).await
+    }
+}
+
+/// Object-safe async seam for `assert_validity` + live-claim-line resolution. Implemented
+/// for `EngineHandle<P,O,V>` via blanket impl.
+///
+/// Not intended for direct use — call [`assert_validity`] or [`end_fact`] instead.
+/// You may implement this for mock engines in tests.
+#[async_trait::async_trait]
+pub trait CanAssertValidity: Send + Sync {
+    /// Submit an `assert_validity` (bound/reopen) request to the engine.
+    async fn assert_validity_ergo(
+        &self,
+        req: mempill_core::AssertValidityRequest,
+    ) -> Result<mempill_core::AssertValidityResponse, MemError>;
+
+    /// Resolve a (subject, predicate) subject-line to the single live claim, if any.
+    async fn resolve_live_claim_for_line_ergo(
+        &self,
+        agent_id: AgentId,
+        subject: String,
+        predicate: String,
+    ) -> Result<mempill_core::LiveClaimResolution, MemError>;
+}
+
+#[async_trait::async_trait]
+impl<P, O, V> CanAssertValidity for mempill_core::EngineHandle<P, O, V>
+where
+    P: mempill_core::PersistencePort + Send + Sync + 'static,
+    O: mempill_core::OraclePort + Send + Sync + 'static,
+    V: mempill_core::VectorPort + Send + Sync + 'static,
+{
+    async fn assert_validity_ergo(
+        &self,
+        req: mempill_core::AssertValidityRequest,
+    ) -> Result<mempill_core::AssertValidityResponse, MemError> {
+        self.assert_validity(req).await
+    }
+
+    async fn resolve_live_claim_for_line_ergo(
+        &self,
+        agent_id: AgentId,
+        subject: String,
+        predicate: String,
+    ) -> Result<mempill_core::LiveClaimResolution, MemError> {
+        self.resolve_live_claim_for_line(agent_id, subject, predicate).await
     }
 }
 
@@ -756,6 +815,165 @@ pub async fn history(
     let resp = engine.query_history_ergo(req).await?;
 
     Ok(History { entries: resp.entries })
+}
+
+// ── assert_validity / end_fact (SDK_CONTRACT.md §3.1, TASK-33 E2) ──────────────
+
+/// Options for [`end_fact`]. Defaults mirror [`RememberOptions`]'s host-assertion defaults.
+#[derive(Debug, Clone, Default)]
+pub struct EndFactOptions {
+    /// Provenance for the closing assertion. Default: `External(UserAsserted)`.
+    /// Must be `External(*)` — any other channel is rejected with
+    /// `MemError::InsufficientProvenanceForOverturn` (only first-hand external evidence,
+    /// the host acting as its own oracle, may close or reopen a fact).
+    pub provenance: Option<ProvenanceLabel>,
+    /// Confidence in this validity assertion (0.0–1.0). Default: `1.0`.
+    pub confidence: Option<f32>,
+}
+
+impl EndFactOptions {
+    /// Create an `EndFactOptions` with all defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the provenance label. Must be `External(*)`.
+    pub fn provenance(mut self, p: ProvenanceLabel) -> Self {
+        self.provenance = Some(p);
+        self
+    }
+
+    /// Set the confidence in this validity assertion (0.0–1.0). Default: `1.0`.
+    pub fn confidence(mut self, c: f32) -> Self {
+        self.confidence = Some(c);
+        self
+    }
+}
+
+/// Receipt returned by [`end_fact`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct EndFactReceipt {
+    /// The claim that was bounded.
+    pub claim_ref: ClaimRef,
+    /// `Superseded` on a normal bound; unchanged on a no-op repeat.
+    pub disposition: Disposition,
+    /// The UTC instant the closed fact's window now ends at.
+    pub effective_at: DateTime<Utc>,
+    /// `true` when this call repeated an identical bound already in effect (I6 idempotent) —
+    /// no new write was made.
+    pub no_op: bool,
+}
+
+/// Typed passthrough to the engine's `assert_validity` op (SDK_CONTRACT.md §3.1) — bound or
+/// reopen a claim's valid-time window by its `ClaimRef`.
+///
+/// Most callers should prefer [`end_fact`], which resolves `(subject, predicate)` to a
+/// `ClaimRef` automatically and never guesses when the line is ambiguous. Call this
+/// directly only when you already hold the target `ClaimRef` (e.g. from a
+/// [`RememberReceipt`] or a [`history`] entry) or need `Reopen`.
+///
+/// # Errors
+/// - `MempillDxError::Engine(MemError::InsufficientProvenanceForOverturn)` — provenance not `External(*)`
+/// - `MempillDxError::Engine(MemError::ClaimNotFound)` — target does not exist / belongs to another agent
+/// - `MempillDxError::Engine(MemError::IncoherentTemporalWindow)` — `at` precedes the claim's own valid-time start
+/// - `MempillDxError::Engine(MemError::AlreadyBound)` — a different bound is already active (never "later wins")
+pub async fn assert_validity(
+    engine: &impl CanAssertValidity,
+    req: mempill_core::AssertValidityRequest,
+) -> Result<mempill_core::AssertValidityResponse, MempillDxError> {
+    Ok(engine.assert_validity_ergo(req).await?)
+}
+
+/// End an open-ended fact: bound the incumbent claim on `(subject, predicate)` at `at`.
+///
+/// This is the corrected succession idiom — bound the incumbent's own claim in place
+/// (I1: the row itself is never touched, only a validity assertion is appended), rather
+/// than writing a duplicate "closed copy" claim. A later non-overlapping claim on the same
+/// line then folds to a clean succession (`CommittedCheap`) with no oracle involved.
+///
+/// Resolution never guesses which claim to close — it uses the SAME canonical fold
+/// `recall`/`history` use to count live claims on the line (I8 single source of truth):
+///
+/// | Live claims on the line | Outcome |
+/// |---|---|
+/// | 0 | `MempillDxError::NoLiveClaimForClose` |
+/// | 1 | bound at `at`; returns [`EndFactReceipt`] |
+/// | >1 (Contested, or co-existing SetValued members) | `MempillDxError::Engine(MemError::AmbiguousLineForClose)` |
+///
+/// Because resolution runs against the LIVE set (same as `recall`), once the sole claim
+/// on a line is bounded it is no longer live — a *repeated* `end_fact` call on a now-fully-
+/// closed line correctly returns `NoLiveClaimForClose`, not a no-op. True idempotent
+/// re-bind (I6, `EndFactReceipt::no_op == true`) is a property of [`assert_validity`]
+/// called directly with the already-known target `ClaimRef` — call it again with the
+/// SAME `at` (a no-op, I6) or a DIFFERENT `at` (rejected with `MemError::AlreadyBound`;
+/// `reopen` first if the boundary needs to move).
+///
+/// `forget_since` in prose/docs refers to this same operation (documentation alias, not a
+/// separate op).
+///
+/// # Errors
+/// - `MempillDxError::UnparsableDate` — if `at` is malformed
+/// - `MempillDxError::NoLiveClaimForClose` — zero live claims on the line (including a
+///   repeat call on an already-fully-closed line — the bounded claim is no longer live)
+/// - `MempillDxError::Engine(MemError::AmbiguousLineForClose)` — more than one live claim
+/// - `MempillDxError::Engine(MemError::InsufficientProvenanceForOverturn)` — provenance not `External(*)`
+///
+/// `MemError::AlreadyBound` is NOT reachable through `end_fact` — resolution only ever
+/// targets a currently-live claim, and a claim with an active bound is by definition not
+/// live. It is only reachable via [`assert_validity`] called directly with an
+/// already-known target `ClaimRef`.
+pub async fn end_fact(
+    engine: &impl CanAssertValidity,
+    agent_id: impl Into<String>,
+    subject: impl Into<String>,
+    predicate: impl Into<String>,
+    at: impl Into<String>,
+    opts: EndFactOptions,
+) -> Result<EndFactReceipt, MempillDxError> {
+    let agent_id = AgentId(agent_id.into());
+    let subject = subject.into();
+    let predicate = predicate.into();
+
+    let at_dt = crate::date::parse_lenient_date(&at.into())?;
+
+    let resolution = engine
+        .resolve_live_claim_for_line_ergo(agent_id.clone(), subject.clone(), predicate.clone())
+        .await?;
+
+    let target = match resolution {
+        mempill_core::LiveClaimResolution::Empty => {
+            return Err(MempillDxError::NoLiveClaimForClose { subject, predicate });
+        }
+        mempill_core::LiveClaimResolution::Single(claim_ref) => claim_ref,
+        mempill_core::LiveClaimResolution::Ambiguous(live_count) => {
+            return Err(MempillDxError::Engine(MemError::AmbiguousLineForClose {
+                subject,
+                predicate,
+                live_count,
+            }));
+        }
+    };
+
+    let value_confidence = opts.confidence.unwrap_or(1.0);
+    let req = mempill_core::AssertValidityRequest {
+        agent_id,
+        target,
+        assertion: mempill_core::ValidityAssertionInput::Bound { at: at_dt },
+        provenance: opts
+            .provenance
+            .unwrap_or(ProvenanceLabel::External(ExternalKind::UserAsserted)),
+        confidence: Confidence { value_confidence, valid_time_confidence: value_confidence },
+    };
+
+    let resp = engine.assert_validity_ergo(req).await?;
+
+    Ok(EndFactReceipt {
+        claim_ref: resp.claim_ref,
+        disposition: resp.disposition,
+        effective_at: resp.effective_at.unwrap_or(at_dt),
+        no_op: resp.no_op,
+    })
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

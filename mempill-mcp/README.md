@@ -2,7 +2,7 @@
 
 MCP adapter for the mempill AI-agent memory engine.
 
-A FastMCP server exposing 4 tools over stdio transport. Backed by the `mempill` Python wheel
+A FastMCP server exposing 5 tools over stdio transport. Backed by the `mempill` Python wheel
 (which wraps the Rust engine). Requires Python ≥ 3.11.
 
 See the [root README](../README.md) for full architecture and concepts.
@@ -128,6 +128,34 @@ Parameters:
 - `from_tx_time` (str, optional) — ISO-8601 UTC lower bound on transaction time
 
 Returns: `{"entries": [LedgerEntry, ...]}`
+
+### `end_fact`
+
+End an open-ended fact: explicitly close the incumbent claim on a (subject, predicate)
+line as of a given instant (SDK_CONTRACT.md §3.1 `assert_validity`). This is the correct
+way to say "X stopped being true at time T" — it bounds the incumbent claim in place (the
+original row is never touched or duplicated), so a later non-overlapping claim on the
+same line folds to a clean succession with no conflict and no adjudication needed.
+
+Resolution never guesses which claim to close: zero live claims raises `NotFoundError`,
+exactly one live claim is bounded, and more than one live claim (a genuinely contested or
+set-valued line) raises `ValidationError` — inspect the line via `ingest_claim` /
+`query_memory` and resolve the ambiguity before retrying.
+
+Parameters:
+- `subject` (str)
+- `predicate` (str)
+- `at` (str) — ISO-8601 date/time the fact stopped being true. Accepts `YYYY`, `YYYY-MM`,
+  `YYYY-MM-DD`, or full RFC3339.
+- `provenance` (str or dict, optional) — same forms as `ingest_claim` (see below). Must
+  be first-hand external evidence — only the host acting as its own oracle may close or
+  reopen a fact. Defaults to `External:UserAsserted`.
+- `confidence` (float, default 1.0) — confidence in this validity assertion, in [0, 1]
+
+Returns: `{"claim_ref": str, "disposition": str, "effective_at": str, "no_op": bool}`.
+`no_op` is `true` only when this call repeated an identical bound already in effect — no
+new write was made. Repeating `end_fact` on an already-fully-closed line (nothing left
+live) raises `NotFoundError`, not a no-op — there is no live claim left to close.
 
 ## Provenance strings
 

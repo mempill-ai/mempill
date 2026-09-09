@@ -4,7 +4,7 @@
 //! Uses `thiserror` for ergonomic `Display` + `Error` implementations.
 
 use thiserror::Error;
-use mempill_types::{AgentId, ClaimRef};
+use mempill_types::{AgentId, ClaimRef, ProvenanceLabel};
 
 /// Top-level error type for the mempill engine.
 /// Every invariant violation surfaces as a typed variant here — never silently swallowed.
@@ -94,6 +94,49 @@ pub enum MemError {
         start: String,
         /// The valid-time end (RFC3339).
         end: String,
+    },
+
+    // ── ASSERT_VALIDITY / END_FACT (TASK-33 E2) ───────────────────────────────
+    /// `assert_validity` was called with a provenance channel that is not `External(*)`.
+    /// Only first-hand external evidence (the host acting as oracle) may bound or reopen
+    /// a claim's validity — mirrors the rule that only first-hand external evidence may
+    /// overturn a belief (SDK_CONTRACT.md §2.1 rule 1).
+    #[error(
+        "Insufficient provenance to overturn claim validity: {provenance:?} is not eligible \
+         (only External(*) may bound/reopen a claim)"
+    )]
+    InsufficientProvenanceForOverturn {
+        /// The provenance label supplied on the `assert_validity` write.
+        provenance: ProvenanceLabel,
+    },
+
+    /// A `bound` was requested at a different instant than the target's existing active
+    /// Bound. Never resolved by "later wins" — the caller must `reopen` first, then
+    /// `bound` again at the new instant.
+    #[error(
+        "Claim {target:?} is already bound at {existing_bound_at}; reopen it before \
+         re-bounding at a different instant"
+    )]
+    AlreadyBound {
+        /// The claim that already carries an active Bound assertion.
+        target: ClaimRef,
+        /// The `bound_at` instant of the existing active Bound (RFC3339).
+        existing_bound_at: String,
+    },
+
+    /// `end_fact` (or any subject/predicate-scoped close) found more than one live claim
+    /// on the line and refuses to guess which one to bound.
+    #[error(
+        "Ambiguous close: {live_count} live claims on (subject={subject:?}, predicate={predicate:?}); \
+         resolve via assert_validity with an explicit ClaimRef"
+    )]
+    AmbiguousLineForClose {
+        /// The subject of the ambiguous subject-line.
+        subject: String,
+        /// The predicate of the ambiguous subject-line.
+        predicate: String,
+        /// The number of live claims found (always > 1).
+        live_count: usize,
     },
 
     // ── PERSISTENCE ───────────────────────────────────────────────────────────

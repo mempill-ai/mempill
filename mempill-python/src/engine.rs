@@ -12,8 +12,8 @@
 use std::sync::OnceLock;
 
 use mempill_core::application::dto::{
-    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest,
-    QuerySubjectRequest, ReconcileRequest,
+    AssertValidityRequest, AuditQueryRequest, IngestClaimRequest, LiveClaimResolution,
+    QueryHistoryRequest, QueryMemoryRequest, QuerySubjectRequest, ReconcileRequest,
 };
 use mempill_sqlite::DefaultEngine;
 use pyo3::prelude::*;
@@ -166,6 +166,76 @@ impl PyEngine {
         let resp = py.detach(|| runtime().block_on(engine.query_subject(req)))
             .map_err(mem_err_to_pyerr)?;
         Ok(pythonize(py, &resp.entries)?)
+    }
+
+    /// Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1 `assert_validity`,
+    /// TASK-33 E2) — the host-facing, oracle-free path to `Superseded`/`Reinstated`.
+    ///
+    /// `request` must be a dict with:
+    ///   - `agent_id`  — str
+    ///   - `target`    — claim_ref UUID string
+    ///   - `assertion` — `{"type": "Bound", "value": {"at": "<RFC3339>"}}` or `{"type": "Reopen"}`
+    ///   - `provenance` — must be `External(*)`; any other channel raises `ValidationError`
+    ///   - `confidence` — `{"value_confidence": float, "valid_time_confidence": float}`
+    ///
+    /// Returns a dict with `claim_ref`, `assertion_ref` (nullable), `kind`, `effective_at`
+    /// (nullable RFC3339 string), `disposition`, `no_op`.
+    ///
+    /// Prefer `mempill.ergonomic.end_fact()` unless you already hold the target `claim_ref`.
+    #[pyo3(signature = (request))]
+    fn assert_validity<'py>(&self, py: Python<'py>, request: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let req: AssertValidityRequest = depythonize(request)
+            .map_err(|e| ValidationError::new_err(format!("bad request: {e}")))?;
+        let engine = self.engine.clone();
+        let resp = py.detach(|| runtime().block_on(engine.assert_validity(req)))
+            .map_err(mem_err_to_pyerr)?;
+        Ok(pythonize(py, &resp)?)
+    }
+
+    /// Resolve a (subject, predicate) subject-line to the single live claim, if any —
+    /// the SAME canonical fold `query_memory`/`query_history` use (I8 single source of
+    /// truth; never a heuristic re-derivation). Backs `mempill.ergonomic.end_fact()`.
+    ///
+    /// Returns a dict: `{"status": "empty"|"single"|"ambiguous", "claim_ref": str|None,
+    /// "live_count": int|None}`. `live_count` is populated only for `"ambiguous"`.
+    #[pyo3(signature = (agent_id, subject, predicate))]
+    fn resolve_live_claim_for_line<'py>(
+        &self,
+        py: Python<'py>,
+        agent_id: String,
+        subject: String,
+        predicate: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine.clone();
+        let resolution = py
+            .detach(|| {
+                runtime().block_on(engine.resolve_live_claim_for_line(
+                    mempill_types::AgentId(agent_id),
+                    subject,
+                    predicate,
+                ))
+            })
+            .map_err(mem_err_to_pyerr)?;
+
+        let dict = pyo3::types::PyDict::new(py);
+        match resolution {
+            LiveClaimResolution::Empty => {
+                dict.set_item("status", "empty")?;
+                dict.set_item("claim_ref", py.None())?;
+                dict.set_item("live_count", py.None())?;
+            }
+            LiveClaimResolution::Single(claim_ref) => {
+                dict.set_item("status", "single")?;
+                dict.set_item("claim_ref", claim_ref.0.to_string())?;
+                dict.set_item("live_count", py.None())?;
+            }
+            LiveClaimResolution::Ambiguous(n) => {
+                dict.set_item("status", "ambiguous")?;
+                dict.set_item("claim_ref", py.None())?;
+                dict.set_item("live_count", n)?;
+            }
+        }
+        Ok(dict.into_any())
     }
 }
 
