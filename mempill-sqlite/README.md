@@ -7,9 +7,13 @@ See the [repository README](https://github.com/mempill-ai/mempill) for the full 
 ## What this crate provides
 
 - `SqlitePersistenceStore` — `impl PersistencePort` backed by a single rusqlite connection.
+- `SqlitePendingStore` — `impl PendingAdjudicationPort`, backing the oracle adjudication queue.
 - `DefaultEngine` — type alias for `EngineHandle<SqlitePersistenceStore, NoOpOracle, NoOpVector>`.
+- `OracleEngine<O>` — type alias for `EngineHandle<SqlitePersistenceStore, O, NoOpVector>`, generic over an `OraclePort` implementation `O`.
 - `open_default_for_agent(base_dir, agent_id)` — open a file-backed engine at `base_dir/agent_{agent_id}.db` (agent_id validated against `[A-Za-z0-9_-]`).
 - `open_default_in_memory()` — open an ephemeral in-memory engine (tests, MCP sessions).
+- `open_with_oracle_for_agent(base_dir, agent_id, oracle)` — open a file-backed `OracleEngine<O>` at `base_dir/agent_{agent_id}.db`.
+- `open_with_oracle_in_memory(oracle)` — open an ephemeral in-memory `OracleEngine<O>`.
 
 ## Usage
 

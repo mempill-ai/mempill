@@ -90,8 +90,20 @@ Version headings are dated at publish time. A version with no date and the
   silently invisible to fold/state-guard logic on agents with a large ledger
   history, which could produce an incorrect belief. Correctness is now
   independent of agent ledger history size.
+- The `mempill` facade now re-exports `PoolConfig` from `mempill::postgres`, so the
+  configurable connection pool is usable without a direct `mempill-postgres`
+  dependency.
+- SQLite schema migrations now run inside a single immediate transaction;
+  concurrent first opens of a brand-new per-agent database file no longer fail
+  with `duplicate column name`.
 
-## [0.3.0]
+### Notes
+
+- A valid-time point claim (`start == end`) is accepted, but yields `NoBelief` at
+  that instant: valid-time windows are half-open `[start, end)`, so a
+  zero-length window never contains its own boundary.
+
+## [0.3.0] — 2026-07-02
 
 ### Changed
 

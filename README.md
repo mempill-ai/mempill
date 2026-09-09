@@ -17,7 +17,7 @@ Includes: Rust core engine + SQLite/PostgreSQL adapters + oracle resolution loop
 > `open_default(path)` / `open_with_oracle(path, oracle)` are replaced by
 > `open_default_for_agent(base_dir, agent_id)` / `open_with_oracle_for_agent(base_dir, agent_id, oracle)`.
 > `mempill-mcp`'s `MEMPILL_DB_PATH` is replaced by `MEMPILL_DB_DIR`. See
-> [CHANGELOG.md](./CHANGELOG.md#040) for the full migration note.
+> [CHANGELOG.md](./CHANGELOG.md) for the full migration note.
 
 
 ---
@@ -100,10 +100,11 @@ for full per-version detail.
 
 | Feature | Notes |
 |---|---|
-| Per-agent SQLite entry points (`open_default_for_agent`, `open_with_oracle_for_agent`) | **Breaking change.** File path always derived from `agent_id` — structurally prevents two agents sharing one database file. See [CHANGELOG.md](./CHANGELOG.md#040) |
+| Per-agent SQLite entry points (`open_default_for_agent`, `open_with_oracle_for_agent`) | **Breaking change.** File path always derived from `agent_id` — structurally prevents two agents sharing one database file. See [CHANGELOG.md](./CHANGELOG.md) |
 | Configurable PostgreSQL connection pool | `PoolConfig` (`max_size`, `connection_timeout`) via additive `with_pool_config()` constructor; defaults unchanged (20 / 5s) |
 | Ledger-scope correctness fix | Write/audit paths use uncapped, claim-scoped ledger lookup — fixes a silent-wrong-belief risk on agents with >10,000 ledger rows |
 | As-of / bi-temporal correctness benchmark | Reproducible `cargo run --release --example asof_correctness_benchmark -p mempill`; results published on the [documentation site](https://mempill.netlify.app/concepts/benchmark-results/) |
+| Date granularity on `query_history` / `history()` | `HistoryEntry` gains `valid_from_granularity` / `valid_until_granularity`; the Python wheel's `query_history` gains honest-display `valid_from_display` / `valid_until_display`, matching `query_memory` / `query_subject` |
 
 ### 0.5.0 — planned
 

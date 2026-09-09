@@ -34,13 +34,38 @@
 //! upgrading from a pre-0.4.0 shared-file deployment.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use rusqlite::{Connection, Result as SqlResult};
+use rusqlite::{Connection, ErrorCode, Result as SqlResult};
 
 use crate::migrations;
 
+/// Bound on retries for the brand-new-file WAL-initialization race handled by [`open`].
+/// Linear backoff (`5ms * attempt`) totals well under 1s for the full retry budget, which
+/// is generous relative to the sub-millisecond DDL runs this races against.
+const OPEN_MAX_ATTEMPTS: u32 = 10;
+
 /// Open a **file-backed** SQLite connection at `path`, apply mandatory PRAGMAs, then run
 /// any pending migrations.
+///
+/// # Concurrent first-open retry
+/// SQLite's very first conversion of a brand-new file to `journal_mode=WAL` (the `-wal` /
+/// `-shm` sidecar creation) has a documented corner case: a connection reading through a
+/// concurrently-initializing WAL file can get `SQLITE_BUSY` WITHOUT that wait going through
+/// the normal `sqlite3_busy_timeout` retry loop — verified empirically (busy_timeout alone
+/// leaves this failing in well under 1ms, i.e. not retried at all). This is distinct from,
+/// and in addition to, the `BEGIN IMMEDIATE` transaction in `migrations::apply_migrations`,
+/// which correctly serializes the version-check + DDL + version-bump once a connection has
+/// gotten past this initial WAL setup. To make concurrent first opens of a brand-new file
+/// reliable end to end, `open` retries the whole open-and-migrate sequence (fresh
+/// `Connection`, since a `SQLITE_BUSY` mid-sequence can leave the old one transaction-broken)
+/// on `SQLITE_BUSY` specifically, up to [`OPEN_MAX_ATTEMPTS`] times with a short linear
+/// backoff, before propagating the error.
+///
+/// # Worst-case latency
+/// Linear backoff alone totals ~225 ms, but each attempt can additionally block up to the 5 s
+/// `busy_timeout` at `BEGIN IMMEDIATE`; a genuinely contended file may surface `SQLITE_BUSY`
+/// after roughly 45–50 s rather than 5 s.
 ///
 /// # Visibility
 /// This function is intentionally `pub(crate)` (not part of the public API). It accepts
@@ -49,10 +74,41 @@ use crate::migrations;
 /// (see `mempill-sqlite/src/lib.rs`) was introduced to close structurally. It remains
 /// available for internal test use and migration tooling only.
 pub(crate) fn open(path: &str) -> Result<Connection, crate::SqliteStoreError> {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match open_once(path) {
+            Ok(conn) => return Ok(conn),
+            Err(err) if attempt < OPEN_MAX_ATTEMPTS && is_sqlite_busy(&err) => {
+                std::thread::sleep(Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// One attempt at opening + PRAGMA-initializing + migrating `path`. See [`open`] for the
+/// retry wrapper around this.
+fn open_once(path: &str) -> Result<Connection, crate::SqliteStoreError> {
     let conn = Connection::open(path)?;
     apply_pragmas(&conn)?;
     migrations::apply_migrations(&conn)?;
     Ok(conn)
+}
+
+/// True if `err` ultimately wraps a `rusqlite` `SQLITE_BUSY` failure, whether it arrived via
+/// `SqliteStoreError::Sqlite` (raw connection/PRAGMA errors) or
+/// `SqliteStoreError::Migration` (errors from inside `migrations::apply_migrations`).
+fn is_sqlite_busy(err: &crate::SqliteStoreError) -> bool {
+    let inner = match err {
+        crate::SqliteStoreError::Sqlite(e) => Some(e),
+        crate::SqliteStoreError::Migration(migrations::MigrationError::Sqlite(e)) => Some(e),
+        _ => None,
+    };
+    matches!(
+        inner,
+        Some(rusqlite::Error::SqliteFailure(sqlite_err, _)) if sqlite_err.code == ErrorCode::DatabaseBusy
+    )
 }
 
 /// Derive the per-agent database file path as `base_dir/agent_{agent_id}.db`.
@@ -138,6 +194,11 @@ fn apply_pragmas(conn: &Connection) -> SqlResult<()> {
          PRAGMA synchronous  = FULL;\
          PRAGMA foreign_keys = ON;",
     )?;
+    // Explicit 5s busy timeout: rusqlite already sets sqlite3_busy_timeout(db, 5000) by
+    // default on every open, but we pin it here for clarity. The first-open journal_mode=WAL
+    // conversion bypasses SQLite's busy handler entirely (a documented SQLite corner case),
+    // which is why the bounded retry loop in [`open`] wraps this whole operation.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }
 
@@ -442,55 +503,11 @@ mod tests {
         let _ = fs::remove_file(legacy_path.with_extension("db-shm"));
     }
 
-    /// KNOWN DEFECT (found by this QA pass, NOT fixed here — no production-code changes
-    /// permitted for this test module): `open_for_agent` (and the underlying `open` /
-    /// `apply_migrations`) is NOT safe to call concurrently from two threads/processes
-    /// against the SAME brand-new (never-before-migrated) file.
-    ///
-    /// `migrations::apply_migrations` reads `PRAGMA user_version` (TOCTOU check), then
-    /// applies DDL, then writes the new `user_version` AFTER commit (see migrations.rs
-    /// module docs — this ordering is intentional for crash-safety, but is NOT safe
-    /// against a second concurrent connection racing the SAME read-before-write window).
-    /// Two threads opening the SAME fresh file concurrently can both observe
-    /// `user_version=0`, both run `ALTER TABLE ... ADD COLUMN` from `v3_date_granularity`,
-    /// and the second application fails with `"duplicate column name"` — surfaced here as
-    /// an `open_for_agent` error, not a panic/corruption, but it DOES mean a caller that
-    /// races two first-opens of the same never-before-seen agent_id can get a spurious
-    /// error instead of two usable handles.
-    ///
-    /// `#[ignore]`d (not part of the default green run) — this documents/reproduces the
-    /// defect for the maintainers; it is a migration-bootstrap concurrency bug, tracked
-    /// separately from the (passing) steady-state concurrent-open test below.
-    #[test]
-    #[ignore = "KNOWN DEFECT: apply_migrations has a TOCTOU race on user_version when two                 threads race the FIRST open_for_agent of a brand-new per-agent file —                 second connection's DDL can fail with 'duplicate column name'. See doc                 comment. Requires a production-code fix (out of scope for this test-only PR)."]
-    fn open_for_agent_concurrent_first_open_migration_race_is_unsafe() {
-        let dir = tempfile::tempdir().expect("tempdir should create");
-        let dir_path: std::path::PathBuf = dir.path().to_path_buf();
-        let agent_id = "first-open-race-agent";
-
-        let spawn_first_opener = |dir_path: std::path::PathBuf| {
-            std::thread::spawn(move || open_for_agent(&dir_path, agent_id).map(|_conn| ()))
-        };
-        let h1 = spawn_first_opener(dir_path.clone());
-        let h2 = spawn_first_opener(dir_path.clone());
-        let r1 = h1.join().expect("thread 1 must not panic");
-        let r2 = h2.join().expect("thread 2 must not panic");
-
-        // Documents the CURRENT (defective) behavior: at least one side fails. If this
-        // assertion ever fails (i.e. both succeed), the underlying race has been fixed
-        // upstream — remove the #[ignore] and this comment.
-        assert!(
-            r1.is_err() || r2.is_err(),
-            "expected the known migration TOCTOU race to surface as an error on at least              one concurrent first-open; both succeeded — the defect may be fixed, please              remove #[ignore] from this test"
-        );
-
-        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-wal")));
-        let _ = fs::remove_file(dir_path.join(format!("agent_{agent_id}.db-shm")));
-    }
-
     /// (a) Concurrent `open_for_agent` calls for the SAME `agent_id` from two OS threads,
     /// against an ALREADY-migrated per-agent file (the realistic steady-state scenario —
-    /// see the `#[ignore]`d test above for the separate first-open migration-race defect).
+    /// the separate first-open migration-race is covered, with a stronger multi-thread /
+    /// multi-iteration harness plus post-migration schema verification, by
+    /// `mempill-sqlite/tests/migration_race.rs`).
     /// Each thread opens an independent `Connection` to the SAME on-disk file; both
     /// handles must remain usable; concurrent writes must serialize correctly (SQLite
     /// file-level locking under WAL) with no corruption — final row count must equal the
@@ -513,9 +530,9 @@ mod tests {
         let agent_id = "concurrent-shared-agent";
         const WRITES_PER_THREAD: usize = 15;
 
-        // Pre-warm: run the one-time migration bootstrap SINGLE-THREADED first (avoids
-        // the separate, known migration-bootstrap race documented in the #[ignore]d test
-        // above — this test targets the realistic STEADY-STATE concurrent-open scenario).
+        // Pre-warm: run the one-time migration bootstrap SINGLE-THREADED first — this test
+        // targets the realistic STEADY-STATE concurrent-open scenario; the first-open
+        // migration race itself is covered by `tests/migration_race.rs`.
         drop(open_for_agent(&dir_path, agent_id).expect("pre-warm open_for_agent must succeed"));
 
         let make_claim = |i: usize, thread_tag: &str| {
