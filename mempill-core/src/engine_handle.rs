@@ -23,9 +23,11 @@ use tokio::task;
 
 use crate::{
     application::{
+        assert_validity::{self, AssertValidityUseCase},
         audit::AuditUseCase,
         dto::{
-            AuditQueryRequest, AuditQueryResponse, IngestClaimRequest, IngestClaimResponse,
+            AssertValidityRequest, AssertValidityResponse, AuditQueryRequest, AuditQueryResponse,
+            IngestClaimRequest, IngestClaimResponse, LiveClaimResolution,
             QueryHistoryRequest, QueryHistoryResponse, QueryMemoryRequest, QueryMemoryResponse,
             QuerySubjectRequest, QuerySubjectResponse,
             ReconcileRequest, ReconcileResponse,
@@ -266,6 +268,57 @@ where
         task::spawn_blocking(move || uc.execute_with_time(req, now))
             .await
             .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
+    }
+
+    /// Write path: bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1
+    /// `assert_validity`, TASK-33 E2). The host-facing, oracle-free path to
+    /// `Superseded`/`Invalidated`/`Reinstated` (I11).
+    ///
+    /// Locking order matches `ingest_claim`: `store_write_lock` first (conditional), then
+    /// the per-agent lock. Clock read ONCE here (DETERMINISM).
+    pub async fn assert_validity(
+        &self,
+        req: AssertValidityRequest,
+    ) -> Result<AssertValidityResponse, MemError> {
+        let now = Utc::now(); // clock read ONCE at the async boundary
+        let _store_lock = if self.persistence.requires_global_write_serialization() {
+            Some(self.store_write_lock.lock().await)
+        } else {
+            None
+        };
+        let _guard = self.write_locks.acquire(&req.agent_id).await;
+        let uc = AssertValidityUseCase::new(Arc::clone(&self.persistence));
+        task::spawn_blocking(move || uc.execute(req, now))
+            .await
+            .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
+    }
+
+    /// Read path: resolve a (subject, predicate) subject-line to the single live claim
+    /// that `end_fact` should bound (0/1/>1 live — never a guess). Used by the ergonomic
+    /// `end_fact` sugar; exposed here so bindings that skip the facade can call it directly.
+    ///
+    /// No write lock — read-only. Clock read ONCE here (DETERMINISM).
+    pub async fn resolve_live_claim_for_line(
+        &self,
+        agent_id: mempill_types::AgentId,
+        subject: String,
+        predicate: String,
+    ) -> Result<LiveClaimResolution, MemError> {
+        let now = Utc::now();
+        let persistence = Arc::clone(&self.persistence);
+        let config = self.config.clone();
+        task::spawn_blocking(move || {
+            assert_validity::resolve_live_claim_for_line(
+                &persistence,
+                &config,
+                &agent_id,
+                &subject,
+                &predicate,
+                now,
+            )
+        })
+        .await
+        .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
     }
 
     /// Read path: no write lock needed. Delegates to QueryMemoryUseCase.

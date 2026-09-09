@@ -187,17 +187,31 @@ class PyEngine:
         Returns:
             dict with:
                 - entries (list[dict]): all claims ordered oldest -> newest, each tagged
-                  with status ("Current" or "Superseded"), value, valid_from, valid_until,
-                  provenance, value_confidence, and claim_ref. Each entry also includes:
+                  with status ("Current" | "Superseded" | "Contested" | "Ended" — see
+                  below), value, valid_from, valid_until, provenance, value_confidence,
+                  and claim_ref. Each entry also includes:
                     - valid_from_display / valid_until_display (str | None): pre-rendered
                       display strings at the recorded precision, identical rendering to
                       query_memory (e.g. "2020-03" for Month, "2020" for Year). Absent
                       when the corresponding endpoint is unknown/open.
                     - valid_from_granularity / valid_until_granularity (str | None): raw
                       granularity ("year" | "month" | "day" | "instant"), otherwise
-                      absent. valid_until_granularity is a DERIVED value: it reflects
-                      the SUCCESSOR claim's start_granularity (the honest source of the
-                      bounding instant), not this entry's own end_granularity.
+                      absent. valid_until_granularity reflects whichever timestamp
+                      actually bounded the window: this entry's own end_granularity
+                      when its own end was used (the common case), the SUCCESSOR
+                      claim's start_granularity only when the successor's ordering key
+                      was used and itself came from valid_time.start, or absent when
+                      the winning value came from a transaction-time fallback.
+
+            Status values:
+                - "Current": live, unconflicted, and in effect at the query instant.
+                - "Superseded": not live — explicitly bounded/superseded by the ledger.
+                - "Contested": live and part of an unresolved conflict (structural or a
+                  pairwise valid-time overlap against the adjacent entry) — never
+                  silently narrowed or picked (I7).
+                - "Ended": still live per the ledger (never explicitly bounded), but its
+                  own valid-time window has expired with no live successor covering the
+                  query instant.
 
         Raises:
             ValidationError: bad request
@@ -223,6 +237,60 @@ class PyEngine:
 
         Raises:
             ValidationError: bad request
+            StorageError: persistence layer failure
+        """
+        ...
+
+    def assert_validity(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1, TASK-33 E2).
+
+        The host-facing, oracle-free path to Superseded/Reinstated. Prefer
+        ``mempill.ergonomic.end_fact()`` unless you already hold the target claim_ref.
+
+        Args:
+            request: dict with:
+                - agent_id (str)
+                - target (str): claim_ref UUID
+                - assertion: {"type": "Bound", "value": {"at": "<RFC3339>"}}
+                  or {"type": "Reopen"}
+                - provenance (dict): must be External(*) — any other channel raises
+                  ValidationError (only first-hand external evidence may bound/reopen)
+                - confidence: {"value_confidence": float, "valid_time_confidence": float}
+
+        Returns:
+            dict with claim_ref, assertion_ref (str | None), kind, effective_at
+            (str | None, RFC3339), disposition ("Superseded" | "Reinstated"), no_op (bool).
+            no_op is True when no new write was made: an idempotent repeat of an
+            identical Bound, a Reopen with no active Bound to reverse, or a Bound whose
+            `at` is at/after the claim's own valid_time.end (has zero effect on the
+            derived window — effective_at then honestly reports min(at, own_end),
+            i.e. own_end, not the raw requested `at`).
+
+        Raises:
+            ValidationError: provenance not External(*), or `at` precedes the claim's
+                own valid_time.start (IncoherentTemporalWindow)
+            NotFoundError: target does not exist or belongs to another agent
+            ConflictError: a different bound is already active (never "later wins")
+            StorageError: persistence layer failure
+        """
+        ...
+
+    def resolve_live_claim_for_line(
+        self, agent_id: str, subject: str, predicate: str
+    ) -> dict[str, Any]:
+        """Resolve a (subject, predicate) line to the single live claim, if any.
+
+        Uses the SAME canonical fold query_memory()/query_history() use (I8 single
+        source of truth) — never a heuristic re-derivation. Backs
+        ``mempill.ergonomic.end_fact()``.
+
+        Returns:
+            dict: {"status": "empty" | "single" | "ambiguous",
+                   "claim_ref": str | None,
+                   "live_count": int | None}
+            live_count is populated only when status == "ambiguous".
+
+        Raises:
             StorageError: persistence layer failure
         """
         ...
@@ -275,11 +343,11 @@ class PyOracleEngine:
 
         Returns:
             dict with ``entries`` — all claims ordered oldest -> newest, each tagged
-            with status ("Current" or "Superseded"), value, valid_from, valid_until,
-            provenance, value_confidence, and claim_ref. Each entry also includes
-            ``valid_from_display`` / ``valid_until_display`` and
-            ``valid_from_granularity`` / ``valid_until_granularity``
-            (see ``PyEngine.query_history`` for details).
+            with status ("Current" | "Superseded" | "Contested" | "Ended"), value,
+            valid_from, valid_until, provenance, value_confidence, and claim_ref.
+            Each entry also includes ``valid_from_display`` / ``valid_until_display``
+            and ``valid_from_granularity`` / ``valid_until_granularity``
+            (see ``PyEngine.query_history`` for the full status/granularity contract).
         """
         ...
 
@@ -346,6 +414,20 @@ class PyOracleEngine:
 
         Raises:
             StorageError: if a persistence error occurs.
+        """
+        ...
+
+    def assert_validity(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Bound or reopen a claim's valid-time window. Identical contract to
+        ``PyEngine.assert_validity``.
+        """
+        ...
+
+    def resolve_live_claim_for_line(
+        self, agent_id: str, subject: str, predicate: str
+    ) -> dict[str, Any]:
+        """Resolve a (subject, predicate) line to the single live claim, if any.
+        Identical contract to ``PyEngine.resolve_live_claim_for_line``.
         """
         ...
 

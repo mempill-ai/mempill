@@ -4,8 +4,8 @@
 //! never cross this boundary; callers only see these structs.
 
 use mempill_types::{
-    AgentId, BeliefProjection, Cardinality, ClaimRef, Confidence, Criticality, DateGranularity,
-    Disposition, HistoryEntryStatus, LedgerEntry, ProvenanceLabel, ValidTime,
+    AgentId, AssertionKind, BeliefProjection, Cardinality, ClaimRef, Confidence, Criticality,
+    DateGranularity, Disposition, HistoryEntryStatus, LedgerEntry, ProvenanceLabel, ValidTime,
 };
 
 // ── INGEST CLAIM ──────────────────────────────────────────────────────────────
@@ -104,13 +104,103 @@ pub struct ReconcileResponse {
     pub oracle_escalations: u32,
 }
 
+// ── ASSERT VALIDITY (SDK_CONTRACT.md §3.1) ──────────────────────────────────
+
+/// The validity assertion the host wants to apply to `target` — bound (close) or reopen.
+///
+/// Deliberately distinct from `mempill_types::AssertionKind`: this is the *request* shape
+/// (the host supplies `at`; `Reopen` carries no timestamp — the engine stamps `now`),
+/// while `AssertionKind` is the persisted, engine-stamped record.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum ValidityAssertionInput {
+    /// Close `target`'s valid-time window as of `at`. Rejected if `at` precedes the
+    /// claim's own `valid_time.start` (`IncoherentTemporalWindow`).
+    ///
+    /// Adjacently-tagged JSON shape (Python-friendly, mirrors `ProvenanceLabel`):
+    /// `{"type": "Bound", "value": {"at": "2026-01-01T00:00:00Z"}}`.
+    Bound {
+        /// The UTC instant at which `target` stops being valid.
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    /// Reverse the most recent active Bound on `target`, reopening its valid-time window.
+    ///
+    /// JSON shape: `{"type": "Reopen"}` (unit variant — no `"value"` key).
+    Reopen,
+}
+
+/// Request for `assert_validity` — the host-facing, oracle-free path to
+/// `Superseded`/`Invalidated`/`Reinstated` (SDK_CONTRACT.md §3.1, I11).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssertValidityRequest {
+    /// The agent that owns `target` and is submitting this assertion.
+    pub agent_id: AgentId,
+    /// The claim whose valid-time window is bounded or reopened. Must exist and belong
+    /// to `agent_id` — cross-agent targets are rejected as `ClaimNotFound` (I1 scoped lookup).
+    pub target: ClaimRef,
+    /// Bound or reopen.
+    pub assertion: ValidityAssertionInput,
+    /// Required. Only `External(*)` (first-hand) is eligible — mirrors the rule that only
+    /// first-hand external evidence may overturn a belief. Any other channel is rejected
+    /// with `InsufficientProvenanceForOverturn`.
+    pub provenance: ProvenanceLabel,
+    /// Confidence in this validity assertion.
+    pub confidence: Confidence,
+}
+
+/// Response from `assert_validity`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssertValidityResponse {
+    /// Echo of `target` — the claim this assertion was applied to.
+    pub claim_ref: ClaimRef,
+    /// Stable UUID of the appended (or, for a no-op, the pre-existing) validity assertion.
+    /// `None` only for a Reopen no-op where no active Bound existed to reverse.
+    pub assertion_ref: Option<uuid::Uuid>,
+    /// The engine-stamped assertion actually in effect after this call (echoes the
+    /// existing Bound on a same-instant no-op, rather than a synthetic re-derivation).
+    pub kind: AssertionKind,
+    /// The UTC instant the assertion takes effect (`bound_at` for Bound, the reopen
+    /// instant for Reopen). `None` for a Reopen no-op (nothing was reopened).
+    pub effective_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// `Superseded` for Bound, `Reinstated` for Reopen.
+    pub disposition: Disposition,
+    /// `true` when no new write was made: an idempotent repeat of an identical Bound, a
+    /// Reopen with no active Bound to reverse, or a Bound whose `at` is at/after the
+    /// claim's own `valid_time.end` (has zero effect on the derived window — see
+    /// `assert_validity.rs` gate 5). In the last case `effective_at` honestly reports
+    /// `min(at, own_end)` (always `own_end`), not the raw requested `at`.
+    pub no_op: bool,
+}
+
+/// Outcome of resolving a (subject, predicate) subject-line to the single claim `end_fact`
+/// should bound. Computed by the SAME canonical fold `recall`/`query_memory` use — never a
+/// heuristic re-derivation (I8 single source of truth).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveClaimResolution {
+    /// No live claim on the line.
+    Empty,
+    /// Exactly one live claim — safe to bound unambiguously.
+    Single(ClaimRef),
+    /// More than one live claim (Contested, or co-existing SetValued members). `end_fact`
+    /// refuses to guess; the count is surfaced in `AmbiguousLineForClose`.
+    Ambiguous(usize),
+}
+
 // ── QUERY HISTORY ────────────────────────────────────────────────────────────
 
 /// Request to retrieve the full history timeline for a (subject, predicate) subject-line.
 ///
 /// Returns all claims ever written to the line, ordered by the canonical ordering key
 /// (valid_time_start when confidence ≥ threshold, else tx_time). Each entry is tagged
-/// `Current` or `Superseded` based on the same canonical fold that powers `query_memory`.
+/// `Current`, `Superseded`, `Contested`, or `Ended` based on the same canonical fold that
+/// powers `query_memory` — see `mempill_types::HistoryEntryStatus` for the full contract, and
+/// `query_history.rs` module docs for the single-source-of-truth design (I8).
+///
+/// AUDIT VIEW — DESIGN DECISION: `query_history` always loads with `as_of_tx_time = None`
+/// (every claim ever ingested, regardless of transaction time) and has no `valid_at`
+/// parameter. `query_memory`'s bi-temporal `as_of_tx_time`/`valid_at` narrowing is
+/// intentionally out of scope for this audit timeline — it exists to show the full claim
+/// history, not a point-in-time snapshot.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueryHistoryRequest {
     /// The agent whose history is queried.
@@ -123,8 +213,8 @@ pub struct QueryHistoryRequest {
 
 /// One slot in the history timeline for a subject-line.
 ///
-/// `status` is derived from `is_live` in the canonical fold — the `Current` entry is
-/// exactly the claim that `recall` / `query_memory` would return as primary.
+/// `status` is derived from the same canonical fold `query_memory` uses (`is_live`,
+/// `has_conflict`, and the narrowed live-selection) — see `mempill_types::HistoryEntryStatus`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HistoryEntry {
     /// Stable reference to the underlying claim (UUID).
@@ -133,8 +223,21 @@ pub struct HistoryEntry {
     pub value: serde_json::Value,
     /// Start of the valid-time window, or `None` if unknown.
     pub valid_from: Option<chrono::DateTime<chrono::Utc>>,
-    /// Effective end of the slot: equals the successor's canonical ordering key,
-    /// or `None` for the open-ended current slot.
+    /// Effective end of this entry's valid-time window.
+    ///
+    /// Derivation rule (see `truth_engine::compute_history_windows`, the single engine-layer
+    /// source of truth shared with `query_memory`'s succession selection):
+    ///   - This claim's OWN `valid_time.end` is honoured whenever present — it is narrowed
+    ///     towards an earlier successor ordering key via `min()`, but NEVER discarded outright
+    ///     in favor of a LATER successor key (the historical bug this design fixes).
+    ///   - When this claim and its (skip-duplicate) successor are both trusted and their
+    ///     windows genuinely OVERLAP, `valid_until` is this claim's own end (not narrowed by
+    ///     the overlapping successor) and the entry is flagged `Contested` — never a silent
+    ///     fabricated narrowing.
+    ///   - When this claim's own end is unknown (`None`) and overlap cannot be determined
+    ///     (confidence/start missing on either side), the legacy fallback applies: the
+    ///     successor's canonical ordering key closes the window.
+    ///   - The last entry (no strictly-later successor) uses its own end, `None` if open-ended.
     pub valid_until: Option<chrono::DateTime<chrono::Utc>>,
     /// Precision of the `valid_from` date, taken verbatim from this claim's own
     /// `ValidTime::start_granularity`. `None` when the start is absent or predates
@@ -145,21 +248,19 @@ pub struct HistoryEntry {
     pub valid_from_granularity: Option<DateGranularity>,
     /// Precision of the `valid_until` date.
     ///
-    /// `valid_until` is a DERIVED endpoint (see `query_history.rs` module docs): it is
-    /// either the successor claim's canonical ordering-key granularity, or `None` for
-    /// the open-ended current slot. The rule this crate honours: **the granularity of
-    /// whichever timestamp produced the bound** —
-    ///   - when the successor's ordering key is its `valid_time.start`, this field is the
-    ///     successor's `start_granularity`;
-    ///   - when the successor's ordering key falls back to its `transaction_time` (low
-    ///     valid-time confidence), this field is `None` — a transaction-time stamp has no
-    ///     date-granularity concept, so fabricating a value here would misrepresent it as
-    ///     a user-supplied partial date.
+    /// The granularity of whichever timestamp actually produced `valid_until` (see that
+    /// field's docs for the full derivation rule):
+    ///   - this claim's own `end_granularity`, when its own end was used (the common case now
+    ///     that own-end is honoured whenever present);
+    ///   - the successor's `start_granularity`, only when the successor's ordering key was
+    ///     used AND was itself sourced from `valid_time.start` (not a transaction-time fallback);
+    ///   - `None` when the winning value came from a transaction-time fallback (a machine
+    ///     timestamp has no user-supplied date precision) or is absent (open-ended / overlap).
     ///
     /// DISPLAY-ONLY — never used for ordering, matching, or fold selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_until_granularity: Option<DateGranularity>,
-    /// Whether this claim is the live belief or has been superseded.
+    /// Current / Superseded / Contested / Ended — see `mempill_types::HistoryEntryStatus`.
     pub status: HistoryEntryStatus,
     /// Human-readable provenance label (e.g. `"External/UserAsserted"`).
     pub provenance: String,

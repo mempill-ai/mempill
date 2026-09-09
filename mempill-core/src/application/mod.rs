@@ -3,6 +3,7 @@
 //! All items here are `pub` — this is the stable public API surface consumed by bindings.
 //! Engine internals in `engine/` remain `pub(crate)`.
 
+pub mod assert_validity;
 pub mod audit;
 pub mod dto;
 pub mod ingest_claim;
@@ -13,12 +14,14 @@ pub mod reconcile;
 pub mod submit_adjudication;
 pub mod sweep_adjudications;
 
+pub use assert_validity::AssertValidityUseCase;
 pub use audit::AuditUseCase;
 pub use dto::{
-    AuditQueryRequest, AuditQueryResponse, HistoryEntry, IngestClaimRequest, IngestClaimResponse,
+    AssertValidityRequest, AssertValidityResponse, AuditQueryRequest, AuditQueryResponse,
+    HistoryEntry, IngestClaimRequest, IngestClaimResponse, LiveClaimResolution,
     QueryHistoryRequest, QueryHistoryResponse, QueryMemoryRequest, QueryMemoryResponse,
     QuerySubjectRequest, QuerySubjectResponse, SubjectFactEntry,
-    ReconcileRequest, ReconcileResponse,
+    ReconcileRequest, ReconcileResponse, ValidityAssertionInput,
 };
 pub use ingest_claim::IngestClaimUseCase;
 pub use query_history::QueryHistoryUseCase;

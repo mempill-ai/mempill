@@ -55,6 +55,19 @@ pub enum MempillDxError {
     /// Engine-level error (pass-through with original message).
     #[error("Engine error: {0}")]
     Engine(#[from] MemError),
+
+    /// `end_fact` found zero live claims on the (subject, predicate) line — nothing to close.
+    ///
+    /// Not a `MemError::ClaimNotFound` (that variant requires a real `ClaimRef`, and there
+    /// is none here — the line simply has no live claim). Reused across the ergonomic tier
+    /// wherever a subject/predicate line resolves to "nothing to bound".
+    #[error("No live claim found for (subject={subject:?}, predicate={predicate:?}) — nothing to end_fact")]
+    NoLiveClaimForClose {
+        /// The subject of the empty subject-line.
+        subject: String,
+        /// The predicate of the empty subject-line.
+        predicate: String,
+    },
 }
 
 // ── Facade traits (object-safe thin seam over EngineHandle) ──────────────────
@@ -143,6 +156,52 @@ where
     }
 }
 
+/// Object-safe async seam for `assert_validity` + live-claim-line resolution. Implemented
+/// for `EngineHandle<P,O,V>` via blanket impl.
+///
+/// Not intended for direct use — call [`assert_validity`] or [`end_fact`] instead.
+/// You may implement this for mock engines in tests.
+#[async_trait::async_trait]
+pub trait CanAssertValidity: Send + Sync {
+    /// Submit an `assert_validity` (bound/reopen) request to the engine.
+    async fn assert_validity_ergo(
+        &self,
+        req: mempill_core::AssertValidityRequest,
+    ) -> Result<mempill_core::AssertValidityResponse, MemError>;
+
+    /// Resolve a (subject, predicate) subject-line to the single live claim, if any.
+    async fn resolve_live_claim_for_line_ergo(
+        &self,
+        agent_id: AgentId,
+        subject: String,
+        predicate: String,
+    ) -> Result<mempill_core::LiveClaimResolution, MemError>;
+}
+
+#[async_trait::async_trait]
+impl<P, O, V> CanAssertValidity for mempill_core::EngineHandle<P, O, V>
+where
+    P: mempill_core::PersistencePort + Send + Sync + 'static,
+    O: mempill_core::OraclePort + Send + Sync + 'static,
+    V: mempill_core::VectorPort + Send + Sync + 'static,
+{
+    async fn assert_validity_ergo(
+        &self,
+        req: mempill_core::AssertValidityRequest,
+    ) -> Result<mempill_core::AssertValidityResponse, MemError> {
+        self.assert_validity(req).await
+    }
+
+    async fn resolve_live_claim_for_line_ergo(
+        &self,
+        agent_id: AgentId,
+        subject: String,
+        predicate: String,
+    ) -> Result<mempill_core::LiveClaimResolution, MemError> {
+        self.resolve_live_claim_for_line(agent_id, subject, predicate).await
+    }
+}
+
 // ── History return type ───────────────────────────────────────────────────────
 
 /// Re-export core's `HistoryEntry` so callers only need `use mempill::HistoryEntry`.
@@ -156,6 +215,11 @@ pub use mempill_types::HistoryEntryStatus;
 /// Returned by [`history`]. Entries are ordered oldest-first by the canonical ordering
 /// key (valid_time_start when confidence ≥ threshold, else tx_time), exactly matching
 /// the sort order of `recall` / `query_memory`.
+///
+/// Each entry's `status` is one of [`HistoryEntryStatus::Current`],
+/// [`HistoryEntryStatus::Superseded`], [`HistoryEntryStatus::Contested`], or
+/// [`HistoryEntryStatus::Ended`] — all derived from the SAME canonical fold that powers
+/// `recall`, so `history().current()` and `recall().primary` always agree.
 ///
 /// # Example
 ///
@@ -188,7 +252,10 @@ impl History {
     /// Returns the single `Current` entry, if any.
     ///
     /// The current entry is exactly the claim that [`recall`] would return as primary.
-    /// Returns `None` when the subject-line is empty or all claims have been superseded.
+    /// Returns `None` when the subject-line is empty, all claims have been superseded, the
+    /// line is contested (see [`HistoryEntryStatus::Contested`] — never a silent pick, I7),
+    /// or the only live claim's own window has closed without a live successor
+    /// (see [`HistoryEntryStatus::Ended`]).
     pub fn current(&self) -> Option<&HistoryEntry> {
         self.entries.iter().find(|e| e.status == HistoryEntryStatus::Current)
     }
@@ -713,18 +780,23 @@ pub async fn recall(
 /// Retrieve the full ordered history timeline for a subject+predicate.
 ///
 /// Returns a [`History`] containing all claims ever written to the (subject, predicate)
-/// subject-line, ordered oldest-first. Each entry is tagged [`HistoryEntryStatus::Current`]
-/// or [`HistoryEntryStatus::Superseded`] using the same canonical fold as [`recall`], so
-/// `history().current()` is guaranteed to agree with `recall().primary`.
+/// subject-line, ordered oldest-first. Each entry is tagged [`HistoryEntryStatus::Current`],
+/// [`HistoryEntryStatus::Superseded`], [`HistoryEntryStatus::Contested`], or
+/// [`HistoryEntryStatus::Ended`] using the SAME canonical fold as [`recall`] — window
+/// computation, succession-vs-overlap classification, and the conflict signal are computed
+/// once in the engine layer and shared by both, so `history().current()` is guaranteed to
+/// agree with `recall().primary`, and a genuinely conflicted line is never silently narrowed
+/// to a fabricated `Current` entry (I7).
 ///
 /// Each [`HistoryEntry`] also carries `valid_from_granularity` / `valid_until_granularity`
 /// (`Option<DateGranularity>`), display-only precision hints for the entry's `valid_from` /
 /// `valid_until` timestamps. `valid_from_granularity` is this claim's own stored
-/// `start_granularity`. `valid_until_granularity` is **derived**: it is the successor
-/// claim's `start_granularity` (since `valid_until` is itself derived from the successor's
-/// canonical ordering key), or `None` when the successor's ordering key fell back to
-/// transaction time (low valid-time confidence) — a transaction-time stamp has no
-/// date-granularity concept. See [`HistoryEntry`] for the full field-by-field contract.
+/// `start_granularity`. `valid_until_granularity` reports the granularity of whichever
+/// timestamp actually bounded the window: this claim's own `end_granularity` when its own
+/// end was used (the common case — an entry's own end is never discarded), the successor's
+/// `start_granularity` only when the successor's ordering key was used and itself came from
+/// `valid_time.start`, or `None` when the winning value came from a transaction-time fallback
+/// or is absent. See [`HistoryEntry`] for the full field-by-field contract.
 ///
 /// # Errors
 /// - `MempillDxError::Engine(_)` — persistence failure
@@ -743,6 +815,165 @@ pub async fn history(
     let resp = engine.query_history_ergo(req).await?;
 
     Ok(History { entries: resp.entries })
+}
+
+// ── assert_validity / end_fact (SDK_CONTRACT.md §3.1, TASK-33 E2) ──────────────
+
+/// Options for [`end_fact`]. Defaults mirror [`RememberOptions`]'s host-assertion defaults.
+#[derive(Debug, Clone, Default)]
+pub struct EndFactOptions {
+    /// Provenance for the closing assertion. Default: `External(UserAsserted)`.
+    /// Must be `External(*)` — any other channel is rejected with
+    /// `MemError::InsufficientProvenanceForOverturn` (only first-hand external evidence,
+    /// the host acting as its own oracle, may close or reopen a fact).
+    pub provenance: Option<ProvenanceLabel>,
+    /// Confidence in this validity assertion (0.0–1.0). Default: `1.0`.
+    pub confidence: Option<f32>,
+}
+
+impl EndFactOptions {
+    /// Create an `EndFactOptions` with all defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the provenance label. Must be `External(*)`.
+    pub fn provenance(mut self, p: ProvenanceLabel) -> Self {
+        self.provenance = Some(p);
+        self
+    }
+
+    /// Set the confidence in this validity assertion (0.0–1.0). Default: `1.0`.
+    pub fn confidence(mut self, c: f32) -> Self {
+        self.confidence = Some(c);
+        self
+    }
+}
+
+/// Receipt returned by [`end_fact`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct EndFactReceipt {
+    /// The claim that was bounded.
+    pub claim_ref: ClaimRef,
+    /// `Superseded` on a normal bound; unchanged on a no-op repeat.
+    pub disposition: Disposition,
+    /// The UTC instant the closed fact's window now ends at.
+    pub effective_at: DateTime<Utc>,
+    /// `true` when this call repeated an identical bound already in effect (I6 idempotent) —
+    /// no new write was made.
+    pub no_op: bool,
+}
+
+/// Typed passthrough to the engine's `assert_validity` op (SDK_CONTRACT.md §3.1) — bound or
+/// reopen a claim's valid-time window by its `ClaimRef`.
+///
+/// Most callers should prefer [`end_fact`], which resolves `(subject, predicate)` to a
+/// `ClaimRef` automatically and never guesses when the line is ambiguous. Call this
+/// directly only when you already hold the target `ClaimRef` (e.g. from a
+/// [`RememberReceipt`] or a [`history`] entry) or need `Reopen`.
+///
+/// # Errors
+/// - `MempillDxError::Engine(MemError::InsufficientProvenanceForOverturn)` — provenance not `External(*)`
+/// - `MempillDxError::Engine(MemError::ClaimNotFound)` — target does not exist / belongs to another agent
+/// - `MempillDxError::Engine(MemError::IncoherentTemporalWindow)` — `at` precedes the claim's own valid-time start
+/// - `MempillDxError::Engine(MemError::AlreadyBound)` — a different bound is already active (never "later wins")
+pub async fn assert_validity(
+    engine: &impl CanAssertValidity,
+    req: mempill_core::AssertValidityRequest,
+) -> Result<mempill_core::AssertValidityResponse, MempillDxError> {
+    Ok(engine.assert_validity_ergo(req).await?)
+}
+
+/// End an open-ended fact: bound the incumbent claim on `(subject, predicate)` at `at`.
+///
+/// This is the corrected succession idiom — bound the incumbent's own claim in place
+/// (I1: the row itself is never touched, only a validity assertion is appended), rather
+/// than writing a duplicate "closed copy" claim. A later non-overlapping claim on the same
+/// line then folds to a clean succession (`CommittedCheap`) with no oracle involved.
+///
+/// Resolution never guesses which claim to close — it uses the SAME canonical fold
+/// `recall`/`history` use to count live claims on the line (I8 single source of truth):
+///
+/// | Live claims on the line | Outcome |
+/// |---|---|
+/// | 0 | `MempillDxError::NoLiveClaimForClose` |
+/// | 1 | bound at `at`; returns [`EndFactReceipt`] |
+/// | >1 (Contested, or co-existing SetValued members) | `MempillDxError::Engine(MemError::AmbiguousLineForClose)` |
+///
+/// Because resolution runs against the LIVE set (same as `recall`), once the sole claim
+/// on a line is bounded it is no longer live — a *repeated* `end_fact` call on a now-fully-
+/// closed line correctly returns `NoLiveClaimForClose`, not a no-op. True idempotent
+/// re-bind (I6, `EndFactReceipt::no_op == true`) is a property of [`assert_validity`]
+/// called directly with the already-known target `ClaimRef` — call it again with the
+/// SAME `at` (a no-op, I6) or a DIFFERENT `at` (rejected with `MemError::AlreadyBound`;
+/// `reopen` first if the boundary needs to move).
+///
+/// `forget_since` in prose/docs refers to this same operation (documentation alias, not a
+/// separate op).
+///
+/// # Errors
+/// - `MempillDxError::UnparsableDate` — if `at` is malformed
+/// - `MempillDxError::NoLiveClaimForClose` — zero live claims on the line (including a
+///   repeat call on an already-fully-closed line — the bounded claim is no longer live)
+/// - `MempillDxError::Engine(MemError::AmbiguousLineForClose)` — more than one live claim
+/// - `MempillDxError::Engine(MemError::InsufficientProvenanceForOverturn)` — provenance not `External(*)`
+///
+/// `MemError::AlreadyBound` is NOT reachable through `end_fact` — resolution only ever
+/// targets a currently-live claim, and a claim with an active bound is by definition not
+/// live. It is only reachable via [`assert_validity`] called directly with an
+/// already-known target `ClaimRef`.
+pub async fn end_fact(
+    engine: &impl CanAssertValidity,
+    agent_id: impl Into<String>,
+    subject: impl Into<String>,
+    predicate: impl Into<String>,
+    at: impl Into<String>,
+    opts: EndFactOptions,
+) -> Result<EndFactReceipt, MempillDxError> {
+    let agent_id = AgentId(agent_id.into());
+    let subject = subject.into();
+    let predicate = predicate.into();
+
+    let at_dt = crate::date::parse_lenient_date(&at.into())?;
+
+    let resolution = engine
+        .resolve_live_claim_for_line_ergo(agent_id.clone(), subject.clone(), predicate.clone())
+        .await?;
+
+    let target = match resolution {
+        mempill_core::LiveClaimResolution::Empty => {
+            return Err(MempillDxError::NoLiveClaimForClose { subject, predicate });
+        }
+        mempill_core::LiveClaimResolution::Single(claim_ref) => claim_ref,
+        mempill_core::LiveClaimResolution::Ambiguous(live_count) => {
+            return Err(MempillDxError::Engine(MemError::AmbiguousLineForClose {
+                subject,
+                predicate,
+                live_count,
+            }));
+        }
+    };
+
+    let value_confidence = opts.confidence.unwrap_or(1.0);
+    let req = mempill_core::AssertValidityRequest {
+        agent_id,
+        target,
+        assertion: mempill_core::ValidityAssertionInput::Bound { at: at_dt },
+        provenance: opts
+            .provenance
+            .unwrap_or(ProvenanceLabel::External(ExternalKind::UserAsserted)),
+        confidence: Confidence { value_confidence, valid_time_confidence: value_confidence },
+    };
+
+    let resp = engine.assert_validity_ergo(req).await?;
+
+    Ok(EndFactReceipt {
+        claim_ref: resp.claim_ref,
+        disposition: resp.disposition,
+        effective_at: resp.effective_at.unwrap_or(at_dt),
+        no_op: resp.no_op,
+    })
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -1213,11 +1444,16 @@ mod tests {
             "Munich must be second (newer)"
         );
 
-        // Status correctness
+        // Status correctness. Berlin's own explicit end (2025-01-01) closes its window via a
+        // genuine trusted valid-time succession — but Berlin is never explicitly Bound (only
+        // HeavyPath / oracle-affirmed supersession writes a Bound assertion; a clean succession
+        // routes CheapPath and never supersedes). Berlin therefore stays raw-live: its correct
+        // status is `Ended` (window closed, no conflict, not the narrowed-current selection),
+        // NOT `Superseded` (which means "explicitly bounded/disposed") — this is bug C's fix.
         assert_eq!(
             h.entries[0].status,
-            mempill_types::HistoryEntryStatus::Superseded,
-            "Berlin must be Superseded"
+            mempill_types::HistoryEntryStatus::Ended,
+            "Berlin's own window has closed via succession but it was never explicitly Bound → Ended, not Superseded"
         );
         assert_eq!(
             h.entries[1].status,
@@ -1281,23 +1517,27 @@ mod tests {
         );
     }
 
-    /// Supersession: the predecessor's `valid_until_granularity` must equal the
-    /// SUCCESSOR's `valid_from_granularity` (Year), not the predecessor's own
-    /// end_granularity (which is never set here — proving no fabrication either way).
+    /// A genuine trusted, non-overlapping succession (own explicit end, at Day precision):
+    /// the predecessor's `valid_until_granularity` must be its OWN `end_granularity` (Day),
+    /// never the successor's `start_granularity` (Year) — own end always wins over a later
+    /// successor's key (bug A fix). Two mutually-TRUSTED claims with the predecessor open-ended
+    /// (no own end) would instead be a genuine valid-time overlap (Contested, no narrowing) —
+    /// this scenario is only reachable end-to-end once the predecessor has an explicit end,
+    /// which is why it now differs from the pre-fix test's premise.
     #[cfg(feature = "sqlite")]
     #[tokio::test]
-    async fn history_entry_valid_until_granularity_uses_successor_start_granularity() {
+    async fn history_entry_valid_until_granularity_uses_own_end_granularity_when_set() {
         use mempill_types::time::DateGranularity;
         let engine = crate::open_default_in_memory().unwrap();
 
-        // Predecessor: Day-precision start, high confidence, open end.
+        // Predecessor: Day-precision start AND end, high confidence — genuine succession.
         remember(
             &engine,
             "agent",
             "corp",
             "ceo",
             "Alice",
-            RememberOptions::new().valid_from("2019-06-15").confidence(0.9),
+            RememberOptions::new().valid_from("2019-06-15").valid_until("2020-01-01").confidence(0.9),
         )
         .await
         .unwrap();
@@ -1321,9 +1561,9 @@ mod tests {
 
         assert_eq!(
             h.entries[0].valid_until_granularity,
-            Some(DateGranularity::Year),
-            "predecessor's valid_until_granularity must be the successor's (Bob's) \
-             start_granularity (Year) — the honest source of the derived bound"
+            Some(DateGranularity::Day),
+            "predecessor's valid_until_granularity must be its OWN end_granularity (Day), \
+             not the successor's (Bob's) start_granularity (Year) — own end always wins"
         );
         assert_eq!(
             h.entries[1].valid_from_granularity,

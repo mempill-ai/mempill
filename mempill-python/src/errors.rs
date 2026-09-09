@@ -50,6 +50,9 @@ pub fn mem_err_to_pyerr(e: MemError) -> PyErr {
         MemError::WriteAuthorityViolation { .. } => ValidationError::new_err(msg),
         MemError::MalformedFact { .. } => ValidationError::new_err(msg),
         MemError::IncoherentTemporalWindow { .. } => ValidationError::new_err(msg),
+        // assert_validity / end_fact gates (TASK-33 E2)
+        MemError::InsufficientProvenanceForOverturn { .. } => ValidationError::new_err(msg),
+        MemError::AmbiguousLineForClose { .. } => ValidationError::new_err(msg),
 
         // NotFoundError group
         MemError::ClaimNotFound { .. } => NotFoundError::new_err(msg),
@@ -58,6 +61,9 @@ pub fn mem_err_to_pyerr(e: MemError) -> PyErr {
 
         // ConflictError group
         MemError::WriteLockContention { .. } => ConflictError::new_err(msg),
+        // Single-writer-per-target: a different `at` on an already-active Bound (never
+        // "later wins") is a conflict the caller must resolve explicitly (reopen first).
+        MemError::AlreadyBound { .. } => ConflictError::new_err(msg),
 
         // StorageError group
         MemError::Persistence { .. } => StorageError::new_err(msg),

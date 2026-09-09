@@ -28,6 +28,8 @@ use mempill_types::{
 };
 
 #[cfg(any(test, feature = "test-support"))]
+use crate::error::MemError;
+#[cfg(any(test, feature = "test-support"))]
 use crate::ports::persistence::PersistencePort;
 
 // ── Builder helpers ───────────────────────────────────────────────────────────
@@ -803,8 +805,9 @@ where
 
 /// Run the history timeline conformance suite against `store`.
 ///
-/// Exercises `compute_effective_windows` (pure) and `truth_engine::fold` via the real
-/// persistence backend. Uses DISTINCT agent_id namespace (`conformance-hist-*`).
+/// Exercises `truth_engine::fold` + `truth_engine::compute_history_windows` (the engine-layer
+/// single source of truth) via the real persistence backend. Uses DISTINCT agent_id namespace
+/// (`conformance-hist-*`).
 ///
 /// Panics on any contract violation with a descriptive message.
 #[cfg(any(test, feature = "test-support"))]
@@ -817,6 +820,12 @@ where
     hist_single_claim(store);
     hist_succession_ordering(store);
     hist_current_agrees_with_fold(store);
+    hist_own_end_never_discarded_when_no_overlap(store);
+    hist_overlap_marks_both_entries_contested_no_narrowing(store);
+    hist_current_requires_window_contains_now(store);
+    hist_ended_status_for_expired_unsuperseded_claim(store);
+    hist_duplicate_ordering_key_no_zero_length_window(store);
+    hist_granularity_follows_winning_endpoint_source(store);
 }
 
 /// Empty subject-line → `load_subject_line` returns empty (foundation for history).
@@ -843,8 +852,8 @@ where
     P: PersistencePort,
     P::Error: std::fmt::Debug,
 {
-    use crate::application::query_history::compute_effective_windows;
     use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
 
     let agent = AgentId("conformance-hist-t2".into());
     let tx = chrono::DateTime::<chrono::Utc>::from_timestamp(10_000_000, 0).unwrap();
@@ -874,10 +883,11 @@ where
     assert_eq!(claims.len(), 1, "conformance[hist-t2]: must have 1 claim");
 
     let config = EngineConfig::default();
-    let refs: Vec<&Claim> = claims.iter().collect();
-    let windows = compute_effective_windows(&refs, &config);
+    let now = tx + chrono::Duration::seconds(1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
     assert_eq!(windows.len(), 1, "conformance[hist-t2]: 1 window");
-    assert_eq!(windows[0], None, "conformance[hist-t2]: single claim has open-ended window");
+    assert_eq!(windows[0].valid_until, None, "conformance[hist-t2]: single claim has open-ended window");
 }
 
 /// CEO succession: Alice→John→Bob — 3 entries ordered oldest first, windows correct.
@@ -888,8 +898,8 @@ where
     P: PersistencePort,
     P::Error: std::fmt::Debug,
 {
-    use crate::application::query_history::compute_effective_windows;
     use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
 
     let agent = AgentId("conformance-hist-t3".into());
 
@@ -925,30 +935,29 @@ where
     store.append_claim(&mut txn, &c_bob).expect("conformance[hist-t3]: append Bob");
     store.commit(txn).expect("conformance[hist-t3]: commit");
 
-    let mut claims = store
+    let claims = store
         .load_subject_line(&agent, "hist-corp", "ceo", None)
         .expect("conformance[hist-t3]: load_subject_line must not error");
     assert_eq!(claims.len(), 3, "conformance[hist-t3]: must have 3 claims (Alice, John, Bob)");
 
     let config = EngineConfig::default();
-    // Sort by canonical ordering key (tx_time — all low confidence).
-    claims.sort_by(|a, b| {
-        a.transaction_time().0.cmp(&b.transaction_time().0)
-            .then(a.claim_ref().0.as_u128().cmp(&b.claim_ref().0.as_u128()))
-    });
+    let now = t_bob + chrono::Duration::seconds(1);
+    // fold() performs the canonical sort internally (I8) — `all_claims` is already ordered.
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert_eq!(
+        fold.all_claims.iter().map(|cs| cs.claim.fact().value.clone()).collect::<Vec<_>>(),
+        vec![serde_json::json!("Alice"), serde_json::json!("John"), serde_json::json!("Bob")],
+        "conformance[hist-t3]: fold.all_claims must already be in canonical (oldest-first) order"
+    );
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
 
-    let refs: Vec<&Claim> = claims.iter().collect();
-    let windows = compute_effective_windows(&refs, &config);
+    // Windows: Alice closed by John's tx, John closed by Bob's tx, Bob open (no valid_time on
+    // any claim → legacy successor-ordering-key fallback, unchanged from the pre-fix behavior).
+    assert_eq!(windows[0].valid_until, Some(t_john), "conformance[hist-t3]: Alice's valid_until = John's ordering key");
+    assert_eq!(windows[1].valid_until, Some(t_bob),  "conformance[hist-t3]: John's valid_until = Bob's ordering key");
+    assert_eq!(windows[2].valid_until, None,          "conformance[hist-t3]: Bob is open-ended (current)");
 
-    // Windows: Alice closed by John's tx, John closed by Bob's tx, Bob open.
-    assert_eq!(windows[0], Some(t_john), "conformance[hist-t3]: Alice's valid_until = John's ordering key");
-    assert_eq!(windows[1], Some(t_bob),  "conformance[hist-t3]: John's valid_until = Bob's ordering key");
-    assert_eq!(windows[2], None,          "conformance[hist-t3]: Bob is open-ended (current)");
-
-    // Values in canonical order (oldest first).
-    assert_eq!(claims[0].fact().value, serde_json::json!("Alice"), "conformance[hist-t3]: oldest is Alice");
-    assert_eq!(claims[1].fact().value, serde_json::json!("John"),  "conformance[hist-t3]: middle is John");
-    assert_eq!(claims[2].fact().value, serde_json::json!("Bob"),   "conformance[hist-t3]: newest is Bob");
+    // Values in canonical order (oldest first) — already asserted via fold.all_claims above.
 }
 
 /// Current entry agrees with `truth_engine::fold` on which claim is live.
@@ -1011,6 +1020,318 @@ where
         fold.live_claims[0].claim.fact().value,
         serde_json::json!("Leader-A"),
         "conformance[hist-t4]: fold's live claim must match the single committed claim"
+    );
+}
+
+/// Helper: build a trusted valid-time claim for the history window-narrowing tests.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+fn hist_vt_claim(
+    agent: &AgentId,
+    subject: &str,
+    predicate: &str,
+    value: &str,
+    tx: chrono::DateTime<chrono::Utc>,
+    start: chrono::DateTime<chrono::Utc>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+) -> Claim {
+    Claim::new(
+        ClaimRef::new_random(),
+        agent.clone(),
+        Fact { subject: subject.to_owned(), predicate: predicate.to_owned(), value: serde_json::json!(value) },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(tx),
+        ValidTime { start: Some(start), end, valid_time_confidence: 0.9, start_granularity: None, end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Low,
+        vec![],
+        None,
+        None,
+    )
+}
+
+/// Bug A regression: a claim's own `valid_time.end` must never be discarded in favor of a
+/// LATER successor ordering key when it is genuinely non-overlapping and earlier.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_own_end_never_discarded_when_no_overlap<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+
+    let agent = AgentId("conformance-hist-t5".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Linda [Jan 1 - Jan 10) — genuine gap before John starts (Jan 24), non-overlapping.
+    let linda = hist_vt_claim(&agent, "hist-a-corp", "ceo", "Linda", dt(2024, 1, 1), dt(2024, 1, 1), Some(dt(2024, 1, 10)));
+    let john = hist_vt_claim(&agent, "hist-a-corp", "ceo", "John", dt(2024, 1, 2), dt(2024, 1, 24), None);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t5]: begin_atomic");
+    store.append_claim(&mut txn, &linda).expect("conformance[hist-t5]: append Linda");
+    store.append_claim(&mut txn, &john).expect("conformance[hist-t5]: append John");
+    store.commit(txn).expect("conformance[hist-t5]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-a-corp", "ceo", None)
+        .expect("conformance[hist-t5]: load_subject_line");
+    assert_eq!(claims.len(), 2, "conformance[hist-t5]: two claims");
+
+    let config = EngineConfig::default();
+    let now = dt(2025, 1, 1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Linda"));
+    assert_eq!(
+        windows[0].valid_until, Some(dt(2024, 1, 10)),
+        "conformance[hist-t5]: Linda's OWN end (Jan 10) must win, not John's later ordering key (Jan 24) — bug A regression"
+    );
+}
+
+/// Bug B regression: a trusted, genuinely OVERLAPPING adjacent pair must mark BOTH entries
+/// Contested with NO narrowing (own end preserved, not fabricated from the overlapping peer).
+#[cfg(any(test, feature = "test-support"))]
+fn hist_overlap_marks_both_entries_contested_no_narrowing<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+    use mempill_types::HistoryEntryStatus;
+
+    let agent = AgentId("conformance-hist-t6".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Joan [Sep 1 2024, Nov 1 2025) overlaps Linda [Sep 23 2024, Jan 24 2026).
+    let joan = hist_vt_claim(&agent, "hist-b-corp", "ceo", "Joan", dt(2024, 9, 1), dt(2024, 9, 1), Some(dt(2025, 11, 1)));
+    let linda = hist_vt_claim(&agent, "hist-b-corp", "ceo", "Linda", dt(2024, 9, 2), dt(2024, 9, 23), Some(dt(2026, 1, 24)));
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t6]: begin_atomic");
+    store.append_claim(&mut txn, &joan).expect("conformance[hist-t6]: append Joan");
+    store.append_claim(&mut txn, &linda).expect("conformance[hist-t6]: append Linda");
+    store.commit(txn).expect("conformance[hist-t6]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-b-corp", "ceo", None)
+        .expect("conformance[hist-t6]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2026, 6, 1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert!(fold.has_conflict, "conformance[hist-t6]: overlapping trusted claims must set has_conflict");
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Joan"));
+    assert_eq!(
+        windows[0].valid_until, Some(dt(2025, 11, 1)),
+        "conformance[hist-t6]: Joan's own end must be preserved (NOT narrowed by overlapping Linda)"
+    );
+    assert!(windows[0].contested, "conformance[hist-t6]: Joan must be Contested (overlap)");
+    assert!(windows[1].contested, "conformance[hist-t6]: Linda must also be Contested (has_conflict, structural)");
+    let _ = HistoryEntryStatus::Contested; // documents the status this window feeds
+}
+
+/// Bug C regression: `Current` requires the effective window to CONTAIN `now`, not merely
+/// membership in the raw live set. A predecessor whose own window has closed (superseded by
+/// valid-time succession) must not be mislabeled Current.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_current_requires_window_contains_now<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+
+    let agent = AgentId("conformance-hist-t7".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Clean succession: Alice [Jan 2020, Jan 2022) -> Bob [Jan 2022, ∞).
+    let alice = hist_vt_claim(&agent, "hist-c-corp", "ceo", "Alice", dt(2020, 1, 1), dt(2020, 1, 1), Some(dt(2022, 1, 1)));
+    let bob = hist_vt_claim(&agent, "hist-c-corp", "ceo", "Bob", dt(2020, 1, 2), dt(2022, 1, 1), None);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t7]: begin_atomic");
+    store.append_claim(&mut txn, &alice).expect("conformance[hist-t7]: append Alice");
+    store.append_claim(&mut txn, &bob).expect("conformance[hist-t7]: append Bob");
+    store.commit(txn).expect("conformance[hist-t7]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-c-corp", "ceo", None)
+        .expect("conformance[hist-t7]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2025, 1, 1); // well inside Bob's open window
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert!(fold.succession_selected, "conformance[hist-t7]: clean succession must narrow");
+    assert_eq!(fold.live_claims.len(), 1, "conformance[hist-t7]: narrowed to Bob only");
+
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Alice"));
+    assert!(
+        !windows[0].contains_now,
+        "conformance[hist-t7]: Alice's window (closed Jan 2022) must NOT contain 'now' (2025) — bug C regression"
+    );
+}
+
+/// New `Ended` status: a claim that is still raw-live (never explicitly Bound) but whose own
+/// valid-time window has expired, with no live successor, must be `Ended` — not `Current`.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_ended_status_for_expired_unsuperseded_claim<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+
+    let agent = AgentId("conformance-hist-t8".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Single claim whose own end has already passed — never Bound.
+    let claim = hist_vt_claim(&agent, "hist-d-corp", "role", "temp-lead", dt(2020, 1, 1), dt(2020, 1, 1), Some(dt(2020, 6, 1)));
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t8]: begin_atomic");
+    store.append_claim(&mut txn, &claim).expect("conformance[hist-t8]: append");
+    store.commit(txn).expect("conformance[hist-t8]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-d-corp", "role", None)
+        .expect("conformance[hist-t8]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2026, 1, 1); // long after the claim's own end
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    assert_eq!(fold.live_claims.len(), 1, "conformance[hist-t8]: never Bound → still raw-live");
+    assert!(!fold.has_conflict);
+
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+    assert!(fold.all_claims[0].is_live, "conformance[hist-t8]: raw is_live must still be true (never Bound)");
+    assert!(
+        !windows[0].contains_now,
+        "conformance[hist-t8]: own window closed (Jun 2020) — must not contain 'now' (2026) → Ended, not Current"
+    );
+    assert!(!windows[0].contested);
+}
+
+/// Bug 2d regression: duplicate adjacent ordering keys must never yield a zero-length window
+/// (`valid_until == valid_from`) — the effective successor is the next STRICTLY-later key.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_duplicate_ordering_key_no_zero_length_window<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let agent = AgentId("conformance-hist-t9".into());
+    let t1 = chrono::DateTime::<chrono::Utc>::from_timestamp(13_000_000, 0).unwrap();
+    let t2 = chrono::DateTime::<chrono::Utc>::from_timestamp(13_000_100, 0).unwrap();
+
+    // Two claims sharing the SAME tx_time (no valid_time — ordering key is tx_time), plus a
+    // third claim with a strictly later tx_time.
+    let make_c = |val: &str, tx: chrono::DateTime<chrono::Utc>| -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            agent.clone(),
+            Fact { subject: "hist-e-corp".to_owned(), predicate: "lead".to_owned(), value: serde_json::json!(val) },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(tx),
+            ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            Criticality::Low,
+            vec![],
+            None,
+            None,
+        )
+    };
+    let c_tie_a = make_c("TieA", t1);
+    let c_tie_b = make_c("TieB", t1);
+    let c_later = make_c("Later", t2);
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t9]: begin_atomic");
+    store.append_claim(&mut txn, &c_tie_a).expect("conformance[hist-t9]: append TieA");
+    store.append_claim(&mut txn, &c_tie_b).expect("conformance[hist-t9]: append TieB");
+    store.append_claim(&mut txn, &c_later).expect("conformance[hist-t9]: append Later");
+    store.commit(txn).expect("conformance[hist-t9]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-e-corp", "lead", None)
+        .expect("conformance[hist-t9]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = t2 + chrono::Duration::seconds(1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    // Entries 0 and 1 (the tied pair) must NOT close against each other (zero-length) — both
+    // must skip ahead to entry 2's strictly-later key.
+    assert_eq!(windows[0].valid_until, Some(t2), "conformance[hist-t9]: first of the tied pair must skip to the strictly-later key");
+    assert_eq!(windows[1].valid_until, Some(t2), "conformance[hist-t9]: second of the tied pair must use the strictly-later key");
+    assert_eq!(windows[2].valid_until, None, "conformance[hist-t9]: last entry is open-ended");
+    assert_ne!(windows[0].valid_until, fold.all_claims[0].claim.valid_time().start,
+        "conformance[hist-t9]: no zero-length window (valid_until must not equal valid_from)");
+}
+
+/// Granularity attribution follows whichever endpoint value actually won: own `end_granularity`
+/// when the own end is used, successor's `start_granularity` only when the successor's
+/// ordering key is used AND itself sourced from `valid_time.start`.
+#[cfg(any(test, feature = "test-support"))]
+fn hist_granularity_follows_winning_endpoint_source<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use chrono::TimeZone;
+    use mempill_types::DateGranularity;
+
+    let agent = AgentId("conformance-hist-t10".into());
+    let dt = |y, m, d| chrono::Utc.with_ymd_and_hms(y, m, d, 0, 0, 0).unwrap();
+
+    // Own end (Day granularity) wins over a later, non-overlapping successor (Year granularity).
+    let own_end_wins = Claim::new(
+        ClaimRef::new_random(), agent.clone(),
+        Fact { subject: "hist-f-corp".to_owned(), predicate: "ceo".to_owned(), value: serde_json::json!("Predecessor") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(dt(2024, 1, 1)),
+        ValidTime { start: Some(dt(2024, 1, 1)), end: Some(dt(2024, 1, 10)), valid_time_confidence: 0.9, start_granularity: None, end_granularity: Some(DateGranularity::Day) },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Low, vec![], None, None,
+    );
+    let successor = Claim::new(
+        ClaimRef::new_random(), agent.clone(),
+        Fact { subject: "hist-f-corp".to_owned(), predicate: "ceo".to_owned(), value: serde_json::json!("Successor") },
+        Cardinality::Functional,
+        ProvenanceLabel::External(ExternalKind::UserAsserted),
+        ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+        TransactionTime(dt(2024, 1, 2)),
+        ValidTime { start: Some(dt(2024, 6, 1)), end: None, valid_time_confidence: 0.9, start_granularity: Some(DateGranularity::Year), end_granularity: None },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Criticality::Low, vec![], None, None,
+    );
+
+    let mut txn = store.begin_atomic(&agent).expect("conformance[hist-t10]: begin_atomic");
+    store.append_claim(&mut txn, &own_end_wins).expect("conformance[hist-t10]: append predecessor");
+    store.append_claim(&mut txn, &successor).expect("conformance[hist-t10]: append successor");
+    store.commit(txn).expect("conformance[hist-t10]: commit");
+
+    let claims = store.load_subject_line(&agent, "hist-f-corp", "ceo", None)
+        .expect("conformance[hist-t10]: load_subject_line");
+    let config = EngineConfig::default();
+    let now = dt(2025, 1, 1);
+    let fold = truth_engine::fold(claims, |_| vec![], now, None, &config, &std::collections::HashMap::new());
+    let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+    assert_eq!(fold.all_claims[0].claim.fact().value, serde_json::json!("Predecessor"));
+    assert_eq!(
+        windows[0].valid_until_granularity, Some(DateGranularity::Day),
+        "conformance[hist-t10]: own end_granularity (Day) must win, NOT the successor's start_granularity (Year)"
     );
 }
 
@@ -1479,6 +1800,56 @@ where
         "dscope[wa1]: reconcile must process live claim D; outcomes={:?}",
         reconcile_resp.outcomes
     );
+    // Disposition + escalation-count: D is the SOLE live claim on this subject-line (C is
+    // Superseded) — no genuine conflict, so D must resolve CommittedCheap with zero escalations.
+    let d_disposition = reconcile_resp.outcomes.iter()
+        .find(|(r, _)| *r == ref_d)
+        .map(|(_, d)| d.clone())
+        .expect("dscope[wa1]: D must be present in reconcile outcomes");
+    assert_eq!(
+        d_disposition, Disposition::CommittedCheap,
+        "dscope[wa1]: sole live claim D (no other live claim to conflict with) must resolve CommittedCheap"
+    );
+    assert_eq!(
+        reconcile_resp.oracle_escalations, 0,
+        "dscope[wa1]: no genuine conflict on this subject-line — zero HeavyPath escalations expected"
+    );
+    // No supersession edge/ledger row written BY reconcile (A6/I7): reconcile() never calls
+    // supersession::execute. C's Superseded entry was written directly by the test setup
+    // above, not by reconcile — the ledger for both C and D must gain exactly the
+    // AdjudicationResolved rows reconcile itself appends, nothing else.
+    let edges_d = store.load_edges_for(&agent, &ref_d).expect("dscope[wa1]: load_edges_for D");
+    assert!(edges_d.is_empty(), "dscope[wa1]: reconcile() must never write a supersession edge — found {} edge(s) on D", edges_d.len());
+    let ledger_d_after = store.load_ledger_for_claims(&agent, &[ref_d.clone()], None).expect("dscope[wa1]: load ledger D after reconcile");
+    assert!(
+        ledger_d_after.iter().all(|e| e.event_kind != LedgerEventKind::ValidityAsserted),
+        "dscope[wa1]: reconcile() must never append a ValidityAsserted (supersession) ledger row"
+    );
+    // Post-state belief: query_memory on this subject-line must agree with reconcile's view —
+    // D is the sole live, uncontested claim, so query_memory must resolve to D, never Contested.
+    let qm_uc = crate::application::query_memory::QueryMemoryUseCase::new(
+        Arc::clone(&store_arc),
+        None::<Arc<crate::noop::NoOpVector>>,
+        config.clone(),
+    );
+    let qm_resp = qm_uc
+        .execute_with_time(
+            crate::application::dto::QueryMemoryRequest {
+                agent_id: agent.clone(),
+                subject: "wa-reconcile-subject".into(),
+                predicate: "wa-predicate".into(),
+                as_of_tx_time: None,
+                valid_at: None,
+            },
+            Utc::now(),
+        )
+        .expect("dscope[wa1]: query_memory must not error");
+    assert_ne!(
+        qm_resp.belief.status, mempill_types::BeliefStatus::Contested,
+        "dscope[wa1]: query_memory must agree with reconcile's uncontested view of D"
+    );
+    let qm_primary = qm_resp.belief.primary.as_ref().expect("dscope[wa1]: query_memory primary must be present for D");
+    assert_eq!(qm_primary.claim_ref, ref_d, "dscope[wa1]: query_memory primary must be D, matching reconcile's live-claim view");
 
     // ── 4/5. submit_adjudication + sweep_adjudications: state-guard idempotency. ──────
     // A challenger claim E is QueuedForAdjudication in the ledger. A duplicate/late
@@ -1718,6 +2089,243 @@ where
         !reverted,
         "dscope[wa1]: sweep_adjudications must correctly see E's CURRENT resolved disposition \
          despite >10k noise ledger rows and skip the stale revert (idempotency guard)"
+    );
+}
+
+// ── DIAG_silent_succession §6(b) — reconcile incumbent-selection conformance ──────────────
+
+/// Cross-adapter conformance: for a genuine 2-claim overlap, `reconcile`'s per-candidate
+/// disposition view must AGREE with `query_memory`'s primary/status view.
+///
+/// Regression for DIAG_silent_succession §6(b): `reconcile.rs`'s per-subject-line
+/// `incumbent` used to be a single `fold.live_claims.first()` shared across every
+/// candidate; when the candidate under evaluation WAS that claim, `classify_conflict`'s
+/// step-3 same-value check trivially matched (identical claim) and cheap-pathed a
+/// genuinely contested line into a silent `CommittedCheap`. `reconcile` now selects a
+/// per-candidate incumbent that is NEVER the candidate itself, so both candidates on a
+/// true overlap must escalate, and `query_memory` must show `Contested` / `primary: None`
+/// — never a mismatch where reconcile reports one candidate resolved while the read path
+/// still sees a contested line.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_reconcile_incumbent_selection_matches_query_memory_primary_conformance<P>(
+    store: &std::sync::Arc<P>,
+) where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use std::sync::Arc;
+
+    use crate::application::{
+        dto::{QueryMemoryRequest, ReconcileRequest},
+        query_memory::QueryMemoryUseCase,
+        reconcile::ReconcileUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::{NoOpOracle, NoOpVector};
+    use mempill_types::BeliefStatus;
+
+    let agent = AgentId("conformance-reconcile-incumbent-selection".into());
+    // Both claims tx-stamped strictly in the PAST (not `+ duration`, which would place a
+    // claim's transaction_time in the future relative to the later as_of=now cutoff used
+    // by query_memory below, silently excluding it from tx-time visibility).
+    let tx = Utc::now() - chrono::Duration::seconds(10);
+    let claim_a = make_vt_free_claim(&agent, "ri-subj", "ri-pred", serde_json::json!("Alice"), tx);
+    let claim_b = make_vt_free_claim(&agent, "ri-subj", "ri-pred", serde_json::json!("Bob"), tx + chrono::Duration::seconds(1));
+    let mut txn = store.begin_atomic(&agent).expect("ri: begin");
+    store.append_claim(&mut txn, &claim_a).expect("ri: append a");
+    store.append_claim(&mut txn, &claim_b).expect("ri: append b");
+    store.commit(txn).expect("ri: commit");
+
+    let config = EngineConfig::default();
+    let reconcile_uc = ReconcileUseCase::new(Arc::clone(store), None::<Arc<NoOpOracle>>, config.clone());
+    let resp = reconcile_uc
+        .execute(ReconcileRequest {
+            agent_id: agent.clone(),
+            subject_lines: vec![("ri-subj".into(), "ri-pred".into())],
+        })
+        .expect("ri: reconcile must not error");
+    assert_eq!(resp.outcomes.len(), 2, "ri: both live claims must produce an outcome");
+    assert_eq!(
+        resp.oracle_escalations, 2,
+        "ri: BOTH candidates must escalate — per-candidate incumbent selection never \
+         feeds a candidate itself as its own incumbent (DIAG §6(b))"
+    );
+    for (r, disposition) in &resp.outcomes {
+        assert_ne!(
+            *disposition,
+            Disposition::CommittedCheap,
+            "ri: claim {r:?} on a genuinely contested line must never resolve CommittedCheap"
+        );
+    }
+
+    let qm_uc = QueryMemoryUseCase::new(Arc::clone(store), None::<Arc<NoOpVector>>, config);
+    let qm_resp = qm_uc
+        .execute_with_time(
+            QueryMemoryRequest {
+                agent_id: agent,
+                subject: "ri-subj".into(),
+                predicate: "ri-pred".into(),
+                as_of_tx_time: None,
+                valid_at: None,
+            },
+            Utc::now(),
+        )
+        .expect("ri: query_memory must not error");
+    assert_eq!(
+        qm_resp.belief.status,
+        BeliefStatus::Contested,
+        "ri: query_memory must agree with reconcile's contested view — neither candidate \
+         resolved CommittedCheap, so the read path must also see Contested"
+    );
+    assert!(
+        qm_resp.belief.primary.is_none(),
+        "ri: query_memory primary must be null on a Contested line, matching reconcile's view"
+    );
+}
+
+/// Cross-adapter conformance: sweeping an EXPIRED pending row reverts the challenger to
+/// `Contested` and writes NO supersession (no Bound assertion, no edge) on the incumbent;
+/// supersession (incumbent → Superseded, challenger → CommittedCheap) happens ONLY when
+/// `submit_adjudication` is explicitly called with an `Affirm` verdict. Proves
+/// DIAG_silent_succession §6(b)'s "gate supersession::execute on a resolved disposition,
+/// never on Contested/QueuedForAdjudication" contract end-to-end, cross-adapter.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_conformance<P>(
+    store: &std::sync::Arc<P>,
+) where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use std::sync::{Arc, Mutex};
+
+    use crate::application::{
+        submit_adjudication::SubmitAdjudicationUseCase, sweep_adjudications::SweepAdjudicationsUseCase,
+    };
+    use crate::engine_handle::{ErasedPendingStore, ErasedPendingStoreAdapter};
+    use crate::ports::pending_adjudication::{
+        OrphanedQueuedClaim, PendingAdjudicationPort, PendingAdjudicationRow,
+    };
+
+    let agent = AgentId("conformance-sweep-then-affirm".into());
+
+    // Incumbent I, live and CommittedCheap.
+    let incumbent = make_claim(&agent, "sweep-affirm-subj", "sweep-affirm-pred");
+    let ref_incumbent = incumbent.claim_ref().clone();
+    let mut txn = store.begin_atomic(&agent).expect("swpaff: begin incumbent");
+    store.append_claim(&mut txn, &incumbent).expect("swpaff: append incumbent");
+    store
+        .append_ledger_entry(&mut txn, &make_ledger_entry(&agent, &ref_incumbent))
+        .expect("swpaff: incumbent ledger");
+    store.commit(txn).expect("swpaff: commit incumbent");
+
+    // Challenger #1: QueuedForAdjudication, EXPIRED pending row → sweep must only revert.
+    let challenger1 = make_claim(&agent, "sweep-affirm-subj", "sweep-affirm-pred");
+    let ref_challenger1 = challenger1.claim_ref().clone();
+    let queued1 = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent.clone(), claim_ref: ref_challenger1.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::QueuedForAdjudication, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let mut txn = store.begin_atomic(&agent).expect("swpaff: begin c1");
+    store.append_claim(&mut txn, &challenger1).expect("swpaff: append c1");
+    store.append_ledger_entry(&mut txn, &queued1).expect("swpaff: queued c1");
+    store.commit(txn).expect("swpaff: commit c1");
+
+    struct NoopPending;
+    impl PendingAdjudicationPort for NoopPending {
+        type Error = std::io::Error;
+        fn insert_pending(&self, _row: &PendingAdjudicationRow) -> Result<(), Self::Error> { Ok(()) }
+        fn get_pending(&self, _handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { Ok(None) }
+        fn list_pending(&self, _agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn list_expired(&self, _now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn mark_resolved(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> { Ok(()) }
+        fn mark_expired(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> { Ok(()) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { Ok(vec![]) }
+    }
+    let erased_noop: Arc<dyn ErasedPendingStore> = Arc::new(ErasedPendingStoreAdapter::new(NoopPending));
+    let sweep_uc = SweepAdjudicationsUseCase::new(Arc::clone(store), erased_noop);
+
+    let row1 = PendingAdjudicationRow {
+        handle_id: Uuid::new_v4(), agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into(),
+        challenger_claim_ref: ref_challenger1.clone(), incumbent_claim_ref: ref_incumbent.clone(),
+        request_payload: mempill_types::AdjudicationRequest {
+            subject_line: mempill_types::SubjectLineRef { agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into() },
+            incumbent: mempill_types::Belief { claim_ref: ref_incumbent.clone(), fact: incumbent.fact().clone(), provenance: incumbent.provenance().clone(), valid_time: incumbent.valid_time().clone(), transaction_time: incumbent.transaction_time().clone(), confidence: incumbent.confidence().clone(), currency_signal: mempill_types::CurrencySignal { last_refreshed_at: incumbent.transaction_time().clone(), state: mempill_types::CurrencyState::Fresh, corroboration_count: 0 }, criticality: incumbent.criticality().clone() },
+            challenger: challenger1.clone(), criticality: Criticality::Medium, reason: mempill_types::OverturnReason::ExternalContradiction,
+        },
+        queued_at: Utc::now() - chrono::Duration::seconds(10), expires_at: Some(Utc::now() - chrono::Duration::seconds(1)), status: "pending".into(),
+    };
+
+    let reverted = sweep_uc.revert_expired_row(&row1, Utc::now()).expect("swpaff: revert_expired_row must not error");
+    assert!(reverted, "swpaff: expired row must be reverted");
+
+    // Challenger #1 must now be Contested — NEVER Superseded/CommittedCheap; and the
+    // INCUMBENT must be untouched (still live, no Bound assertion, no edge).
+    let ledger_c1 = store.load_ledger_for_claims(&agent, &[ref_challenger1.clone()], None).expect("swpaff: ledger c1");
+    let latest_c1 = ledger_c1.iter().max_by_key(|e| e.recorded_at.0).expect("swpaff: c1 ledger non-empty");
+    assert_eq!(latest_c1.disposition, Disposition::Contested, "swpaff: sweep must revert the challenger to Contested, never resolve it");
+    let assertions_incumbent = store.load_validity_assertions_for(&agent, &ref_incumbent).expect("swpaff: incumbent assertions after sweep");
+    assert!(assertions_incumbent.is_empty(), "swpaff: sweep must NEVER write a Bound (supersession) assertion on the incumbent");
+    let edges_incumbent = store.load_edges_for(&agent, &ref_incumbent).expect("swpaff: incumbent edges after sweep");
+    assert!(edges_incumbent.is_empty(), "swpaff: sweep must NEVER write a supersession edge on the incumbent");
+
+    // Challenger #2: QueuedForAdjudication with a LIVE (non-expired) pending row —
+    // submit_adjudication(Affirm) is the ONLY path that may supersede the incumbent.
+    let challenger2 = make_claim(&agent, "sweep-affirm-subj", "sweep-affirm-pred");
+    let ref_challenger2 = challenger2.claim_ref().clone();
+    let queued2 = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent.clone(), claim_ref: ref_challenger2.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::QueuedForAdjudication, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let mut txn = store.begin_atomic(&agent).expect("swpaff: begin c2");
+    store.append_claim(&mut txn, &challenger2).expect("swpaff: append c2");
+    store.append_ledger_entry(&mut txn, &queued2).expect("swpaff: queued c2");
+    store.commit(txn).expect("swpaff: commit c2");
+
+    let handle2 = Uuid::new_v4();
+    struct StubPendingStore { rows: Mutex<Vec<PendingAdjudicationRow>> }
+    impl PendingAdjudicationPort for StubPendingStore {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> { self.rows.lock().unwrap().push(row.clone()); Ok(()) }
+        fn get_pending(&self, handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { Ok(self.rows.lock().unwrap().iter().find(|r| r.handle_id == handle_id).cloned()) }
+        fn list_pending(&self, _agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(self.rows.lock().unwrap().clone()) }
+        fn list_expired(&self, _now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> { for r in self.rows.lock().unwrap().iter_mut() { if r.handle_id == handle_id { r.status = "resolved".into(); } } Ok(()) }
+        fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> { for r in self.rows.lock().unwrap().iter_mut() { if r.handle_id == handle_id { r.status = "expired".into(); } } Ok(()) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { Ok(vec![]) }
+    }
+    let dummy_req2 = mempill_types::AdjudicationRequest {
+        subject_line: mempill_types::SubjectLineRef { agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into() },
+        incumbent: mempill_types::Belief { claim_ref: ref_incumbent.clone(), fact: incumbent.fact().clone(), provenance: incumbent.provenance().clone(), valid_time: incumbent.valid_time().clone(), transaction_time: incumbent.transaction_time().clone(), confidence: incumbent.confidence().clone(), currency_signal: mempill_types::CurrencySignal { last_refreshed_at: incumbent.transaction_time().clone(), state: mempill_types::CurrencyState::Fresh, corroboration_count: 0 }, criticality: incumbent.criticality().clone() },
+        challenger: challenger2.clone(), criticality: Criticality::Medium, reason: mempill_types::OverturnReason::ExternalContradiction,
+    };
+    let pending_store2 = Arc::new(StubPendingStore { rows: Mutex::new(vec![PendingAdjudicationRow {
+        handle_id: handle2, agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into(),
+        challenger_claim_ref: ref_challenger2.clone(), incumbent_claim_ref: ref_incumbent.clone(), request_payload: dummy_req2,
+        queued_at: Utc::now(), expires_at: None, status: "pending".into(),
+    }]) });
+    struct Wrapper2(Arc<StubPendingStore>);
+    impl PendingAdjudicationPort for Wrapper2 {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> { self.0.insert_pending(row) }
+        fn get_pending(&self, h: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { self.0.get_pending(h) }
+        fn list_pending(&self, a: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { self.0.list_pending(a) }
+        fn list_expired(&self, n: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { self.0.list_expired(n) }
+        fn mark_resolved(&self, h: uuid::Uuid) -> Result<(), Self::Error> { self.0.mark_resolved(h) }
+        fn mark_expired(&self, h: uuid::Uuid) -> Result<(), Self::Error> { self.0.mark_expired(h) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { self.0.list_queued_orphan_claims() }
+    }
+    let erased2: Arc<dyn ErasedPendingStore> = Arc::new(ErasedPendingStoreAdapter::new(Wrapper2(Arc::clone(&pending_store2))));
+    let submit_uc = SubmitAdjudicationUseCase::new(Arc::clone(store), Arc::clone(&erased2));
+
+    let response2 = mempill_types::AdjudicationResponse { handle_id: handle2, verdict: mempill_types::AdjudicationVerdict::Affirm, evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand) };
+    let outcome2 = submit_uc.execute(handle2, response2, Utc::now()).expect("swpaff: submit_adjudication(Affirm) must not error");
+    assert_eq!(outcome2.disposition, Disposition::CommittedCheap, "swpaff: Affirm must commit the challenger");
+
+    // NOW, and ONLY now, the incumbent must be Superseded: Bound assertion present.
+    let assertions_incumbent_after = store.load_validity_assertions_for(&agent, &ref_incumbent).expect("swpaff: incumbent assertions after affirm");
+    assert!(
+        assertions_incumbent_after.iter().any(|a| matches!(a.kind, mempill_types::AssertionKind::Bound { .. })),
+        "swpaff: submit_adjudication(Affirm) must write the Bound (supersession) assertion on \
+         the incumbent — the ONLY path that may"
+    );
+    let ledger_incumbent_after = store.load_ledger_for_claims(&agent, &[ref_incumbent.clone()], None).expect("swpaff: incumbent ledger after affirm");
+    assert!(
+        ledger_incumbent_after.iter().any(|e| e.event_kind == LedgerEventKind::ValidityAsserted && e.disposition == Disposition::Superseded),
+        "swpaff: submit_adjudication(Affirm) must append a Superseded ValidityAsserted ledger row for the incumbent"
     );
 }
 
@@ -2496,11 +3104,15 @@ where
     );
 }
 
-/// hist-gran-t2: two-claim succession where the successor has `start_granularity=Year`
-/// and high valid-time confidence. The predecessor's `valid_until` is bounded by the
-/// successor's `valid_time.start`, so `valid_until_granularity` must equal the
+/// hist-gran-t2: two-claim timeline where the predecessor is UNTRUSTED (confidence below
+/// threshold, no own end) and the successor has `start_granularity=Year` and high valid-time
+/// confidence. Since overlap cannot be determined when one side is untrusted, the legacy
+/// successor-key fallback fires: the predecessor's `valid_until_granularity` must equal the
 /// SUCCESSOR's `start_granularity` (Year) — not the predecessor's own `end_granularity`
 /// (which is deliberately set to a different value, Day, to prove no cross-contamination).
+/// (Two mutually-TRUSTED open-ended claims would instead be a genuine valid-time overlap —
+/// Contested, no narrowing — under the fold-derived history design; this scenario requires
+/// one side untrusted to honestly exercise the fallback path.)
 #[cfg(any(test, feature = "test-support"))]
 fn hist_gran_supersession_uses_successor_granularity<P>(store: std::sync::Arc<P>)
 where
@@ -2530,13 +3142,15 @@ where
         ValidTime {
             start: Some(vt_old_start),
             end: None,
-            valid_time_confidence: 0.9,
+            // UNTRUSTED (below the 0.7 default threshold): overlap against the successor
+            // cannot be determined, so the legacy successor-key fallback fires below.
+            valid_time_confidence: 0.3,
             start_granularity: Some(DateGranularity::Day),
             // Deliberately Day (not Year) to prove the effective valid_until_granularity
             // is NOT this claim's own end_granularity.
             end_granularity: Some(DateGranularity::Day),
         },
-        Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        Confidence { value_confidence: 0.9, valid_time_confidence: 0.3 },
         Criticality::Medium,
         vec![],
         None,
@@ -3476,4 +4090,611 @@ where
         "ledger-page[t1]: duplicates_observed={duplicates_observed} exceeds pages_walked={pages_walked} \
          — more duplication than one-per-page-transition; investigate pagination regression"
     );
+}
+
+// ── assert_validity / end_fact conformance (TASK-33 E2, SDK_CONTRACT.md §3.1) ──
+
+/// Cross-adapter conformance for `assert_validity` + `end_fact` resolution.
+///
+/// Covers TASK-33 test matrix items 1–11 (item 12 — the demo D1 rewrite — lives in the
+/// mempill-demo repo, out of scope here).
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_assert_validity_conformance<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    av_bound_then_nonoverlapping_challenger_folds_to_succession(store);
+    av_bound_idempotent_same_at_noop(store);
+    av_bound_different_at_already_bound_rejects(store);
+    av_bound_before_start_rejects_incoherent(store);
+    av_bound_model_derived_rejects_insufficient_provenance(store);
+    av_cross_agent_target_rejected(store);
+    av_reopen_restores_liveness(store);
+    av_as_of_tx_time_before_bound_shows_open_window(store);
+    av_history_shows_ended_after_bound(store);
+    av_end_fact_zero_live_returns_no_live_claim(store);
+    av_end_fact_multiple_live_returns_ambiguous(store);
+    av_end_fact_single_live_resolves_and_bounds(store);
+    av_diag3_sequence_end_fact_then_challenger_is_clean_succession(store);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn av_ingest<P>(
+    store: &std::sync::Arc<P>,
+    agent: &AgentId,
+    subject: &str,
+    predicate: &str,
+    value: serde_json::Value,
+    vt_start: Option<chrono::DateTime<Utc>>,
+    vt_end: Option<chrono::DateTime<Utc>>,
+    tx_time: chrono::DateTime<Utc>,
+) -> ClaimRef
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{dto::IngestClaimRequest, ingest_claim::IngestClaimUseCase};
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpOracle;
+
+    let uc = IngestClaimUseCase::new(
+        std::sync::Arc::clone(store),
+        None::<std::sync::Arc<NoOpOracle>>,
+        None,
+        EngineConfig::default(),
+    );
+    let valid_time = vt_start.map(|s| ValidTime {
+        start: Some(s),
+        end: vt_end,
+        valid_time_confidence: 0.9,
+        start_granularity: None,
+        end_granularity: None,
+    });
+    let resp = uc
+        .execute_with_time(
+            IngestClaimRequest {
+                agent_id: agent.clone(),
+                subject: subject.into(),
+                predicate: predicate.into(),
+                value,
+                provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+                cardinality: Cardinality::Functional,
+                valid_time,
+                confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+                criticality: Criticality::Medium,
+                derived_from: vec![],
+            },
+            tx_time,
+        )
+        .expect("av[ingest]: must not error");
+    resp.claim_ref
+}
+
+/// av1: an open-ended incumbent, bounded via `assert_validity`, followed by a
+/// non-overlapping challenger, folds to a clean `CommittedCheap` succession — no oracle.
+#[cfg(any(test, feature = "test-support"))]
+fn av_bound_then_nonoverlapping_challenger_folds_to_succession<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{
+        assert_validity::AssertValidityUseCase,
+        dto::{AssertValidityRequest, QueryMemoryRequest, ValidityAssertionInput},
+        query_memory::QueryMemoryUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::BeliefStatus;
+
+    let agent = AgentId("av-conf-succession".into());
+    let t0 = vat_dt("2021-04-01T00:00:00Z");
+    let close_at = vat_dt("2024-09-23T00:00:00Z");
+    let tx_ingest = vat_dt("2021-04-01T00:00:01Z");
+    let tx_bound = vat_dt("2024-09-23T00:00:01Z");
+
+    let incumbent = av_ingest(store, &agent, "av-subj", "av-pred", serde_json::json!("Austin"), Some(t0), None, tx_ingest);
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    let resp = av_uc
+        .execute(
+            AssertValidityRequest {
+                agent_id: agent.clone(),
+                target: incumbent.clone(),
+                assertion: ValidityAssertionInput::Bound { at: close_at },
+                provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+                confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            },
+            tx_bound,
+        )
+        .expect("av1: bound must succeed");
+    assert_eq!(resp.disposition, Disposition::Superseded, "av1: bound disposition must be Superseded");
+    assert!(!resp.no_op, "av1: first bound must not be a no-op");
+
+    let challenger = av_ingest(store, &agent, "av-subj", "av-pred", serde_json::json!("NYC"), Some(close_at), None, tx_bound + chrono::Duration::seconds(1));
+
+    let config = EngineConfig::default();
+    let qm_uc = QueryMemoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config);
+    let qm_resp = qm_uc
+        .execute_with_time(
+            QueryMemoryRequest { agent_id: agent, subject: "av-subj".into(), predicate: "av-pred".into(), as_of_tx_time: None, valid_at: None },
+            tx_bound + chrono::Duration::seconds(2),
+        )
+        .expect("av1: query_memory must not error");
+    assert_eq!(qm_resp.belief.status, BeliefStatus::Resolved, "av1: bound incumbent + non-overlapping challenger must fold to Resolved (clean succession), not Contested");
+    assert_eq!(qm_resp.belief.primary.as_ref().map(|b| b.claim_ref.clone()), Some(challenger), "av1: the challenger must be the resolved primary");
+}
+
+/// av2: repeating a bound at the SAME `at` is a no-op — no new assertion written.
+#[cfg(any(test, feature = "test-support"))]
+fn av_bound_idempotent_same_at_noop<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{assert_validity::AssertValidityUseCase, dto::{AssertValidityRequest, ValidityAssertionInput}};
+
+    let agent = AgentId("av-conf-idempotent".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let close_at = vat_dt("2021-01-01T00:00:00Z");
+    let incumbent = av_ingest(store, &agent, "av-idem-subj", "av-idem-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    let req = || AssertValidityRequest {
+        agent_id: agent.clone(),
+        target: incumbent.clone(),
+        assertion: ValidityAssertionInput::Bound { at: close_at },
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+    };
+    let first = av_uc.execute(req(), close_at + chrono::Duration::seconds(1)).expect("av2: first bound must succeed");
+    assert!(!first.no_op, "av2: first bound is a real write");
+
+    let assertions_before = store.load_validity_assertions_for(&agent, &incumbent).expect("av2: load before");
+    let count_before = assertions_before.len();
+
+    let second = av_uc.execute(req(), close_at + chrono::Duration::seconds(2)).expect("av2: repeat bound at same instant must not error");
+    assert!(second.no_op, "av2: repeat bound at the SAME at must be a no-op");
+    assert_eq!(second.assertion_ref, first.assertion_ref, "av2: no-op must return the EXISTING assertion_ref");
+
+    let assertions_after = store.load_validity_assertions_for(&agent, &incumbent).expect("av2: load after");
+    assert_eq!(assertions_after.len(), count_before, "av2: no-op must not append a new ValidityAssertion (I6)");
+}
+
+/// av3: a bound at a DIFFERENT instant while a Bound is already active is rejected —
+/// never "later wins".
+#[cfg(any(test, feature = "test-support"))]
+fn av_bound_different_at_already_bound_rejects<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{assert_validity::AssertValidityUseCase, dto::{AssertValidityRequest, ValidityAssertionInput}};
+
+    let agent = AgentId("av-conf-already-bound".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let first_close = vat_dt("2021-01-01T00:00:00Z");
+    let second_close = vat_dt("2021-06-01T00:00:00Z");
+    let incumbent = av_ingest(store, &agent, "av-ab-subj", "av-ab-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    av_uc
+        .execute(
+            AssertValidityRequest {
+                agent_id: agent.clone(), target: incumbent.clone(),
+                assertion: ValidityAssertionInput::Bound { at: first_close },
+                provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+                confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            },
+            first_close + chrono::Duration::seconds(1),
+        )
+        .expect("av3: first bound must succeed");
+
+    let result = av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent, target: incumbent,
+            assertion: ValidityAssertionInput::Bound { at: second_close },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        second_close + chrono::Duration::seconds(1),
+    );
+    assert!(matches!(result, Err(MemError::AlreadyBound { .. })), "av3: a different `at` on an already-bound claim must reject AlreadyBound, not silently pick a winner; got {result:?}");
+}
+
+/// av4: `at` before the claim's own `valid_time.start` is rejected as incoherent.
+#[cfg(any(test, feature = "test-support"))]
+fn av_bound_before_start_rejects_incoherent<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{assert_validity::AssertValidityUseCase, dto::{AssertValidityRequest, ValidityAssertionInput}};
+
+    let agent = AgentId("av-conf-incoherent".into());
+    let t0 = vat_dt("2020-06-01T00:00:00Z");
+    let before_start = vat_dt("2020-01-01T00:00:00Z");
+    let incumbent = av_ingest(store, &agent, "av-ic-subj", "av-ic-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    let result = av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent, target: incumbent,
+            assertion: ValidityAssertionInput::Bound { at: before_start },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        t0 + chrono::Duration::seconds(2),
+    );
+    assert!(matches!(result, Err(MemError::IncoherentTemporalWindow { .. })), "av4: at < valid_time.start must reject IncoherentTemporalWindow; got {result:?}");
+}
+
+/// av5: `ModelDerived` provenance is rejected — only External(*) may overturn validity.
+#[cfg(any(test, feature = "test-support"))]
+fn av_bound_model_derived_rejects_insufficient_provenance<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{assert_validity::AssertValidityUseCase, dto::{AssertValidityRequest, ValidityAssertionInput}};
+
+    let agent = AgentId("av-conf-provenance".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let close_at = vat_dt("2021-01-01T00:00:00Z");
+    let incumbent = av_ingest(store, &agent, "av-pv-subj", "av-pv-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    let result = av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent, target: incumbent,
+            assertion: ValidityAssertionInput::Bound { at: close_at },
+            provenance: ProvenanceLabel::ModelDerived,
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        t0 + chrono::Duration::seconds(2),
+    );
+    assert!(matches!(result, Err(MemError::InsufficientProvenanceForOverturn { .. })), "av5: ModelDerived provenance must reject InsufficientProvenanceForOverturn; got {result:?}");
+}
+
+/// av6: agent B cannot bound agent A's claim — cross-agent target is treated as not found
+/// (multi-agent isolation via the scoped `load_claim` lookup).
+#[cfg(any(test, feature = "test-support"))]
+fn av_cross_agent_target_rejected<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{assert_validity::AssertValidityUseCase, dto::{AssertValidityRequest, ValidityAssertionInput}};
+
+    let agent_a = AgentId("av-conf-cross-agent-a".into());
+    let agent_b = AgentId("av-conf-cross-agent-b".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let close_at = vat_dt("2021-01-01T00:00:00Z");
+    let claim_a = av_ingest(store, &agent_a, "av-xa-subj", "av-xa-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    let result = av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent_b, target: claim_a,
+            assertion: ValidityAssertionInput::Bound { at: close_at },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        t0 + chrono::Duration::seconds(2),
+    );
+    assert!(matches!(result, Err(MemError::ClaimNotFound { .. })), "av6: agent B bounding agent A's claim must be ClaimNotFound (scoped lookup), not succeed; got {result:?}");
+}
+
+/// av7: reopening a bounded claim restores liveness (Reinstated).
+#[cfg(any(test, feature = "test-support"))]
+fn av_reopen_restores_liveness<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{
+        assert_validity::AssertValidityUseCase,
+        dto::{AssertValidityRequest, QueryMemoryRequest, ValidityAssertionInput},
+        query_memory::QueryMemoryUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::BeliefStatus;
+
+    let agent = AgentId("av-conf-reopen".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let close_at = vat_dt("2021-01-01T00:00:00Z");
+    let incumbent = av_ingest(store, &agent, "av-ro-subj", "av-ro-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(), target: incumbent.clone(),
+            assertion: ValidityAssertionInput::Bound { at: close_at },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        close_at + chrono::Duration::seconds(1),
+    ).expect("av7: bound must succeed");
+
+    let reopen_time = close_at + chrono::Duration::seconds(2);
+    let reopen_resp = av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(), target: incumbent.clone(),
+            assertion: ValidityAssertionInput::Reopen,
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        reopen_time,
+    ).expect("av7: reopen must succeed");
+    assert_eq!(reopen_resp.disposition, Disposition::Reinstated, "av7: reopen disposition must be Reinstated");
+    assert!(!reopen_resp.no_op, "av7: reopening an active Bound must not be a no-op");
+
+    let config = EngineConfig::default();
+    let qm_uc = QueryMemoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config);
+    let qm_resp = qm_uc
+        .execute_with_time(
+            QueryMemoryRequest { agent_id: agent, subject: "av-ro-subj".into(), predicate: "av-ro-pred".into(), as_of_tx_time: None, valid_at: None },
+            reopen_time + chrono::Duration::seconds(1),
+        )
+        .expect("av7: query_memory must not error");
+    assert!(
+        matches!(qm_resp.belief.status, BeliefStatus::Resolved | BeliefStatus::TimingUncertain),
+        "av7: after reopen the claim must be live again; got {:?}", qm_resp.belief.status
+    );
+}
+
+/// av8: `as_of_tx_time` strictly before the Bound's commit still shows the incumbent's
+/// window open (tx-time-gated fold — no engine change was required for this).
+#[cfg(any(test, feature = "test-support"))]
+fn av_as_of_tx_time_before_bound_shows_open_window<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{
+        assert_validity::AssertValidityUseCase,
+        dto::{AssertValidityRequest, QueryMemoryRequest, ValidityAssertionInput},
+        query_memory::QueryMemoryUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::BeliefStatus;
+
+    let agent = AgentId("av-conf-txrewind".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let close_at = vat_dt("2021-01-01T00:00:00Z");
+    let ingest_tx = t0 + chrono::Duration::seconds(1);
+    let incumbent = av_ingest(store, &agent, "av-tr-subj", "av-tr-pred", serde_json::json!("v1"), Some(t0), None, ingest_tx);
+
+    let bound_tx = close_at + chrono::Duration::seconds(1);
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(), target: incumbent.clone(),
+            assertion: ValidityAssertionInput::Bound { at: close_at },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        bound_tx,
+    ).expect("av8: bound must succeed");
+
+    let before_bound = bound_tx - chrono::Duration::seconds(30);
+    let config = EngineConfig::default();
+    let qm_uc = QueryMemoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config);
+    let qm_resp = qm_uc
+        .execute_with_time(
+            QueryMemoryRequest { agent_id: agent, subject: "av-tr-subj".into(), predicate: "av-tr-pred".into(), as_of_tx_time: Some(before_bound), valid_at: None },
+            bound_tx + chrono::Duration::seconds(60),
+        )
+        .expect("av8: query_memory must not error");
+    assert!(
+        matches!(qm_resp.belief.status, BeliefStatus::Resolved | BeliefStatus::TimingUncertain),
+        "av8: as_of_tx_time before the Bound's commit must still show the window open; got {:?}", qm_resp.belief.status
+    );
+    assert_eq!(qm_resp.belief.primary.as_ref().map(|b| b.claim_ref.clone()), Some(incumbent), "av8: pre-bound as_of must return the incumbent");
+}
+
+/// av9: `query_history` after a bound shows the entry `Ended` (or `Superseded` once a live
+/// successor exists) — never silently narrowed over the bound instant.
+#[cfg(any(test, feature = "test-support"))]
+fn av_history_shows_ended_after_bound<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{
+        assert_validity::AssertValidityUseCase,
+        dto::{AssertValidityRequest, QueryHistoryRequest, ValidityAssertionInput},
+        query_history::QueryHistoryUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::HistoryEntryStatus;
+
+    let agent = AgentId("av-conf-history".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let close_at = vat_dt("2021-01-01T00:00:00Z");
+    let incumbent = av_ingest(store, &agent, "av-hi-subj", "av-hi-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(), target: incumbent.clone(),
+            assertion: ValidityAssertionInput::Bound { at: close_at },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        close_at + chrono::Duration::seconds(1),
+    ).expect("av9: bound must succeed");
+
+    let challenger = av_ingest(store, &agent, "av-hi-subj", "av-hi-pred", serde_json::json!("v2"), Some(close_at), None, close_at + chrono::Duration::seconds(2));
+
+    let config = EngineConfig::default();
+    let qh_uc = QueryHistoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config);
+    let qh_resp = qh_uc
+        .execute_with_time(
+            QueryHistoryRequest { agent_id: agent, subject: "av-hi-subj".into(), predicate: "av-hi-pred".into() },
+            close_at + chrono::Duration::seconds(3),
+        )
+        .expect("av9: query_history must not error");
+    assert_eq!(qh_resp.entries.len(), 2, "av9: history must show both the bounded incumbent and the challenger");
+    let incumbent_entry = qh_resp.entries.iter().find(|e| e.claim_ref == incumbent).expect("av9: incumbent entry present");
+    assert_eq!(incumbent_entry.valid_until, Some(close_at), "av9: incumbent's history window must end exactly at the bound instant");
+    assert_ne!(incumbent_entry.status, HistoryEntryStatus::Current, "av9: bounded incumbent must not be Current");
+    let challenger_entry = qh_resp.entries.iter().find(|e| e.claim_ref == challenger).expect("av9: challenger entry present");
+    assert_eq!(challenger_entry.status, HistoryEntryStatus::Current, "av9: non-overlapping challenger must be Current");
+}
+
+/// av10: `end_fact` resolution against an empty subject-line returns `Empty`.
+#[cfg(any(test, feature = "test-support"))]
+fn av_end_fact_zero_live_returns_no_live_claim<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{assert_validity::resolve_live_claim_for_line, dto::LiveClaimResolution};
+    use crate::config::EngineConfig;
+
+    let agent = AgentId("av-conf-endfact-empty".into());
+    let config = EngineConfig::default();
+    let resolution = resolve_live_claim_for_line(store, &config, &agent, "av-ef0-subj", "av-ef0-pred", Utc::now())
+        .expect("av10: resolve must not error");
+    assert_eq!(resolution, LiveClaimResolution::Empty, "av10: an empty subject-line must resolve Empty");
+}
+
+/// av11: `end_fact` resolution against a genuinely Contested line returns `Ambiguous(n)`
+/// — never guesses which claim to close.
+#[cfg(any(test, feature = "test-support"))]
+fn av_end_fact_multiple_live_returns_ambiguous<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{assert_validity::resolve_live_claim_for_line, dto::LiveClaimResolution};
+    use crate::config::EngineConfig;
+
+    let agent = AgentId("av-conf-endfact-ambiguous".into());
+    let now = Utc::now();
+    // Two overlapping (no valid_time) claims on the same line → genuine Functional conflict.
+    av_ingest(store, &agent, "av-ef2-subj", "av-ef2-pred", serde_json::json!("a"), None, None, now - chrono::Duration::seconds(10));
+    av_ingest(store, &agent, "av-ef2-subj", "av-ef2-pred", serde_json::json!("b"), None, None, now - chrono::Duration::seconds(5));
+
+    let config = EngineConfig::default();
+    let resolution = resolve_live_claim_for_line(store, &config, &agent, "av-ef2-subj", "av-ef2-pred", now)
+        .expect("av11: resolve must not error");
+    assert_eq!(resolution, LiveClaimResolution::Ambiguous(2), "av11: a genuinely contested line must resolve Ambiguous(2), never a guessed Single; got {resolution:?}");
+}
+
+/// av12: `end_fact` resolution against a single live claim resolves it unambiguously, and
+/// `assert_validity` then bounds exactly that claim.
+#[cfg(any(test, feature = "test-support"))]
+fn av_end_fact_single_live_resolves_and_bounds<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{
+        assert_validity::{resolve_live_claim_for_line, AssertValidityUseCase},
+        dto::{AssertValidityRequest, LiveClaimResolution, ValidityAssertionInput},
+    };
+    use crate::config::EngineConfig;
+
+    let agent = AgentId("av-conf-endfact-single".into());
+    let t0 = vat_dt("2020-01-01T00:00:00Z");
+    let claim = av_ingest(store, &agent, "av-ef1-subj", "av-ef1-pred", serde_json::json!("v1"), Some(t0), None, t0 + chrono::Duration::seconds(1));
+
+    let now = t0 + chrono::Duration::seconds(2);
+    let config = EngineConfig::default();
+    let resolution = resolve_live_claim_for_line(store, &config, &agent, "av-ef1-subj", "av-ef1-pred", now)
+        .expect("av12: resolve must not error");
+    let LiveClaimResolution::Single(resolved_ref) = resolution else {
+        panic!("av12: exactly one live claim must resolve Single; got {resolution:?}");
+    };
+    assert_eq!(resolved_ref, claim, "av12: resolution must name the actual incumbent claim");
+
+    let close_at = t0 + chrono::Duration::seconds(3);
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    let resp = av_uc
+        .execute(
+            AssertValidityRequest {
+                agent_id: agent, target: resolved_ref.clone(),
+                assertion: ValidityAssertionInput::Bound { at: close_at },
+                provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+                confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            },
+            close_at + chrono::Duration::seconds(1),
+        )
+        .expect("av12: bound must succeed");
+    assert_eq!(resp.claim_ref, claim, "av12: bound must apply to the resolved incumbent");
+}
+
+/// av13 (DIAG-3 sequence): A open-ended → `end_fact(A, at=e)` → B from `e` open-ended ⇒
+/// B resolves `CommittedCheap`, belief is B, and history shows [A ended at e, B current].
+/// This is the exact regression `assert_validity` fixes (DIAG_close_incumbent.md §1).
+#[cfg(any(test, feature = "test-support"))]
+fn av_diag3_sequence_end_fact_then_challenger_is_clean_succession<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{
+        assert_validity::{resolve_live_claim_for_line, AssertValidityUseCase},
+        dto::{
+            AssertValidityRequest, LiveClaimResolution, QueryHistoryRequest, QueryMemoryRequest,
+            ValidityAssertionInput,
+        },
+        query_history::QueryHistoryUseCase,
+        query_memory::QueryMemoryUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpVector;
+    use mempill_types::{BeliefStatus, HistoryEntryStatus};
+
+    let agent = AgentId("av-conf-diag3".into());
+    let t_a = vat_dt("2021-04-01T00:00:00Z");
+    let e = vat_dt("2024-09-23T00:00:00Z");
+
+    let claim_a = av_ingest(store, &agent, "diag3-subj", "diag3-pred", serde_json::json!("Austin"), Some(t_a), None, t_a + chrono::Duration::seconds(1));
+
+    // end_fact(A, at=e): resolve then bound (mirrors the ergonomic tier's two-step, using
+    // the SAME functions the facade calls — I8 single source of truth).
+    let now = e + chrono::Duration::seconds(1);
+    let config = EngineConfig::default();
+    let resolution = resolve_live_claim_for_line(store, &config, &agent, "diag3-subj", "diag3-pred", now).expect("av13: resolve A must not error");
+    assert_eq!(resolution, LiveClaimResolution::Single(claim_a.clone()), "av13: A must be the sole live claim before end_fact");
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(), target: claim_a.clone(),
+            assertion: ValidityAssertionInput::Bound { at: e },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        now,
+    ).expect("av13: end_fact bound on A must succeed");
+
+    let claim_b = av_ingest(store, &agent, "diag3-subj", "diag3-pred", serde_json::json!("NYC"), Some(e), None, now + chrono::Duration::seconds(1));
+
+    let qm_uc = QueryMemoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config.clone());
+    let qm_resp = qm_uc.execute_with_time(
+        QueryMemoryRequest { agent_id: agent.clone(), subject: "diag3-subj".into(), predicate: "diag3-pred".into(), as_of_tx_time: None, valid_at: None },
+        now + chrono::Duration::seconds(2),
+    ).expect("av13: query_memory must not error");
+    assert_eq!(qm_resp.belief.status, BeliefStatus::Resolved, "av13: B must resolve cleanly (CommittedCheap-equivalent belief), not Contested — this is the exact DIAG-3 regression");
+    assert_eq!(qm_resp.belief.primary.as_ref().map(|b| b.fact.value.clone()), Some(serde_json::json!("NYC")), "av13: belief must be B (NYC)");
+
+    let qh_uc = QueryHistoryUseCase::new(std::sync::Arc::clone(store), None::<std::sync::Arc<NoOpVector>>, config);
+    let qh_resp = qh_uc.execute_with_time(
+        QueryHistoryRequest { agent_id: agent, subject: "diag3-subj".into(), predicate: "diag3-pred".into() },
+        now + chrono::Duration::seconds(3),
+    ).expect("av13: query_history must not error");
+    assert_eq!(qh_resp.entries.len(), 2, "av13: history must show exactly A and B — no duplicate bounded-copy row");
+    let a_entry = qh_resp.entries.iter().find(|entry| entry.claim_ref == claim_a).expect("av13: A entry present");
+    assert_eq!(a_entry.valid_until, Some(e), "av13: A's history window must end exactly at e");
+    assert_ne!(a_entry.status, HistoryEntryStatus::Current, "av13: A must not be Current after end_fact");
+    let b_entry = qh_resp.entries.iter().find(|entry| entry.claim_ref == claim_b).expect("av13: B entry present");
+    assert_eq!(b_entry.status, HistoryEntryStatus::Current, "av13: B must be Current");
 }
