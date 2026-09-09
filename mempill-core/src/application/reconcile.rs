@@ -123,12 +123,10 @@ where
                 &latest_disposition,
             );
 
-            let incumbent = fold.live_claims.first().map(truth_engine::claim_to_belief);
-
             // N-wide succession check (fixes the silent chain-overlap defect): each candidate
             // is compared against EVERY raw-live claim on this subject-line (`FoldResult::all_claims`
-            // filtered `is_live`), not just the single "current" incumbent above. Shared across
-            // every candidate on this line; `classify_conflict` filters self out internally.
+            // filtered `is_live`), not just a single "current" incumbent. Shared across every
+            // candidate on this line; `classify_conflict` filters self out internally.
             let all_live_claims: Vec<mempill_types::Claim> = fold
                 .all_claims
                 .iter()
@@ -139,6 +137,25 @@ where
             let mut per_claim = Vec::new();
             for cs in &fold.live_claims {
                 let candidate = &cs.claim;
+
+                // Per-candidate incumbent (DIAG_silent_succession §6(b)): NEVER feed the
+                // candidate itself as `incumbent` — `classify_conflict`'s step-3 same-value
+                // check (reconciler.rs:143-146) would then trivially match (identical claim),
+                // returning NoConflict/CheapPath for a claim that is genuinely part of a
+                // contested line. Choose the first OTHER live claim in `fold.live_claims`'
+                // canonical ordering-key order (I8, deterministic/arrival-independent — same
+                // order the fold itself produces) as the legacy `incumbent` field (used only
+                // for step 1's None-check and step 3's same-value check; the real N-wide
+                // conflict/succession classification below uses `all_live_claims`, not this
+                // field). `None` only when this candidate is the sole live claim on the line
+                // (must NOT be fed when len() > 1 — that would short-circuit every candidate to
+                // NoConflict at reconciler.rs:117-120).
+                let incumbent = fold
+                    .live_claims
+                    .iter()
+                    .find(|other| other.claim.claim_ref() != candidate.claim_ref())
+                    .map(truth_engine::claim_to_belief);
+
                 let proposal = reconciler::reconcile(
                     ReconcilerInput {
                         candidate,
@@ -346,9 +363,11 @@ mod tests {
     }
 
     /// Two overlapping live claims, oracle absent: pass 1 must leave BOTH live (no supersession
-    /// written), escalate exactly once (the non-self-compared candidate), and repeated calls on
-    /// unchanged state must be byte-identical (I6 idempotency) — regression for
-    /// DIAG_silent_succession (ii): `reconcile()` must never call `supersession::execute`.
+    /// written), escalate BOTH candidates (per-candidate incumbent selection, DIAG_silent_succession
+    /// §6(b) — neither candidate is ever fed itself as the incumbent, so neither trivially
+    /// self-matches on value and cheap-paths), and repeated calls on unchanged state must be
+    /// byte-identical (I6 idempotency) — regression for DIAG_silent_succession (ii): `reconcile()`
+    /// must never call `supersession::execute`.
     #[test]
     fn reconcile_overlap_pass1_contested_no_supersession_pass2_noop() {
         let store = Arc::new(SeededStore::default());
@@ -369,10 +388,14 @@ mod tests {
 
         let pass1 = uc.execute(req()).unwrap();
         assert_eq!(pass1.outcomes.len(), 2, "both live claims must produce an outcome");
-        assert_eq!(pass1.oracle_escalations, 1,
-            "exactly one candidate (the non-self-compared one) lands on HeavyPath");
-        // Neither disposition may be Superseded — reconcile() never writes supersession.
+        assert_eq!(pass1.oracle_escalations, 2,
+            "both candidates land on HeavyPath — neither is ever compared against itself as \
+             incumbent, so neither can trivially same-value-match and cheap-path (DIAG §6(b))");
+        // Neither disposition may be CommittedCheap or Superseded — a genuinely contested line
+        // must never resolve silently, and reconcile() never writes supersession.
         for (_, disposition) in &pass1.outcomes {
+            assert_ne!(*disposition, mempill_types::Disposition::CommittedCheap,
+                "a claim on a genuinely contested line must never resolve to CommittedCheap");
             assert_ne!(*disposition, mempill_types::Disposition::Superseded,
                 "reconcile() must NEVER supersede an incumbent (A6) — only submit_adjudication may");
         }

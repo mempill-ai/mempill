@@ -1798,6 +1798,56 @@ where
         "dscope[wa1]: reconcile must process live claim D; outcomes={:?}",
         reconcile_resp.outcomes
     );
+    // Disposition + escalation-count: D is the SOLE live claim on this subject-line (C is
+    // Superseded) — no genuine conflict, so D must resolve CommittedCheap with zero escalations.
+    let d_disposition = reconcile_resp.outcomes.iter()
+        .find(|(r, _)| *r == ref_d)
+        .map(|(_, d)| d.clone())
+        .expect("dscope[wa1]: D must be present in reconcile outcomes");
+    assert_eq!(
+        d_disposition, Disposition::CommittedCheap,
+        "dscope[wa1]: sole live claim D (no other live claim to conflict with) must resolve CommittedCheap"
+    );
+    assert_eq!(
+        reconcile_resp.oracle_escalations, 0,
+        "dscope[wa1]: no genuine conflict on this subject-line — zero HeavyPath escalations expected"
+    );
+    // No supersession edge/ledger row written BY reconcile (A6/I7): reconcile() never calls
+    // supersession::execute. C's Superseded entry was written directly by the test setup
+    // above, not by reconcile — the ledger for both C and D must gain exactly the
+    // AdjudicationResolved rows reconcile itself appends, nothing else.
+    let edges_d = store.load_edges_for(&agent, &ref_d).expect("dscope[wa1]: load_edges_for D");
+    assert!(edges_d.is_empty(), "dscope[wa1]: reconcile() must never write a supersession edge — found {} edge(s) on D", edges_d.len());
+    let ledger_d_after = store.load_ledger_for_claims(&agent, &[ref_d.clone()], None).expect("dscope[wa1]: load ledger D after reconcile");
+    assert!(
+        ledger_d_after.iter().all(|e| e.event_kind != LedgerEventKind::ValidityAsserted),
+        "dscope[wa1]: reconcile() must never append a ValidityAsserted (supersession) ledger row"
+    );
+    // Post-state belief: query_memory on this subject-line must agree with reconcile's view —
+    // D is the sole live, uncontested claim, so query_memory must resolve to D, never Contested.
+    let qm_uc = crate::application::query_memory::QueryMemoryUseCase::new(
+        Arc::clone(&store_arc),
+        None::<Arc<crate::noop::NoOpVector>>,
+        config.clone(),
+    );
+    let qm_resp = qm_uc
+        .execute_with_time(
+            crate::application::dto::QueryMemoryRequest {
+                agent_id: agent.clone(),
+                subject: "wa-reconcile-subject".into(),
+                predicate: "wa-predicate".into(),
+                as_of_tx_time: None,
+                valid_at: None,
+            },
+            Utc::now(),
+        )
+        .expect("dscope[wa1]: query_memory must not error");
+    assert_ne!(
+        qm_resp.belief.status, mempill_types::BeliefStatus::Contested,
+        "dscope[wa1]: query_memory must agree with reconcile's uncontested view of D"
+    );
+    let qm_primary = qm_resp.belief.primary.as_ref().expect("dscope[wa1]: query_memory primary must be present for D");
+    assert_eq!(qm_primary.claim_ref, ref_d, "dscope[wa1]: query_memory primary must be D, matching reconcile's live-claim view");
 
     // ── 4/5. submit_adjudication + sweep_adjudications: state-guard idempotency. ──────
     // A challenger claim E is QueuedForAdjudication in the ledger. A duplicate/late
@@ -2037,6 +2087,243 @@ where
         !reverted,
         "dscope[wa1]: sweep_adjudications must correctly see E's CURRENT resolved disposition \
          despite >10k noise ledger rows and skip the stale revert (idempotency guard)"
+    );
+}
+
+// ── DIAG_silent_succession §6(b) — reconcile incumbent-selection conformance ──────────────
+
+/// Cross-adapter conformance: for a genuine 2-claim overlap, `reconcile`'s per-candidate
+/// disposition view must AGREE with `query_memory`'s primary/status view.
+///
+/// Regression for DIAG_silent_succession §6(b): `reconcile.rs`'s per-subject-line
+/// `incumbent` used to be a single `fold.live_claims.first()` shared across every
+/// candidate; when the candidate under evaluation WAS that claim, `classify_conflict`'s
+/// step-3 same-value check trivially matched (identical claim) and cheap-pathed a
+/// genuinely contested line into a silent `CommittedCheap`. `reconcile` now selects a
+/// per-candidate incumbent that is NEVER the candidate itself, so both candidates on a
+/// true overlap must escalate, and `query_memory` must show `Contested` / `primary: None`
+/// — never a mismatch where reconcile reports one candidate resolved while the read path
+/// still sees a contested line.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_reconcile_incumbent_selection_matches_query_memory_primary_conformance<P>(
+    store: &std::sync::Arc<P>,
+) where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use std::sync::Arc;
+
+    use crate::application::{
+        dto::{QueryMemoryRequest, ReconcileRequest},
+        query_memory::QueryMemoryUseCase,
+        reconcile::ReconcileUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::{NoOpOracle, NoOpVector};
+    use mempill_types::BeliefStatus;
+
+    let agent = AgentId("conformance-reconcile-incumbent-selection".into());
+    // Both claims tx-stamped strictly in the PAST (not `+ duration`, which would place a
+    // claim's transaction_time in the future relative to the later as_of=now cutoff used
+    // by query_memory below, silently excluding it from tx-time visibility).
+    let tx = Utc::now() - chrono::Duration::seconds(10);
+    let claim_a = make_vt_free_claim(&agent, "ri-subj", "ri-pred", serde_json::json!("Alice"), tx);
+    let claim_b = make_vt_free_claim(&agent, "ri-subj", "ri-pred", serde_json::json!("Bob"), tx + chrono::Duration::seconds(1));
+    let mut txn = store.begin_atomic(&agent).expect("ri: begin");
+    store.append_claim(&mut txn, &claim_a).expect("ri: append a");
+    store.append_claim(&mut txn, &claim_b).expect("ri: append b");
+    store.commit(txn).expect("ri: commit");
+
+    let config = EngineConfig::default();
+    let reconcile_uc = ReconcileUseCase::new(Arc::clone(store), None::<Arc<NoOpOracle>>, config.clone());
+    let resp = reconcile_uc
+        .execute(ReconcileRequest {
+            agent_id: agent.clone(),
+            subject_lines: vec![("ri-subj".into(), "ri-pred".into())],
+        })
+        .expect("ri: reconcile must not error");
+    assert_eq!(resp.outcomes.len(), 2, "ri: both live claims must produce an outcome");
+    assert_eq!(
+        resp.oracle_escalations, 2,
+        "ri: BOTH candidates must escalate — per-candidate incumbent selection never \
+         feeds a candidate itself as its own incumbent (DIAG §6(b))"
+    );
+    for (r, disposition) in &resp.outcomes {
+        assert_ne!(
+            *disposition,
+            Disposition::CommittedCheap,
+            "ri: claim {r:?} on a genuinely contested line must never resolve CommittedCheap"
+        );
+    }
+
+    let qm_uc = QueryMemoryUseCase::new(Arc::clone(store), None::<Arc<NoOpVector>>, config);
+    let qm_resp = qm_uc
+        .execute_with_time(
+            QueryMemoryRequest {
+                agent_id: agent,
+                subject: "ri-subj".into(),
+                predicate: "ri-pred".into(),
+                as_of_tx_time: None,
+                valid_at: None,
+            },
+            Utc::now(),
+        )
+        .expect("ri: query_memory must not error");
+    assert_eq!(
+        qm_resp.belief.status,
+        BeliefStatus::Contested,
+        "ri: query_memory must agree with reconcile's contested view — neither candidate \
+         resolved CommittedCheap, so the read path must also see Contested"
+    );
+    assert!(
+        qm_resp.belief.primary.is_none(),
+        "ri: query_memory primary must be null on a Contested line, matching reconcile's view"
+    );
+}
+
+/// Cross-adapter conformance: sweeping an EXPIRED pending row reverts the challenger to
+/// `Contested` and writes NO supersession (no Bound assertion, no edge) on the incumbent;
+/// supersession (incumbent → Superseded, challenger → CommittedCheap) happens ONLY when
+/// `submit_adjudication` is explicitly called with an `Affirm` verdict. Proves
+/// DIAG_silent_succession §6(b)'s "gate supersession::execute on a resolved disposition,
+/// never on Contested/QueuedForAdjudication" contract end-to-end, cross-adapter.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_conformance<P>(
+    store: &std::sync::Arc<P>,
+) where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use std::sync::{Arc, Mutex};
+
+    use crate::application::{
+        submit_adjudication::SubmitAdjudicationUseCase, sweep_adjudications::SweepAdjudicationsUseCase,
+    };
+    use crate::engine_handle::{ErasedPendingStore, ErasedPendingStoreAdapter};
+    use crate::ports::pending_adjudication::{
+        OrphanedQueuedClaim, PendingAdjudicationPort, PendingAdjudicationRow,
+    };
+
+    let agent = AgentId("conformance-sweep-then-affirm".into());
+
+    // Incumbent I, live and CommittedCheap.
+    let incumbent = make_claim(&agent, "sweep-affirm-subj", "sweep-affirm-pred");
+    let ref_incumbent = incumbent.claim_ref().clone();
+    let mut txn = store.begin_atomic(&agent).expect("swpaff: begin incumbent");
+    store.append_claim(&mut txn, &incumbent).expect("swpaff: append incumbent");
+    store
+        .append_ledger_entry(&mut txn, &make_ledger_entry(&agent, &ref_incumbent))
+        .expect("swpaff: incumbent ledger");
+    store.commit(txn).expect("swpaff: commit incumbent");
+
+    // Challenger #1: QueuedForAdjudication, EXPIRED pending row → sweep must only revert.
+    let challenger1 = make_claim(&agent, "sweep-affirm-subj", "sweep-affirm-pred");
+    let ref_challenger1 = challenger1.claim_ref().clone();
+    let queued1 = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent.clone(), claim_ref: ref_challenger1.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::QueuedForAdjudication, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let mut txn = store.begin_atomic(&agent).expect("swpaff: begin c1");
+    store.append_claim(&mut txn, &challenger1).expect("swpaff: append c1");
+    store.append_ledger_entry(&mut txn, &queued1).expect("swpaff: queued c1");
+    store.commit(txn).expect("swpaff: commit c1");
+
+    struct NoopPending;
+    impl PendingAdjudicationPort for NoopPending {
+        type Error = std::io::Error;
+        fn insert_pending(&self, _row: &PendingAdjudicationRow) -> Result<(), Self::Error> { Ok(()) }
+        fn get_pending(&self, _handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { Ok(None) }
+        fn list_pending(&self, _agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn list_expired(&self, _now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn mark_resolved(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> { Ok(()) }
+        fn mark_expired(&self, _handle_id: uuid::Uuid) -> Result<(), Self::Error> { Ok(()) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { Ok(vec![]) }
+    }
+    let erased_noop: Arc<dyn ErasedPendingStore> = Arc::new(ErasedPendingStoreAdapter::new(NoopPending));
+    let sweep_uc = SweepAdjudicationsUseCase::new(Arc::clone(store), erased_noop);
+
+    let row1 = PendingAdjudicationRow {
+        handle_id: Uuid::new_v4(), agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into(),
+        challenger_claim_ref: ref_challenger1.clone(), incumbent_claim_ref: ref_incumbent.clone(),
+        request_payload: mempill_types::AdjudicationRequest {
+            subject_line: mempill_types::SubjectLineRef { agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into() },
+            incumbent: mempill_types::Belief { claim_ref: ref_incumbent.clone(), fact: incumbent.fact().clone(), provenance: incumbent.provenance().clone(), valid_time: incumbent.valid_time().clone(), transaction_time: incumbent.transaction_time().clone(), confidence: incumbent.confidence().clone(), currency_signal: mempill_types::CurrencySignal { last_refreshed_at: incumbent.transaction_time().clone(), state: mempill_types::CurrencyState::Fresh, corroboration_count: 0 }, criticality: incumbent.criticality().clone() },
+            challenger: challenger1.clone(), criticality: Criticality::Medium, reason: mempill_types::OverturnReason::ExternalContradiction,
+        },
+        queued_at: Utc::now() - chrono::Duration::seconds(10), expires_at: Some(Utc::now() - chrono::Duration::seconds(1)), status: "pending".into(),
+    };
+
+    let reverted = sweep_uc.revert_expired_row(&row1, Utc::now()).expect("swpaff: revert_expired_row must not error");
+    assert!(reverted, "swpaff: expired row must be reverted");
+
+    // Challenger #1 must now be Contested — NEVER Superseded/CommittedCheap; and the
+    // INCUMBENT must be untouched (still live, no Bound assertion, no edge).
+    let ledger_c1 = store.load_ledger_for_claims(&agent, &[ref_challenger1.clone()], None).expect("swpaff: ledger c1");
+    let latest_c1 = ledger_c1.iter().max_by_key(|e| e.recorded_at.0).expect("swpaff: c1 ledger non-empty");
+    assert_eq!(latest_c1.disposition, Disposition::Contested, "swpaff: sweep must revert the challenger to Contested, never resolve it");
+    let assertions_incumbent = store.load_validity_assertions_for(&agent, &ref_incumbent).expect("swpaff: incumbent assertions after sweep");
+    assert!(assertions_incumbent.is_empty(), "swpaff: sweep must NEVER write a Bound (supersession) assertion on the incumbent");
+    let edges_incumbent = store.load_edges_for(&agent, &ref_incumbent).expect("swpaff: incumbent edges after sweep");
+    assert!(edges_incumbent.is_empty(), "swpaff: sweep must NEVER write a supersession edge on the incumbent");
+
+    // Challenger #2: QueuedForAdjudication with a LIVE (non-expired) pending row —
+    // submit_adjudication(Affirm) is the ONLY path that may supersede the incumbent.
+    let challenger2 = make_claim(&agent, "sweep-affirm-subj", "sweep-affirm-pred");
+    let ref_challenger2 = challenger2.claim_ref().clone();
+    let queued2 = LedgerEntry { entry_id: Uuid::new_v4(), agent_id: agent.clone(), claim_ref: ref_challenger2.clone(), event_kind: LedgerEventKind::ClaimCommitted, disposition: Disposition::QueuedForAdjudication, rationale: None, recorded_at: TransactionTime(Utc::now()) };
+    let mut txn = store.begin_atomic(&agent).expect("swpaff: begin c2");
+    store.append_claim(&mut txn, &challenger2).expect("swpaff: append c2");
+    store.append_ledger_entry(&mut txn, &queued2).expect("swpaff: queued c2");
+    store.commit(txn).expect("swpaff: commit c2");
+
+    let handle2 = Uuid::new_v4();
+    struct StubPendingStore { rows: Mutex<Vec<PendingAdjudicationRow>> }
+    impl PendingAdjudicationPort for StubPendingStore {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> { self.rows.lock().unwrap().push(row.clone()); Ok(()) }
+        fn get_pending(&self, handle_id: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { Ok(self.rows.lock().unwrap().iter().find(|r| r.handle_id == handle_id).cloned()) }
+        fn list_pending(&self, _agent_id: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(self.rows.lock().unwrap().clone()) }
+        fn list_expired(&self, _now: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { Ok(vec![]) }
+        fn mark_resolved(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> { for r in self.rows.lock().unwrap().iter_mut() { if r.handle_id == handle_id { r.status = "resolved".into(); } } Ok(()) }
+        fn mark_expired(&self, handle_id: uuid::Uuid) -> Result<(), Self::Error> { for r in self.rows.lock().unwrap().iter_mut() { if r.handle_id == handle_id { r.status = "expired".into(); } } Ok(()) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { Ok(vec![]) }
+    }
+    let dummy_req2 = mempill_types::AdjudicationRequest {
+        subject_line: mempill_types::SubjectLineRef { agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into() },
+        incumbent: mempill_types::Belief { claim_ref: ref_incumbent.clone(), fact: incumbent.fact().clone(), provenance: incumbent.provenance().clone(), valid_time: incumbent.valid_time().clone(), transaction_time: incumbent.transaction_time().clone(), confidence: incumbent.confidence().clone(), currency_signal: mempill_types::CurrencySignal { last_refreshed_at: incumbent.transaction_time().clone(), state: mempill_types::CurrencyState::Fresh, corroboration_count: 0 }, criticality: incumbent.criticality().clone() },
+        challenger: challenger2.clone(), criticality: Criticality::Medium, reason: mempill_types::OverturnReason::ExternalContradiction,
+    };
+    let pending_store2 = Arc::new(StubPendingStore { rows: Mutex::new(vec![PendingAdjudicationRow {
+        handle_id: handle2, agent_id: agent.clone(), subject: "sweep-affirm-subj".into(), predicate: "sweep-affirm-pred".into(),
+        challenger_claim_ref: ref_challenger2.clone(), incumbent_claim_ref: ref_incumbent.clone(), request_payload: dummy_req2,
+        queued_at: Utc::now(), expires_at: None, status: "pending".into(),
+    }]) });
+    struct Wrapper2(Arc<StubPendingStore>);
+    impl PendingAdjudicationPort for Wrapper2 {
+        type Error = std::io::Error;
+        fn insert_pending(&self, row: &PendingAdjudicationRow) -> Result<(), Self::Error> { self.0.insert_pending(row) }
+        fn get_pending(&self, h: uuid::Uuid) -> Result<Option<PendingAdjudicationRow>, Self::Error> { self.0.get_pending(h) }
+        fn list_pending(&self, a: Option<&AgentId>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { self.0.list_pending(a) }
+        fn list_expired(&self, n: chrono::DateTime<Utc>) -> Result<Vec<PendingAdjudicationRow>, Self::Error> { self.0.list_expired(n) }
+        fn mark_resolved(&self, h: uuid::Uuid) -> Result<(), Self::Error> { self.0.mark_resolved(h) }
+        fn mark_expired(&self, h: uuid::Uuid) -> Result<(), Self::Error> { self.0.mark_expired(h) }
+        fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { self.0.list_queued_orphan_claims() }
+    }
+    let erased2: Arc<dyn ErasedPendingStore> = Arc::new(ErasedPendingStoreAdapter::new(Wrapper2(Arc::clone(&pending_store2))));
+    let submit_uc = SubmitAdjudicationUseCase::new(Arc::clone(store), Arc::clone(&erased2));
+
+    let response2 = mempill_types::AdjudicationResponse { handle_id: handle2, verdict: mempill_types::AdjudicationVerdict::Affirm, evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand) };
+    let outcome2 = submit_uc.execute(handle2, response2, Utc::now()).expect("swpaff: submit_adjudication(Affirm) must not error");
+    assert_eq!(outcome2.disposition, Disposition::CommittedCheap, "swpaff: Affirm must commit the challenger");
+
+    // NOW, and ONLY now, the incumbent must be Superseded: Bound assertion present.
+    let assertions_incumbent_after = store.load_validity_assertions_for(&agent, &ref_incumbent).expect("swpaff: incumbent assertions after affirm");
+    assert!(
+        assertions_incumbent_after.iter().any(|a| matches!(a.kind, mempill_types::AssertionKind::Bound { .. })),
+        "swpaff: submit_adjudication(Affirm) must write the Bound (supersession) assertion on \
+         the incumbent — the ONLY path that may"
+    );
+    let ledger_incumbent_after = store.load_ledger_for_claims(&agent, &[ref_incumbent.clone()], None).expect("swpaff: incumbent ledger after affirm");
+    assert!(
+        ledger_incumbent_after.iter().any(|e| e.event_kind == LedgerEventKind::ValidityAsserted && e.disposition == Disposition::Superseded),
+        "swpaff: submit_adjudication(Affirm) must append a Superseded ValidityAsserted ledger row for the incumbent"
     );
 }
 

@@ -92,7 +92,9 @@ Version headings are dated at publish time. A version with no date and the
   entry's window is narrowed by a successor only when the two form a genuine
   non-overlapping succession, and endpoint precision follows whichever claim supplied the
   endpoint. History status gains `Contested` and `Ended`; `Current` now means live,
-  unconflicted, and in effect at the query instant.
+  unconflicted, and in effect at the query instant. Consumer-visible value change:
+  entries that were closed by a clean succession (never explicitly time-bounded) and
+  previously reported status `Superseded` now report `Ended`.
 - Succession classification now checks a new claim against every live claim on the
   subject line, not only the one in effect now; a claim overlapping any live incumbent is
   `Contested` instead of being committed as a succession.

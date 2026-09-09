@@ -109,7 +109,8 @@ pub(crate) fn reconcile(input: ReconcilerInput<'_>, _config: &EngineConfig) -> P
 /// 2. derived_from intersects superseded_claim_refs → DependsOnSuperseded.
 /// 3. Same (subject, predicate) + same JSON value → NoConflict (idempotent re-statement).
 /// 4. Same (subject, predicate) + different value:
-///    4a. Exactly ONE live incumbent + both windows trusted-non-overlapping → Succession.
+///    4a. Candidate forms a trusted, pairwise-non-overlapping succession against EVERY OTHER
+///        raw-live claim on the subject-line (N-wide, not just one incumbent) → Succession.
 ///    4b. Otherwise → SameLineConflict.
 /// 5. Different predicate (on same subject) with mutual exclusion → CrossLineConflict.
 /// 6. Different predicate without mutual exclusion → NoConflict.
