@@ -107,6 +107,15 @@ async fn sqlite_oc_01_affirm_challenger_wins() {
     oc::scenario_affirm_challenger_wins_with_handle(&engine, handle_id).await;
 }
 
+/// TASK-33-W5-LIB B: Affirm bounds the incumbent at the winning challenger's valid-time
+/// start, not tx_time — Diane/Joan scenario (DIAG-4 finding B).
+#[tokio::test]
+async fn sqlite_oc_01b_affirm_bounds_incumbent_at_challenger_valid_time_start() {
+    let handle_id = uuid::Uuid::new_v4();
+    let engine = build_engine(handle_id);
+    oc::scenario_affirm_bounds_incumbent_at_challenger_valid_time_start_with_handle(&engine, handle_id).await;
+}
+
 // ── Sub-test 2: Deny ──────────────────────────────────────────────────────────
 
 #[tokio::test]

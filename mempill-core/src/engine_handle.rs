@@ -491,6 +491,7 @@ where
         let uc = SubmitAdjudicationUseCase::new(
             Arc::clone(&self.persistence),
             pending_store_arc2,
+            self.config.clone(),
         );
         task::spawn_blocking(move || uc.execute(handle_id, response, now))
             .await
