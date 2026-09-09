@@ -233,10 +233,11 @@ impl PyOracleEngine {
     /// `request` must be a dict with: agent_id, subject, predicate.
     ///
     /// Returns a dict with `entries` — all claims ordered oldest→newest, each tagged
-    /// with `status` ("Current" or "Superseded"), `value`, `valid_from`, `valid_until`,
-    /// `provenance`, `value_confidence`, and `claim_ref`. Each entry also includes
-    /// `valid_from_display` / `valid_until_display` and `valid_from_granularity` /
-    /// `valid_until_granularity` (see `PyEngine.query_history` for details).
+    /// with `status` ("Current" | "Superseded" | "Contested" | "Ended"), `value`,
+    /// `valid_from`, `valid_until`, `provenance`, `value_confidence`, and `claim_ref`.
+    /// Each entry also includes `valid_from_display` / `valid_until_display` and
+    /// `valid_from_granularity` / `valid_until_granularity` (see `PyEngine.query_history`
+    /// for the full status/granularity contract).
     #[pyo3(signature = (request))]
     fn query_history<'py>(
         &self,

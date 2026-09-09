@@ -180,8 +180,9 @@ fn enrich_history_entry(e: HistoryEntry) -> EnrichedHistoryEntry {
 /// `valid_from_display` and `valid_until_display` on every entry.
 ///
 /// Mirrors [`enrich_query_memory`]: same rendering helper, same additive-field
-/// contract. `status` (`HistoryEntryStatus::Current` / `Superseded`) is forwarded
-/// unchanged inside each entry via `#[serde(flatten)]`.
+/// contract. `status` (`HistoryEntryStatus::Current` / `Superseded` / `Contested` /
+/// `Ended`) is forwarded unchanged inside each entry via `#[serde(flatten)]` — no
+/// shape change; the two new variants flow through automatically.
 pub fn enrich_query_history(resp: QueryHistoryResponse) -> EnrichedQueryHistoryResponse {
     EnrichedQueryHistoryResponse {
         entries: resp.entries.into_iter().map(enrich_history_entry).collect(),
