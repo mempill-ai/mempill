@@ -167,10 +167,20 @@ where
             &self.config,
             &latest_disposition,
         );
-        let n_live_incumbents = fold_result.live_claims.len();
         let incumbent_belief = fold_result.live_claims.first().map(|cs| {
             truth_engine::claim_to_belief(cs)
         });
+
+        // N-wide succession check (fixes the silent chain-overlap defect): the challenger must
+        // be a trusted, non-overlapping succession against EVERY raw-live claim on this
+        // subject-line, not just the single "current" incumbent. `all_claims` is the fold's RAW
+        // (pre-narrowing) liveness set — see `FoldResult::all_claims` docs.
+        let all_live_claims: Vec<mempill_types::Claim> = fold_result
+            .all_claims
+            .iter()
+            .filter(|cs| cs.is_live)
+            .map(|cs| cs.claim.clone())
+            .collect();
 
         let oracle_present = self.oracle.is_some();
         let proposal = reconciler::reconcile(
@@ -182,7 +192,7 @@ where
                 cardinality_proposal: req.cardinality.clone(),
                 oracle_present,
                 succession_threshold: self.config.valid_time_confidence_threshold,
-                n_gt_1_live_incumbents: n_live_incumbents > 1,
+                all_live_claims: &all_live_claims,
             },
             &self.config,
         );

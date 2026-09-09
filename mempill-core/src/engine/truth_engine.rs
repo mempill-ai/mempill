@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use mempill_types::{
     AssertionKind, Belief, BeliefStatus, Cardinality, Claim, ClaimRef, CurrencySignal,
-    CurrencyState, Disposition, StalenessFlag, ValidityAssertion,
+    CurrencyState, DateGranularity, Disposition, StalenessFlag, ValidityAssertion,
 };
 
 use crate::config::EngineConfig;
@@ -54,6 +54,7 @@ fn is_non_live_disposition(d: &Disposition) -> bool {
 #[derive(Debug, Clone)]
 pub(crate) struct FoldResult {
     /// Canonically ordered live claims (not bounded at `as_of_tx_time`).
+    /// Narrowed by step 4 valid-time instant-selection when a trusted succession is detected.
     pub live_claims: Vec<ClaimWithStatus>,
     /// True when ≥ 2 live claims conflict on the same subject-line without resolution.
     pub has_conflict: bool,
@@ -61,6 +62,18 @@ pub(crate) struct FoldResult {
     /// from a trusted succession to a single claim matching the query instant via valid-time instant-selection.
     /// When true, `has_conflict` is always false and `live_claims.len()` is 0 or 1.
     pub succession_selected: bool,
+    /// Full sorted claim set (canonical ordering key) with RAW liveness flags —
+    /// tx-time visibility (`is_claim_live`) AND disposition filter only (step 2 below),
+    /// captured BEFORE step 4's succession-narrowing.
+    ///
+    /// Deliberately RAW, not the narrowed `live_claims` set: consumers that need to know
+    /// "is this the currently-selected succession member" derive that separately via an
+    /// O(1) membership check against `live_claims` — this field is the single source of
+    /// truth for "was this claim ever excluded by an explicit Bound/disposition", used by
+    /// both the write-path succession classifier (checks a challenger against every raw-live
+    /// claim, not just the narrowed current one) and the history read-path (which must show
+    /// every claim's own window, honest liveness, and conflict signal).
+    pub all_claims: Vec<ClaimWithStatus>,
 }
 
 /// A claim with its resolved live/bounded status at the fold's `as_of_tx_time`.
@@ -86,7 +99,7 @@ pub(crate) struct ClaimWithStatus {
 /// The tertiary tie-breaker is the ClaimRef UUID to guarantee total order even with
 /// equal timestamps.
 /// Returns `(primary_key, tx_time_fallback, uuid_tiebreaker)` for deterministic total order.
-fn ordering_key(claim: &Claim, config: &EngineConfig) -> (DateTime<Utc>, DateTime<Utc>, u128) {
+pub(crate) fn ordering_key(claim: &Claim, config: &EngineConfig) -> (DateTime<Utc>, DateTime<Utc>, u128) {
     let primary = if claim.valid_time().valid_time_confidence >= config.valid_time_confidence_threshold {
         claim.valid_time().start.unwrap_or(claim.transaction_time().0)
     } else {
@@ -188,7 +201,7 @@ where
     //   (a) it is not bounded by a ValidityAssertion (tx-time visibility filter applied first), AND
     //   (b) its latest ledger disposition is NOT one of the non-live dispositions
     //       (Quarantined, Superseded, Invalidated, Rejected).
-    let mut with_status: Vec<ClaimWithStatus> = claims
+    let with_status: Vec<ClaimWithStatus> = claims
         .into_iter()
         .map(|c| {
             let last_disp = latest_disposition.get(c.claim_ref()).cloned();
@@ -206,6 +219,12 @@ where
             }
         })
         .collect();
+
+    // Capture the RAW (pre-narrowing) sorted claim set with tx-time + disposition liveness
+    // flags for `FoldResult.all_claims` — this is the single source of truth consumed by both
+    // the write-path succession classifier (reconciler.rs) and the history read-path
+    // (query_history.rs). Must be captured HERE, before step 4 narrows `live_claims`.
+    let all_claims = with_status.clone();
 
     // Step 3 — collect live claims in canonical order.
     let live_claims: Vec<ClaimWithStatus> = with_status
@@ -272,12 +291,7 @@ where
         live_claims.iter().any(|c| *c.claim.cardinality() != Cardinality::SetValued)
     });
 
-    // Update the mutable with_status for completeness (not used beyond FoldResult here).
-    for cs in &mut with_status {
-        cs.is_live = live_claims.iter().any(|lc| lc.claim.claim_ref() == cs.claim.claim_ref());
-    }
-
-    FoldResult { live_claims, has_conflict, succession_selected }
+    FoldResult { live_claims, has_conflict, succession_selected, all_claims }
 }
 
 // ── Build a Belief from a ClaimWithStatus ────────────────────────────────────
@@ -340,6 +354,118 @@ pub(crate) fn fold_staleness(fold: &FoldResult) -> StalenessFlag {
     } else {
         StalenessFlag { is_stale: false, reason: None }
     }
+}
+
+// ── History windows (engine layer — single source of truth for query_history) ─
+
+/// Effective window for one `HistoryEntry` slot, computed by [`compute_history_windows`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HistoryWindow {
+    /// Effective end of this entry's valid-time window (see module docs for derivation).
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Granularity of whichever timestamp produced `valid_until` (own end, or successor's start).
+    pub valid_until_granularity: Option<DateGranularity>,
+    /// True when this entry is part of a structural (`has_conflict`) or pairwise valid-time
+    /// overlap — the single Contested signal query_history surfaces.
+    pub contested: bool,
+    /// True when `now` falls within `[valid_from, valid_until)` (half-open; open ends always match).
+    pub contains_now: bool,
+}
+
+/// The primary ordering-key component + its display granularity, for one claim.
+///
+/// Mirrors `ordering_key`'s primary-component rule exactly (valid_time_start when confidence
+/// meets the threshold AND start is present, else transaction_time), but additionally tracks
+/// the honest source granularity — `None` whenever the value came from a transaction-time
+/// fallback (no user-supplied date precision) or the claim's own confidence is below threshold.
+fn primary_key_and_granularity(claim: &Claim, config: &EngineConfig) -> (DateTime<Utc>, Option<DateGranularity>) {
+    let vt = claim.valid_time();
+    if vt.valid_time_confidence >= config.valid_time_confidence_threshold {
+        match vt.start {
+            Some(s) => (s, vt.start_granularity),
+            None => (claim.transaction_time().0, None),
+        }
+    } else {
+        (claim.transaction_time().0, None)
+    }
+}
+
+/// Compute the effective history window for every entry in `all_claims` (already sorted by the
+/// canonical ordering key — the SAME sort `fold` itself performs).
+///
+/// PURE, engine-layer: reuses `valid_time_helpers::claim_is_trusted` / `windows_non_overlapping`
+/// — the SAME primitives `fold`'s own succession narrowing uses — so history windows and belief
+/// selection can never drift (I8 single source of truth).
+///
+/// Semantics (see `mempill-core` TASK-33 architecture docs for the full derivation):
+/// - Own `valid_time.end` is honoured whenever present; it is narrowed by a successor's
+///   ordering key only via `min()`, never discarded outright.
+/// - A trusted pairwise OVERLAP with the (skip-duplicate) successor marks BOTH the window
+///   (own end, not narrowed) and `contested = true` — no silent narrowing over a real conflict.
+/// - `contested` also incorporates the fold-wide `has_conflict` signal for any RAW-live entry —
+///   the single conflict signal in the system (I7), not re-derived here.
+/// - Duplicate adjacent ordering keys (same displayed instant) are skipped: the "successor" for
+///   window purposes is always the next entry with a STRICTLY later primary key, eliminating
+///   zero-length windows without a schema change.
+pub(crate) fn compute_history_windows(
+    all_claims: &[ClaimWithStatus],
+    has_conflict: bool,
+    now: DateTime<Utc>,
+    config: &EngineConfig,
+) -> Vec<HistoryWindow> {
+    let threshold = config.valid_time_confidence_threshold;
+    let n = all_claims.len();
+    let mut out = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let claim = &all_claims[i].claim;
+        let (my_key, _) = primary_key_and_granularity(claim, config);
+
+        // Skip-duplicate successor lookup: next entry with a STRICTLY later primary key.
+        let succ_idx = ((i + 1)..n).find(|&j| {
+            let (jk, _) = primary_key_and_granularity(&all_claims[j].claim, config);
+            jk > my_key
+        });
+
+        let own_end = claim.valid_time().end;
+        let own_end_gran = claim.valid_time().end_granularity;
+
+        let (valid_until, valid_until_granularity, pairwise_overlap) = match succ_idx {
+            None => (own_end, own_end_gran, false),
+            Some(j) => {
+                let succ = &all_claims[j].claim;
+                let both_trusted = valid_time_helpers::claim_is_trusted(claim, threshold)
+                    && valid_time_helpers::claim_is_trusted(succ, threshold);
+                let overlapping = both_trusted && !valid_time_helpers::windows_non_overlapping(claim, succ);
+                match own_end {
+                    Some(oe) if overlapping => (Some(oe), own_end_gran, true),
+                    Some(oe) => {
+                        let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
+                        if oe <= succ_key {
+                            (Some(oe), own_end_gran, false)
+                        } else {
+                            (Some(succ_key), succ_gran, false)
+                        }
+                    }
+                    None if overlapping => (None, None, true),
+                    None => {
+                        let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
+                        (Some(succ_key), succ_gran, false)
+                    }
+                }
+            }
+        };
+
+        let contested = pairwise_overlap || (all_claims[i].is_live && has_conflict);
+
+        let start_ok = claim.valid_time().start.is_none_or(|s| now >= s);
+        let end_ok = valid_until.is_none_or(|vu| now < vu);
+        let contains_now = start_ok && end_ok;
+
+        out.push(HistoryWindow { valid_until, valid_until_granularity, contested, contains_now });
+    }
+
+    out
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

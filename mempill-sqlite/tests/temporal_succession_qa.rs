@@ -305,6 +305,91 @@ async fn test2_genuine_conflict_overlapping_validity_contested() {
               Fix did NOT regress conflict surfacing.");
 }
 
+// ── TEST 2b: 3-claim variant — challenger overlaps a NON-current chain member ──
+//
+// Regression for DIAG_silent_succession (i): a challenger that is non-overlapping against
+// only the "current" member of an existing trusted succession chain, but genuinely overlaps
+// an EARLIER (non-current) member, must be Contested — never silently cheap-pathed as a
+// Succession. The 2-claim reconciler (pre-fix) only ever compared against the single
+// narrowed incumbent and missed this.
+#[tokio::test]
+async fn test2b_genuine_conflict_three_claim_chain_overlap() {
+    let engine = open_default_in_memory().expect("in-memory engine must open");
+    let agent = AgentId("qa-chain-overlap-agent".into());
+
+    let confident = |start: &str, end: Option<&str>| -> ValidTime {
+        ValidTime {
+            start: Some(start.parse().expect("valid rfc3339")),
+            end: end.map(|e| e.parse().expect("valid rfc3339")),
+            valid_time_confidence: 0.9,
+            start_granularity: None,
+            end_granularity: None,
+        }
+    };
+
+    // Linda [2024-09-23, 2026-01-24) -> John [2026-01-24, ∞): clean trusted succession.
+    engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("linda"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(confident("2024-09-23T00:00:00Z", Some("2026-01-24T00:00:00Z"))),
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.expect("linda ingest must succeed");
+
+    let resp_john = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("john"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(confident("2026-01-24T00:00:00Z", None)),
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.expect("john ingest must succeed");
+    assert_eq!(resp_john.disposition, Disposition::CommittedCheap,
+        "TEST2b: John forms a clean trusted succession against Linda → CommittedCheap");
+
+    // Joan [2024-09-01, 2025-11-01) — non-overlapping against John alone, but genuinely
+    // overlaps Linda (the non-current chain member).
+    let resp_joan = engine.ingest_claim(IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        value: serde_json::json!("joan"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(confident("2024-09-01T00:00:00Z", Some("2025-11-01T00:00:00Z"))),
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    }).await.expect("joan ingest must succeed");
+
+    assert_eq!(
+        resp_joan.disposition, Disposition::Contested,
+        "TEST2b: Joan overlaps Linda (non-current chain member) → MUST be Contested \
+         (I7 — never a silently cheap-pathed Succession). Got {:?}", resp_joan.disposition
+    );
+
+    let qr = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "acme".into(),
+        predicate: "ceo".into(),
+        as_of_tx_time: None,
+        valid_at: None,
+    }).await.expect("query must succeed");
+    assert_eq!(qr.belief.status, BeliefStatus::Contested, "TEST2b: query_memory must agree");
+    assert!(qr.belief.primary.is_none(), "TEST2b: no silent primary while the chain overlap is unresolved");
+
+    println!("[TEST2b] PASS: 3-claim chain overlap (challenger vs non-current member) → Contested.");
+}
+
 // ── TEST 3: Sanity-check of the changed acid test scenarios ───────────────────
 //
 // This test does not run engine code — it is a documented review of the two changed

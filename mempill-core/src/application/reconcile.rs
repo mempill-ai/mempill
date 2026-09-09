@@ -1,13 +1,29 @@
 #![allow(missing_docs)]
 //! ReconcileUseCase — contradiction detection pass over a set of subject-lines.
 //!
-//! Orchestrates the Reconciler, AdjudicationGate, and optionally Supersession for each claim
-//! in the requested subject-lines within a single atomic transaction.
+//! Orchestrates the Reconciler and AdjudicationGate for each live claim in the requested
+//! subject-lines within a single atomic transaction (ledger appends only).
+//!
+//! ## Supersession is NEVER written here (A6 / I7)
+//!
+//! `gate::adjudicate` never emits a resolved single-winner disposition on `Route::HeavyPath` —
+//! every `SameLineConflict`/`CrossLineConflict` routes to `Contested` or `QueuedForAdjudication`,
+//! both of which require the incumbent to remain live pending resolution. `reconcile()` therefore
+//! never calls `supersession::execute`; the only path that may bind/supersede a claim is
+//! `submit_adjudication`'s `Affirm` verdict (mirrors `ingest_claim.rs`'s already-documented
+//! contract — "incumbent must NEVER be superseded on HeavyPath"). A prior version of this
+//! use-case called `supersession::execute` unconditionally on any `HeavyPath` outcome, which
+//! silently resolved `Contested`/`QueuedForAdjudication` claims with no oracle verdict —
+//! removed as a correctness fix, not a behavior users should have relied on.
+//!
+//! Repeated `reconcile()` calls on unchanged state are idempotent (I6): the only side effect is
+//! appending `AdjudicationResolved` ledger entries whose disposition is a pure function of
+//! `(candidate, unnarrowed_other_live_claims, config, oracle_present)`.
 
 use std::sync::Arc;
 
 use chrono::Utc;
-use mempill_types::{ClaimEdge, LedgerEntry, LedgerEventKind, TransactionTime};
+use mempill_types::{LedgerEntry, LedgerEventKind, TransactionTime};
 
 use crate::{
     application::ingest_claim::build_latest_disposition_map,
@@ -16,7 +32,6 @@ use crate::{
         gate,
         gate::Route,
         reconciler::{self, ReconcilerInput},
-        supersession::{self, SupersessionRequest},
         truth_engine,
     },
     error::MemError,
@@ -58,18 +73,13 @@ where
         let mut oracle_escalations = 0u32;
 
         // ── Collect ALL reads BEFORE begin_atomic ────────────────────────────────
-        // All subject-line claims, validity assertions, ledger, and edges for any
-        // supersession candidate must be loaded HERE — outside the transaction window.
+        // All subject-line claims, validity assertions, and ledger entries must be loaded
+        // HERE — outside the transaction window. No edges are pre-loaded: reconcile() never
+        // supersedes (see module docs), so no `load_edges_for` read is needed.
 
-        // Per subject-line: load claims, fold, compute decisions, pre-load edges.
+        // Per subject-line: (claim_ref, GateDecision) per live claim, decided outside the txn.
         struct SubjectLineData {
-            fold: truth_engine::FoldResult,
-            // For each live claim: (decision, preloaded_edges_for_supersession)
-            per_claim: Vec<(
-                mempill_types::ClaimRef,
-                crate::engine::gate::GateDecision,
-                Vec<ClaimEdge>,
-            )>,
+            per_claim: Vec<(mempill_types::ClaimRef, crate::engine::gate::GateDecision)>,
         }
 
         // Load claims for every requested subject-line FIRST, so the ledger load below can
@@ -113,8 +123,18 @@ where
                 &latest_disposition,
             );
 
-            let n_live = fold.live_claims.len();
             let incumbent = fold.live_claims.first().map(truth_engine::claim_to_belief);
+
+            // N-wide succession check (fixes the silent chain-overlap defect): each candidate
+            // is compared against EVERY raw-live claim on this subject-line (`FoldResult::all_claims`
+            // filtered `is_live`), not just the single "current" incumbent above. Shared across
+            // every candidate on this line; `classify_conflict` filters self out internally.
+            let all_live_claims: Vec<mempill_types::Claim> = fold
+                .all_claims
+                .iter()
+                .filter(|cs| cs.is_live)
+                .map(|cs| cs.claim.clone())
+                .collect();
 
             let mut per_claim = Vec::new();
             for cs in &fold.live_claims {
@@ -128,47 +148,29 @@ where
                         cardinality_proposal: candidate.cardinality().clone(),
                         oracle_present,
                         succession_threshold: self.config.valid_time_confidence_threshold,
-                        n_gt_1_live_incumbents: n_live > 1,
+                        all_live_claims: &all_live_claims,
                     },
                     &self.config,
                 );
                 let decision = gate::adjudicate(&proposal, &self.config);
 
-                // Pre-load edges for supersession if this will be a HeavyPath (reads must precede begin_atomic).
-                let preloaded_edges = if matches!(decision.route, Route::HeavyPath) {
-                    if let Some(ref inc) = incumbent {
-                        if inc.claim_ref != *candidate.claim_ref() {
-                            self.persistence
-                                .load_edges_for(&req.agent_id, &inc.claim_ref)
-                                .map_err(|e| MemError::Persistence { source: Box::new(e) })?
-                        } else {
-                            vec![]
-                        }
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
-
-                per_claim.push((candidate.claim_ref().clone(), decision, preloaded_edges));
+                per_claim.push((candidate.claim_ref().clone(), decision));
             }
 
-            subject_line_data.push(SubjectLineData { fold, per_claim });
+            subject_line_data.push(SubjectLineData { per_claim });
         }
 
         // ── Now open the transaction — writes only ─────────────────────────────
+        // reconcile() NEVER supersedes (see module docs): the only write is the
+        // AdjudicationResolved ledger entry per candidate. `submit_adjudication`'s Affirm
+        // verdict remains the sole caller of `supersession::execute`.
         let mut txn = self.persistence
             .begin_atomic(&req.agent_id)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
         let result = (|| {
-            for (sld_idx, sld) in subject_line_data.iter().enumerate() {
-                let incumbent = sld.fold.live_claims.first()
-                    .map(truth_engine::claim_to_belief);
-                let _ = sld_idx; // suppress unused warning
-
-                for (claim_ref, decision, preloaded_edges) in &sld.per_claim {
+            for sld in &subject_line_data {
+                for (claim_ref, decision) in &sld.per_claim {
                     // Append ledger entry for the reconciliation outcome.
                     let entry = LedgerEntry {
                         entry_id: uuid::Uuid::new_v4(),
@@ -183,27 +185,11 @@ where
                         .append_ledger_entry(&mut txn, &entry)
                         .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
-                    // C4 supersession if heavy path — uses preloaded_edges (loaded before begin_atomic).
+                    // Escalation count: one per candidate landing on HeavyPath (Contested OR
+                    // QueuedForAdjudication) — unconditional on incumbent presence, matching
+                    // existing semantics now that the incumbent-gated supersession block is gone.
                     if matches!(decision.route, Route::HeavyPath) {
-                        if let Some(ref inc) = incumbent {
-                            if inc.claim_ref != *claim_ref {
-                                let supr = SupersessionRequest {
-                                    agent_id: req.agent_id.clone(),
-                                    superseded_ref: inc.claim_ref.clone(),
-                                    overturning_ref: claim_ref.clone(),
-                                    bound_at: tx_time.0,
-                                    recorded_at: tx_time.clone(),
-                                };
-                                supersession::execute(
-                                    &*self.persistence,
-                                    &mut txn,
-                                    &supr,
-                                    preloaded_edges,
-                                )
-                                .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
-                            }
-                            oracle_escalations += 1;
-                        }
+                        oracle_escalations += 1;
                     }
 
                     outcomes.push((claim_ref.clone(), decision.disposition.clone()));
@@ -299,5 +285,109 @@ mod tests {
         }).unwrap();
         // No claims on the subject-line → no outcomes.
         assert!(resp.outcomes.is_empty());
+    }
+
+    // ── Non-empty claims: overlap, no-supersession, idempotency (DIAG_silent_succession) ──
+
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct SeededStore {
+        claims: Mutex<Vec<Claim>>,
+        assertions: Mutex<Vec<ValidityAssertion>>,
+    }
+
+    impl PersistencePort for SeededStore {
+        type Transaction = MockTxn;
+        type Error = MockErr;
+        fn begin_atomic(&self, aid: &AgentId) -> Result<MockTxn, MockErr> { Ok(MockTxn(aid.clone())) }
+        fn append_claim(&self, _t: &mut MockTxn, c: &Claim) -> Result<ClaimRef, MockErr> { Ok(c.claim_ref().clone()) }
+        fn append_validity_assertion(&self, _t: &mut MockTxn, a: &ValidityAssertion) -> Result<(), MockErr> {
+            self.assertions.lock().unwrap().push(a.clone());
+            Ok(())
+        }
+        fn append_ledger_entry(&self, _t: &mut MockTxn, _e: &LedgerEntry) -> Result<(), MockErr> { Ok(()) }
+        fn append_claim_edge(&self, _t: &mut MockTxn, _e: &ClaimEdge) -> Result<(), MockErr> { Ok(()) }
+        fn commit(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
+        fn rollback(&self, _t: MockTxn) -> Result<(), MockErr> { Ok(()) }
+        fn load_subject_line(&self, _a: &AgentId, s: &str, p: &str, _as_of_tx_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<Claim>, MockErr> {
+            Ok(self.claims.lock().unwrap().iter()
+                .filter(|c| c.fact().subject == s && c.fact().predicate == p)
+                .cloned().collect())
+        }
+        fn load_claim(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Option<Claim>, MockErr> { Ok(None) }
+        fn load_validity_assertions_for(&self, _a: &AgentId, r: &ClaimRef) -> Result<Vec<ValidityAssertion>, MockErr> {
+            Ok(self.assertions.lock().unwrap().iter().filter(|a| &a.target_claim == r).cloned().collect())
+        }
+        fn load_ledger(&self, _a: &AgentId, _f: Option<&TransactionTime>, _l: usize) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
+        fn load_ledger_for_claims(&self, _a: &AgentId, _refs: &[ClaimRef], _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<LedgerEntry>, MockErr> { Ok(vec![]) }
+        fn load_edges_for(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+        fn load_injected_claims(&self, _a: &AgentId) -> Result<Vec<ClaimRef>, MockErr> { Ok(vec![]) }
+        fn load_lineage(&self, _a: &AgentId, _r: &ClaimRef) -> Result<Vec<ClaimEdge>, MockErr> { Ok(vec![]) }
+        fn list_predicates_for_subject(&self, _a: &AgentId, _s: &str, _as_of: Option<chrono::DateTime<chrono::Utc>>) -> Result<Vec<String>, MockErr> { Ok(vec![]) }
+    }
+
+    fn overlapping_claim(subject: &str, predicate: &str, value: serde_json::Value) -> Claim {
+        Claim::new(
+            ClaimRef::new_random(),
+            AgentId("a".into()),
+            mempill_types::Fact { subject: subject.into(), predicate: predicate.into(), value },
+            mempill_types::Cardinality::Functional,
+            mempill_types::ProvenanceLabel::External(mempill_types::ExternalKind::UserAsserted),
+            mempill_types::ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(chrono::Utc::now()),
+            mempill_types::ValidTime { start: None, end: None, valid_time_confidence: 0.0, start_granularity: None, end_granularity: None },
+            mempill_types::Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+            mempill_types::Criticality::Medium,
+            vec![],
+            None,
+            None,
+        )
+    }
+
+    /// Two overlapping live claims, oracle absent: pass 1 must leave BOTH live (no supersession
+    /// written), escalate exactly once (the non-self-compared candidate), and repeated calls on
+    /// unchanged state must be byte-identical (I6 idempotency) — regression for
+    /// DIAG_silent_succession (ii): `reconcile()` must never call `supersession::execute`.
+    #[test]
+    fn reconcile_overlap_pass1_contested_no_supersession_pass2_noop() {
+        let store = Arc::new(SeededStore::default());
+        let claim_a = overlapping_claim("acme", "ceo", serde_json::json!("Alice"));
+        let claim_b = overlapping_claim("acme", "ceo", serde_json::json!("Bob"));
+        store.claims.lock().unwrap().push(claim_a);
+        store.claims.lock().unwrap().push(claim_b);
+
+        let uc = ReconcileUseCase::new(
+            Arc::clone(&store),
+            None::<Arc<NoOpOracle>>,
+            EngineConfig::default(),
+        );
+        let req = || ReconcileRequest {
+            agent_id: AgentId("a".into()),
+            subject_lines: vec![("acme".into(), "ceo".into())],
+        };
+
+        let pass1 = uc.execute(req()).unwrap();
+        assert_eq!(pass1.outcomes.len(), 2, "both live claims must produce an outcome");
+        assert_eq!(pass1.oracle_escalations, 1,
+            "exactly one candidate (the non-self-compared one) lands on HeavyPath");
+        // Neither disposition may be Superseded — reconcile() never writes supersession.
+        for (_, disposition) in &pass1.outcomes {
+            assert_ne!(*disposition, mempill_types::Disposition::Superseded,
+                "reconcile() must NEVER supersede an incumbent (A6) — only submit_adjudication may");
+        }
+        // No ValidityAssertion rows written by reconcile() (supersession block deleted).
+        assert!(store.assertions.lock().unwrap().is_empty(),
+            "reconcile() must write zero ValidityAssertion rows (no supersession)");
+
+        // Pass 2 on unchanged state: byte-identical outcomes and escalation count (I6).
+        let pass2 = uc.execute(req()).unwrap();
+        assert_eq!(pass2.oracle_escalations, pass1.oracle_escalations,
+            "I6: repeated reconcile() calls on unchanged state must be idempotent");
+        let mut d1: Vec<_> = pass1.outcomes.iter().map(|(_, d)| d.clone()).collect();
+        let mut d2: Vec<_> = pass2.outcomes.iter().map(|(_, d)| d.clone()).collect();
+        d1.sort_by_key(|d| format!("{d:?}"));
+        d2.sort_by_key(|d| format!("{d:?}"));
+        assert_eq!(d1, d2, "I6: disposition multiset must be byte-identical across passes");
     }
 }
