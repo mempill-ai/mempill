@@ -86,8 +86,11 @@ pub use ergonomic::{
     remember,
     recall,
     history,
-    // Option builder
+    assert_validity,
+    end_fact,
+    // Option builders
     RememberOptions,
+    EndFactOptions,
     // Return types
     RememberReceipt,
     RecallResult,
@@ -96,12 +99,14 @@ pub use ergonomic::{
     History,
     HistoryEntry,
     HistoryEntryStatus,
+    EndFactReceipt,
     // Error
     MempillDxError,
     // Seam traits (for advanced users who write generic code over the engine)
     CanIngestClaim,
     CanQueryMemory,
     CanQueryHistory,
+    CanAssertValidity,
     // Tier-2 builder
     IngestClaimRequestExt,
     IngestClaimRequestBuilder,
@@ -171,9 +176,13 @@ pub mod engine {
         ReconcileRequest, ReconcileResponse,
         AuditQueryRequest, AuditQueryResponse,
         QueryHistoryRequest, QueryHistoryResponse,
+        AssertValidityRequest, AssertValidityResponse, LiveClaimResolution, ValidityAssertionInput,
     };
     // Use-case traits
-    pub use mempill_core::{IngestClaimUseCase, QueryMemoryUseCase, ReconcileUseCase, AuditUseCase, QueryHistoryUseCase};
+    pub use mempill_core::{
+        IngestClaimUseCase, QueryMemoryUseCase, ReconcileUseCase, AuditUseCase, QueryHistoryUseCase,
+        AssertValidityUseCase,
+    };
 }
 
 // ── Flat re-exports of commonly-needed types ──────────────────────────────────

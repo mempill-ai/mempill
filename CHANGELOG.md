@@ -39,6 +39,7 @@ Version headings are dated at publish time. A version with no date and the
 
 ### Added
 
+- `assert_validity` (Rust) and `end_fact` (ergonomic, Python, MCP): a host can explicitly end an open-ended fact by bounding its claim at a given instant, or reopen it. The bound is a ledgered validity assertion applied at read time; a later non-overlapping claim then folds as a clean succession without an oracle. Requires external provenance; a repeated bound at the same instant is a no-op, a different instant is an error; `end_fact` refuses when more than one claim is live on the line.
 - **Configurable PostgreSQL connection pool.** New `PoolConfig` struct
   (`max_size: u32`, `connection_timeout: Duration`) and an additive
   `PostgresPersistenceStore::with_pool_config(conn_str, pool_config)` constructor.

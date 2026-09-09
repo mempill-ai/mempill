@@ -241,6 +241,55 @@ class PyEngine:
         """
         ...
 
+    def assert_validity(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1, TASK-33 E2).
+
+        The host-facing, oracle-free path to Superseded/Reinstated. Prefer
+        ``mempill.ergonomic.end_fact()`` unless you already hold the target claim_ref.
+
+        Args:
+            request: dict with:
+                - agent_id (str)
+                - target (str): claim_ref UUID
+                - assertion: {"type": "Bound", "value": {"at": "<RFC3339>"}}
+                  or {"type": "Reopen"}
+                - provenance (dict): must be External(*) — any other channel raises
+                  ValidationError (only first-hand external evidence may bound/reopen)
+                - confidence: {"value_confidence": float, "valid_time_confidence": float}
+
+        Returns:
+            dict with claim_ref, assertion_ref (str | None), kind, effective_at
+            (str | None, RFC3339), disposition ("Superseded" | "Reinstated"), no_op (bool).
+
+        Raises:
+            ValidationError: provenance not External(*), or `at` precedes the claim's
+                own valid_time.start (IncoherentTemporalWindow)
+            NotFoundError: target does not exist or belongs to another agent
+            ConflictError: a different bound is already active (never "later wins")
+            StorageError: persistence layer failure
+        """
+        ...
+
+    def resolve_live_claim_for_line(
+        self, agent_id: str, subject: str, predicate: str
+    ) -> dict[str, Any]:
+        """Resolve a (subject, predicate) line to the single live claim, if any.
+
+        Uses the SAME canonical fold query_memory()/query_history() use (I8 single
+        source of truth) — never a heuristic re-derivation. Backs
+        ``mempill.ergonomic.end_fact()``.
+
+        Returns:
+            dict: {"status": "empty" | "single" | "ambiguous",
+                   "claim_ref": str | None,
+                   "live_count": int | None}
+            live_count is populated only when status == "ambiguous".
+
+        Raises:
+            StorageError: persistence layer failure
+        """
+        ...
+
 # ── PyOracleEngine ────────────────────────────────────────────────────────────
 
 @final
@@ -360,6 +409,20 @@ class PyOracleEngine:
 
         Raises:
             StorageError: if a persistence error occurs.
+        """
+        ...
+
+    def assert_validity(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Bound or reopen a claim's valid-time window. Identical contract to
+        ``PyEngine.assert_validity``.
+        """
+        ...
+
+    def resolve_live_claim_for_line(
+        self, agent_id: str, subject: str, predicate: str
+    ) -> dict[str, Any]:
+        """Resolve a (subject, predicate) line to the single live claim, if any.
+        Identical contract to ``PyEngine.resolve_live_claim_for_line``.
         """
         ...
 

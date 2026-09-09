@@ -2,7 +2,7 @@
 mempill_mcp — FastMCP adapter exposing the mempill engine as MCP tools.
 
 Public surface:
-    mcp   — the FastMCP server instance (4 tools registered after import).
+    mcp   — the FastMCP server instance (5 tools registered after import).
 
 Usage (programmatic):
     import os

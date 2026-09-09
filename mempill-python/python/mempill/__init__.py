@@ -66,6 +66,8 @@ from mempill.ergonomic import (
     history,
     History,
     HistoryEntry,
+    end_fact,
+    EndFactReceipt,
 )
 
 try:
@@ -197,4 +199,7 @@ __all__ = [
     "history",
     "History",
     "HistoryEntry",
+    # assert_validity / end_fact API (TASK-33 E2)
+    "end_fact",
+    "EndFactReceipt",
 ]
