@@ -152,6 +152,8 @@ where
 
         // Build LATEST disposition per claim from the ledger (for the disposition-based fold filter).
         let latest_disposition = build_latest_disposition_map(&ledger_for_fold);
+        // TASK-33-W5-LIB C: same ledger slice, zero extra reads — see build_conflict_candidate_claims.
+        let denied_via_adjudication = build_denied_via_adjudication_set(&ledger_for_fold);
 
         // Fold the incumbent claims to get the live canonical belief.
         let as_of = tx_time.0;
@@ -167,20 +169,25 @@ where
             &self.config,
             &latest_disposition,
         );
-        let incumbent_belief = fold_result.live_claims.first().map(|cs| {
-            truth_engine::claim_to_belief(cs)
-        });
+        // N-wide succession/conflict check (fixes the silent chain-overlap defect, and
+        // TASK-33-W5-LIB C: a retroactive claim over an explicitly-closed historical window
+        // must be contested, not committed silently): the challenger is compared against
+        // EVERY raw-live claim ON this subject-line PLUS every claim closed by an active Bound
+        // (end_fact/assert_validity/Affirm), narrowed to its real believed window — not just
+        // the single "current" incumbent, and not just the currently-open claims. See
+        // `truth_engine::build_conflict_candidate_claims` for the full widening rule.
+        let all_live_claims: Vec<mempill_types::Claim> =
+            truth_engine::build_conflict_candidate_claims(&fold_result, &denied_via_adjudication);
 
-        // N-wide succession check (fixes the silent chain-overlap defect): the challenger must
-        // be a trusted, non-overlapping succession against EVERY raw-live claim on this
-        // subject-line, not just the single "current" incumbent. `all_claims` is the fold's RAW
-        // (pre-narrowing) liveness set — see `FoldResult::all_claims` docs.
-        let all_live_claims: Vec<mempill_types::Claim> = fold_result
-            .all_claims
-            .iter()
-            .filter(|cs| cs.is_live)
-            .map(|cs| cs.claim.clone())
-            .collect();
+        // TASK-33-W5-LIB C: `incumbent_belief` (reconciler step 1's None-check / step 3's
+        // same-value check — see `reconciler::classify_conflict`) must be drawn from the SAME
+        // widened candidate set as `all_live_claims`, not the raw-live-only `fold_result.live_claims`.
+        // Otherwise a subject-line whose ONLY claim is bound-excluded (e.g. an end_fact-closed
+        // sole incumbent) would present as `incumbent = None` → step 1 short-circuits to
+        // NoConflict/CommittedCheap regardless of what the N-wide overlap check below would have
+        // found — exactly the DIAG-4 finding C gap (this is the fix that makes the N-wide check
+        // actually reachable, not just present).
+        let incumbent_belief = all_live_claims.first().map(truth_engine::claim_to_belief_raw);
 
         let oracle_present = self.oracle.is_some();
         let proposal = reconciler::reconcile(
@@ -438,6 +445,50 @@ pub(crate) fn build_latest_disposition_map(
         }
     }
     map.into_iter().map(|(k, (_, d))| (k, d)).collect()
+}
+
+/// Claims whose LATEST ledger disposition is `Superseded` but whose PENULTIMATE disposition
+/// (the entry immediately preceding it, by `recorded_at`) was `QueuedForAdjudication` — i.e.
+/// the claim was rejected via an oracle `Deny` verdict (`submit_adjudication.rs::bound_claim`),
+/// never genuinely "believed" for any valid-time window (TASK-33-W5-LIB A, DIAG-4 finding A).
+///
+/// Both an Affirm's losing incumbent and a host `end_fact`/`assert_validity` closure ALSO end
+/// with a latest disposition of `Superseded`, but their PENULTIMATE disposition is always a
+/// committed-like state (`CommittedCheap`/`CommittedInferred`/`Reinstated`/...), never
+/// `QueuedForAdjudication` — the incumbent is never routed through adjudication itself (see
+/// `submit_adjudication.rs` module docs: "the incumbent is NOT checked/moved to
+/// QueuedForAdjudication"). This penultimate-disposition check is therefore a precise
+/// discriminator between "rejected, never believed" and "genuinely superseded, once believed".
+///
+/// Consumed by `truth_engine::narrow_live_claims_for_valid_at`'s valid_at bound-reentry
+/// candidate set (see that function's rustdoc for the full reentry rule) so a denied
+/// challenger's rejected window can never resurface as a point-in-time belief.
+///
+/// Zero extra reads: consumes the SAME ledger slice already loaded for
+/// `build_latest_disposition_map` — no additional DB round trip.
+pub(crate) fn build_denied_via_adjudication_set(
+    ledger: &[mempill_types::LedgerEntry],
+) -> std::collections::HashSet<mempill_types::ClaimRef> {
+    let mut per_claim: std::collections::HashMap<mempill_types::ClaimRef, Vec<&mempill_types::LedgerEntry>> =
+        std::collections::HashMap::new();
+    for entry in ledger {
+        per_claim.entry(entry.claim_ref.clone()).or_default().push(entry);
+    }
+
+    let mut denied = std::collections::HashSet::new();
+    for (claim_ref, mut entries) in per_claim {
+        entries.sort_by_key(|e| e.recorded_at.0);
+        if entries.len() >= 2 {
+            let last = entries[entries.len() - 1];
+            let penultimate = entries[entries.len() - 2];
+            if last.disposition == Disposition::Superseded
+                && penultimate.disposition == Disposition::QueuedForAdjudication
+            {
+                denied.insert(claim_ref);
+            }
+        }
+    }
+    denied
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────

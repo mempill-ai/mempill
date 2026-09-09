@@ -2031,7 +2031,7 @@ where
         SharedPendingWrapper(Arc::clone(&pending_store)),
     ));
 
-    let submit_uc = SubmitAdjudicationUseCase::new(Arc::clone(&store_arc), Arc::clone(&erased_pending));
+    let submit_uc = SubmitAdjudicationUseCase::new(Arc::clone(&store_arc), Arc::clone(&erased_pending), crate::config::EngineConfig::default());
     let dup_response = mempill_types::AdjudicationResponse {
         handle_id,
         verdict: mempill_types::AdjudicationVerdict::Deny,
@@ -2309,7 +2309,7 @@ pub fn run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication
         fn list_queued_orphan_claims(&self) -> Result<Vec<OrphanedQueuedClaim>, Self::Error> { self.0.list_queued_orphan_claims() }
     }
     let erased2: Arc<dyn ErasedPendingStore> = Arc::new(ErasedPendingStoreAdapter::new(Wrapper2(Arc::clone(&pending_store2))));
-    let submit_uc = SubmitAdjudicationUseCase::new(Arc::clone(store), Arc::clone(&erased2));
+    let submit_uc = SubmitAdjudicationUseCase::new(Arc::clone(store), Arc::clone(&erased2), crate::config::EngineConfig::default());
 
     let response2 = mempill_types::AdjudicationResponse { handle_id: handle2, verdict: mempill_types::AdjudicationVerdict::Affirm, evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand) };
     let outcome2 = submit_uc.execute(handle2, response2, Utc::now()).expect("swpaff: submit_adjudication(Affirm) must not error");
@@ -2364,6 +2364,8 @@ where
     valid_at_pre_history_gap(store);
     valid_at_d2_tx_filters_before_vt(store);
     valid_at_none_backward_compat(store);
+    valid_at_va7_end_fact_bounded_incumbent_reenters(store);
+    valid_at_va8_single_open_claim_pre_history_gap(store);
 }
 
 /// Build a trusted high-confidence Claim with a specific valid-time window.
@@ -2789,6 +2791,119 @@ where
         serde_json::json!("carol"),
         "va6: backward compat — None valid_at with as_of=2026 → Carol's open window [2024, ∞)"
     );
+}
+
+/// Sub-test va7 (TASK-33-W5-LIB A, DIAG-4 finding A): an incumbent explicitly ended via
+/// `end_fact`/`assert_validity` (a host-asserted `ValidityAssertion::Bound`, NOT its own
+/// stored `valid_time.end`) must still re-enter the valid_at candidate set, narrowed to its
+/// real believed window — `fold`'s raw-live-only view alone would incorrectly return the
+/// successor for an instant that predates the bound.
+///
+/// Diane [2021-04-01, ∞) is bounded at 2025-01-01 (end_fact); John [2025-01-01, ∞) is live.
+/// valid_at=2022-06-01 (well before the bound) must return Diane, not John.
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_va7_end_fact_bounded_incumbent_reenters<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::{build_denied_via_adjudication_set, build_latest_disposition_map};
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+    use uuid::Uuid;
+
+    let agent = AgentId("valid-at-va7".into());
+    let tx = vat_dt("2019-06-01T00:00:00Z");
+    let diane_start = vat_dt("2021-04-01T00:00:00Z");
+    let bound_at = vat_dt("2025-01-01T00:00:00Z");
+
+    let diane = make_vt_claim_for_conformance(&agent, "va7-corp", "ceo", serde_json::json!("diane"), tx, diane_start, None);
+    let john = make_vt_claim_for_conformance(&agent, "va7-corp", "ceo", serde_json::json!("john"), tx, bound_at, None);
+    let diane_ref = diane.claim_ref().clone();
+
+    let bound = ValidityAssertion {
+        assertion_ref: Uuid::new_v4(),
+        agent_id: agent.clone(),
+        target_claim: diane_ref.clone(),
+        kind: AssertionKind::Bound { bound_at },
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        asserted_at: TransactionTime(bound_at),
+    };
+
+    let mut txn = store.begin_atomic(&agent).expect("va7: begin_atomic");
+    store.append_claim(&mut txn, &diane).expect("va7: append diane");
+    store.append_claim(&mut txn, &john).expect("va7: append john");
+    store.append_validity_assertion(&mut txn, &bound).expect("va7: append bound");
+    store.commit(txn).expect("va7: commit");
+
+    let claims = store.load_subject_line(&agent, "va7-corp", "ceo", None).expect("va7: load");
+    let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va7: ledger");
+    let disp = build_latest_disposition_map(&ledger);
+    let denied = build_denied_via_adjudication_set(&ledger);
+    let config = EngineConfig::default();
+
+    let as_of = vat_dt("2026-01-01T00:00:00Z");
+    let valid_at = vat_dt("2022-06-01T00:00:00Z"); // well before the bound
+
+    let assertions_fn = {
+        let diane_ref = diane_ref.clone();
+        let bound = bound.clone();
+        move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if cr == &diane_ref { vec![bound.clone()] } else { vec![] }
+        }
+    };
+
+    let fold = truth_engine::fold(claims, assertions_fn, as_of, Some(valid_at), &config, &disp);
+    let narrowed = truth_engine::narrow_live_claims_for_valid_at(fold, valid_at, &denied, &config);
+
+    assert_eq!(narrowed.live_claims.len(), 1, "va7: valid_at=2022-06 (before the end_fact bound) selects exactly 1 claim");
+    assert_eq!(
+        narrowed.live_claims[0].claim.fact().value,
+        serde_json::json!("diane"),
+        "va7: an end_fact-bounded incumbent must re-enter for an in-window valid_at instant"
+    );
+}
+
+/// Sub-test va8 (TASK-33-W5-LIB A, DIAG-4 finding A / scenario 6): a single open, unbounded
+/// claim queried at an instant BEFORE its own valid-time start must return NoBelief — dropping
+/// `fold`'s `len() > 1` guard so even a lone candidate is window-tested.
+#[cfg(any(test, feature = "test-support"))]
+fn valid_at_va8_single_open_claim_pre_history_gap<P>(store: &P)
+where
+    P: PersistencePort,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::ingest_claim::{build_denied_via_adjudication_set, build_latest_disposition_map};
+    use crate::config::EngineConfig;
+    use crate::engine::truth_engine;
+
+    let agent = AgentId("valid-at-va8".into());
+    let tx = vat_dt("2009-06-01T00:00:00Z");
+    let eve_start = vat_dt("2010-01-01T00:00:00Z");
+    let eve = make_vt_claim_for_conformance(&agent, "va8-corp", "advisor", serde_json::json!("eve"), tx, eve_start, None);
+
+    let mut txn = store.begin_atomic(&agent).expect("va8: begin_atomic");
+    store.append_claim(&mut txn, &eve).expect("va8: append eve");
+    store.commit(txn).expect("va8: commit");
+
+    let claims = store.load_subject_line(&agent, "va8-corp", "advisor", None).expect("va8: load");
+    assert_eq!(claims.len(), 1, "va8: must have exactly 1 claim");
+    let refs: Vec<ClaimRef> = claims.iter().map(|c| c.claim_ref().clone()).collect();
+    let ledger = store.load_ledger_for_claims(&agent, &refs, None).expect("va8: ledger");
+    let disp = build_latest_disposition_map(&ledger);
+    let denied = build_denied_via_adjudication_set(&ledger);
+    let config = EngineConfig::default();
+
+    let as_of = vat_dt("2026-01-01T00:00:00Z");
+    let valid_at = vat_dt("1995-01-01T00:00:00Z"); // before Eve's start
+
+    let fold = truth_engine::fold(claims, |_| vec![], as_of, Some(valid_at), &config, &disp);
+    let narrowed = truth_engine::narrow_live_claims_for_valid_at(fold, valid_at, &denied, &config);
+
+    assert_eq!(narrowed.live_claims.len(), 0, "va8: valid_at before the only claim's start must be NoBelief");
+    assert!(!narrowed.has_conflict, "va8: gap must not produce has_conflict");
 }
 
 // ── Granularity conformance harness ──────────────────────────────────────────
@@ -3750,7 +3865,7 @@ where
     }
     let erased: std::sync::Arc<dyn ErasedPendingStore> = std::sync::Arc::new(ErasedPendingStoreAdapter::new(Wrapper(std::sync::Arc::clone(&pending_store))));
 
-    let uc = SubmitAdjudicationUseCase::new(std::sync::Arc::clone(&store), std::sync::Arc::clone(&erased));
+    let uc = SubmitAdjudicationUseCase::new(std::sync::Arc::clone(&store), std::sync::Arc::clone(&erased), crate::config::EngineConfig::default());
 
     // An unrelated caller (no knowledge of B's real handle_id) submits with a random UUID.
     let unknown_handle = Uuid::new_v4();
@@ -4117,6 +4232,7 @@ where
     av_end_fact_multiple_live_returns_ambiguous(store);
     av_end_fact_single_live_resolves_and_bounds(store);
     av_diag3_sequence_end_fact_then_challenger_is_clean_succession(store);
+    av_diag4_retroactive_claim_over_ended_window_is_contested(store);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -4697,4 +4813,95 @@ where
     assert_ne!(a_entry.status, HistoryEntryStatus::Current, "av13: A must not be Current after end_fact");
     let b_entry = qh_resp.entries.iter().find(|entry| entry.claim_ref == claim_b).expect("av13: B entry present");
     assert_eq!(b_entry.status, HistoryEntryStatus::Current, "av13: B must be Current");
+}
+
+/// DIAG-4 finding C (TASK-33-W5-LIB C): a retroactive claim written INTO a window that was
+/// explicitly ended via `end_fact` must be contested against the ended incumbent, not
+/// committed silently. Diane [2021-04, ∞) end_fact'd at 2025-01; IMPOSTOR [2022-01, 2023-01)
+/// — entirely inside Diane's now-narrowed [2021-04, 2025-01) window — must route to
+/// Contested/QueuedForAdjudication, never CommittedCheap.
+#[cfg(any(test, feature = "test-support"))]
+fn av_diag4_retroactive_claim_over_ended_window_is_contested<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use crate::application::{
+        assert_validity::{resolve_live_claim_for_line, AssertValidityUseCase},
+        dto::{AssertValidityRequest, IngestClaimRequest, LiveClaimResolution, ValidityAssertionInput},
+        ingest_claim::IngestClaimUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpOracle;
+    use mempill_types::Disposition;
+
+    let agent = AgentId("av-conf-diag4-impostor".into());
+    let diane_start = vat_dt("2021-04-01T00:00:00Z");
+    let e = vat_dt("2025-01-01T00:00:00Z");
+
+    let diane = av_ingest(store, &agent, "diag4-subj", "diag4-pred", serde_json::json!("Diane"), Some(diane_start), None, diane_start + chrono::Duration::seconds(1));
+
+    // end_fact(Diane, at=e).
+    let now = e + chrono::Duration::seconds(1);
+    let config = EngineConfig::default();
+    let resolution = resolve_live_claim_for_line(store, &config, &agent, "diag4-subj", "diag4-pred", now).expect("av-diag4: resolve Diane must not error");
+    assert_eq!(resolution, LiveClaimResolution::Single(diane.clone()), "av-diag4: Diane must be the sole live claim before end_fact");
+
+    let av_uc = AssertValidityUseCase::new(std::sync::Arc::clone(store));
+    av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(), target: diane.clone(),
+            assertion: ValidityAssertionInput::Bound { at: e },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        now,
+    ).expect("av-diag4: end_fact bound on Diane must succeed");
+
+    // IMPOSTOR [2022-01, 2023-01) — retroactive, entirely inside Diane's ended window.
+    let impostor_start = vat_dt("2022-01-01T00:00:00Z");
+    let impostor_end = vat_dt("2023-01-01T00:00:00Z");
+    let ingest_uc = IngestClaimUseCase::new(
+        std::sync::Arc::clone(store),
+        None::<std::sync::Arc<NoOpOracle>>,
+        None,
+        config,
+    );
+    let impostor_resp = ingest_uc.execute_with_time(
+        IngestClaimRequest {
+            agent_id: agent.clone(),
+            subject: "diag4-subj".into(),
+            predicate: "diag4-pred".into(),
+            value: serde_json::json!("IMPOSTOR"),
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            cardinality: Cardinality::Functional,
+            valid_time: Some(ValidTime {
+                start: Some(impostor_start),
+                end: Some(impostor_end),
+                valid_time_confidence: 0.9,
+                start_granularity: None,
+                end_granularity: None,
+            }),
+            confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+            criticality: Criticality::Medium,
+            derived_from: vec![],
+        },
+        now + chrono::Duration::seconds(1),
+    ).expect("av-diag4: ingest IMPOSTOR must not error");
+
+    assert_ne!(
+        impostor_resp.disposition, Disposition::CommittedCheap,
+        "av-diag4: IMPOSTOR overlapping Diane's ended (but real) window must NOT commit silently — \
+         got CommittedCheap, the exact DIAG-4 finding C gap"
+    );
+    assert!(
+        matches!(impostor_resp.disposition, Disposition::Contested | Disposition::QueuedForAdjudication),
+        "av-diag4: IMPOSTOR must route to Contested or QueuedForAdjudication (gate-dependent), got {:?}",
+        impostor_resp.disposition
+    );
+    assert!(
+        impostor_resp.contested_with.contains(&diane),
+        "av-diag4: IMPOSTOR must be contested WITH Diane specifically, got {:?}",
+        impostor_resp.contested_with
+    );
 }

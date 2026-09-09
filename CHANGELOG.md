@@ -113,6 +113,9 @@ Version headings are dated at publish time. A version with no date and the
 - SQLite schema migrations now run inside a single immediate transaction;
   concurrent first opens of a brand-new per-agent database file no longer fail
   with `duplicate column name`.
+- Point-in-time reads (`valid_at` on `query_memory`, `query_subject`, `recall`) now consider claims that were explicitly ended and always window-check the candidate: an instant inside an ended fact's window returns that fact, and an instant before any claim's start returns no belief.
+- An affirmed adjudication now ends the losing incumbent at the winning claim's valid-time start instead of at the adjudication's transaction time.
+- A claim written retroactively into a window that was explicitly ended is now contested against the ended incumbent instead of being committed silently.
 
 ### Notes
 
