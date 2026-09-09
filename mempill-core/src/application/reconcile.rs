@@ -144,20 +144,36 @@ where
 
                 // Per-candidate incumbent (DIAG_silent_succession §6(b)): NEVER feed the
                 // candidate itself as `incumbent` — `classify_conflict`'s step-3 same-value
-                // check (reconciler.rs:143-146) would then trivially match (identical claim),
-                // returning NoConflict/CheapPath for a claim that is genuinely part of a
-                // contested line. Choose the first OTHER claim in the WIDENED `all_live_claims`
-                // set (TASK-33-W5-LIB D — same fix as ingest_claim.rs: drawing this from
-                // `fold.live_claims` alone would present `incumbent = None` whenever every OTHER
-                // claim on the line is bound-excluded, short-circuiting reconciler step 1 to
-                // NoConflict before the N-wide overlap check below even runs) as the legacy
-                // `incumbent` field (used only for step 1's None-check and step 3's same-value
-                // check; the real N-wide conflict/succession classification below uses
-                // `all_live_claims`, not this field). `None` only when this candidate is the
-                // sole widened candidate on the line.
-                let incumbent = all_live_claims
+                // check would then trivially match (identical claim), returning
+                // NoConflict/CheapPath for a claim that is genuinely part of a contested line.
+                //
+                // TASK-33-W5-LIB-R1 (review blocker 1, mirrors the ingest_claim.rs fix): prefer
+                // the first OTHER claim in the NARROWED `fold.live_claims` (the fold's
+                // step-4-selected current belief) over `all_live_claims` — the latter is the
+                // WIDENED set, still sorted ascending by canonical ordering key, so its
+                // `.first()`/`.find()` would surface the OLDEST claim on a succession line, not
+                // the current one, letting `classify_conflict` step 3's identical-value
+                // shortcut wave through a candidate whose value matches a STALE claim.
+                //
+                // Fall back to the first OTHER claim in the WIDENED `all_live_claims` set
+                // (TASK-33-W5-LIB D) only when `fold.live_claims` has no OTHER member —
+                // drawing from `fold.live_claims` alone in that case would present
+                // `incumbent = None` whenever every OTHER claim on the line is bound-excluded,
+                // short-circuiting reconciler step 1 to NoConflict before the N-wide overlap
+                // check below even runs. This `incumbent` field is used only for step 1's
+                // None-check and step 3's same-value check; the real N-wide
+                // conflict/succession classification uses `all_live_claims`, not this field.
+                // `None` only when this candidate is the sole widened candidate on the line.
+                let incumbent = fold
+                    .live_claims
                     .iter()
+                    .map(|other_cs| &other_cs.claim)
                     .find(|other| other.claim_ref() != candidate.claim_ref())
+                    .or_else(|| {
+                        all_live_claims
+                            .iter()
+                            .find(|other| other.claim_ref() != candidate.claim_ref())
+                    })
                     .map(truth_engine::claim_to_belief_raw);
 
                 let proposal = reconciler::reconcile(

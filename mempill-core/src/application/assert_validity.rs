@@ -54,7 +54,10 @@ use mempill_types::{
 };
 
 use crate::{
-    application::{dto::LiveClaimResolution, ingest_claim::build_latest_disposition_map},
+    application::{
+        dto::LiveClaimResolution,
+        ingest_claim::{build_denied_via_adjudication_set, build_latest_disposition_map},
+    },
     config::EngineConfig,
     engine::truth_engine,
     error::MemError,
@@ -112,6 +115,27 @@ where
 
         match &req.assertion {
             ValidityAssertionInput::Bound { at } => {
+                // ── Gate 2.5: reject Bound against a claim under active oracle
+                // adjudication, or one already terminally rejected by a Deny verdict
+                // (TASK-33-W5-LIB-R1 nit). A QueuedForAdjudication claim has no
+                // host-asserted window to narrow — the oracle owns its resolution — and a
+                // Deny-superseded claim was never genuinely believed for any window, so
+                // bounding it again is meaningless. `Reopen` (the other match arm) is NOT
+                // gated here: a Deny verdict may legitimately be reversed via `Reopen`,
+                // which is the intended escape hatch (module docs).
+                let target_ledger = self
+                    .persistence
+                    .load_ledger_for_claims(&req.agent_id, std::slice::from_ref(&req.target), None)
+                    .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
+                let latest_disposition = build_latest_disposition_map(&target_ledger);
+                let is_queued = latest_disposition.get(&req.target)
+                    == Some(&Disposition::QueuedForAdjudication);
+                let is_denied =
+                    build_denied_via_adjudication_set(&target_ledger).contains(&req.target);
+                if is_queued || is_denied {
+                    return Err(MemError::TargetUnderAdjudication { target: req.target.clone() });
+                }
+
                 // ── Gate 3: coherence ─────────────────────────────────────────
                 if let Some(start) = target_claim.valid_time().start {
                     if *at < start {
@@ -572,5 +596,116 @@ mod tests {
         let config = EngineConfig::default();
         let resolution = resolve_live_claim_for_line(&store, &config, &agent(), "s", "p", Utc::now()).unwrap();
         assert_eq!(resolution, crate::application::dto::LiveClaimResolution::Empty);
+    }
+
+    // ── Gate 2.5: Bound rejected on a QueuedForAdjudication / Deny-superseded target
+    // (TASK-33-W5-LIB-R1 nit) — Reopen is NOT gated ─────────────────────────────────
+
+    #[test]
+    fn bound_against_queued_for_adjudication_target_is_rejected() {
+        let store = Arc::new(MockStore::default());
+        let agent = agent();
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let claim = make_open_claim(&agent, start);
+        let claim_ref = claim.claim_ref().clone();
+        store.claims.lock().unwrap().push(claim);
+        store.ledger.lock().unwrap().push(LedgerEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: claim_ref.clone(),
+            event_kind: mempill_types::LedgerEventKind::ClaimCommitted,
+            disposition: Disposition::QueuedForAdjudication,
+            rationale: None,
+            recorded_at: TransactionTime(Utc::now()),
+        });
+
+        let uc = AssertValidityUseCase::new(Arc::clone(&store));
+        let at = Utc.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
+        let result = uc.execute(bound_req(&agent, &claim_ref, at), at + chrono::Duration::seconds(1));
+        assert!(
+            matches!(result, Err(MemError::TargetUnderAdjudication { .. })),
+            "Bound against a QueuedForAdjudication target must be rejected, got {result:?}"
+        );
+        assert_eq!(store.validity_assertions.lock().unwrap().len(), 0, "no assertion must be written");
+    }
+
+    #[test]
+    fn bound_against_deny_superseded_target_is_rejected() {
+        let store = Arc::new(MockStore::default());
+        let agent = agent();
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let claim = make_open_claim(&agent, start);
+        let claim_ref = claim.claim_ref().clone();
+        store.claims.lock().unwrap().push(claim);
+        store.ledger.lock().unwrap().push(LedgerEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: claim_ref.clone(),
+            event_kind: mempill_types::LedgerEventKind::ClaimCommitted,
+            disposition: Disposition::QueuedForAdjudication,
+            rationale: None,
+            recorded_at: TransactionTime(Utc::now() - chrono::Duration::seconds(1)),
+        });
+        store.ledger.lock().unwrap().push(LedgerEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: claim_ref.clone(),
+            event_kind: mempill_types::LedgerEventKind::ValidityAsserted,
+            disposition: Disposition::Superseded,
+            rationale: Some(serde_json::json!({"event": "oracle_supersession", "verdict": "deny"})),
+            recorded_at: TransactionTime(Utc::now()),
+        });
+
+        let uc = AssertValidityUseCase::new(Arc::clone(&store));
+        let at = Utc.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
+        let result = uc.execute(bound_req(&agent, &claim_ref, at), at + chrono::Duration::seconds(1));
+        assert!(
+            matches!(result, Err(MemError::TargetUnderAdjudication { .. })),
+            "Bound against a Deny-superseded target must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn reopen_against_deny_superseded_target_is_not_gated() {
+        // Reopen is the intended escape hatch to reverse a Deny verdict — it must NOT be
+        // rejected by the TargetUnderAdjudication guard (which only applies to Bound).
+        let store = Arc::new(MockStore::default());
+        let agent = agent();
+        let start = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let claim = make_open_claim(&agent, start);
+        let claim_ref = claim.claim_ref().clone();
+        store.claims.lock().unwrap().push(claim);
+        store.ledger.lock().unwrap().push(LedgerEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: claim_ref.clone(),
+            event_kind: mempill_types::LedgerEventKind::ValidityAsserted,
+            disposition: Disposition::Superseded,
+            rationale: Some(serde_json::json!({"event": "oracle_supersession", "verdict": "deny"})),
+            recorded_at: TransactionTime(Utc::now() - chrono::Duration::seconds(1)),
+        });
+        // An active Bound assertion is required for Reopen to have an effect (not a no-op).
+        store.validity_assertions.lock().unwrap().push(ValidityAssertion {
+            assertion_ref: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            target_claim: claim_ref.clone(),
+            kind: AssertionKind::Bound { bound_at: Utc::now() - chrono::Duration::seconds(1) },
+            provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            asserted_at: TransactionTime(Utc::now() - chrono::Duration::seconds(1)),
+        });
+
+        let uc = AssertValidityUseCase::new(Arc::clone(&store));
+        let result = uc.execute(
+            AssertValidityRequest {
+                agent_id: agent, target: claim_ref,
+                assertion: ValidityAssertionInput::Reopen,
+                provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+                confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            },
+            Utc::now(),
+        );
+        assert!(result.is_ok(), "Reopen must not be rejected by the TargetUnderAdjudication guard, got {result:?}");
+        assert_eq!(result.unwrap().disposition, Disposition::Reinstated);
     }
 }

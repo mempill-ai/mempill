@@ -108,6 +108,11 @@ class PyEngine:
                   valid-time axis; selects the claim whose valid-time window
                   contains this instant.  When absent, as_of_tx_time (or now)
                   is used as the valid-time instant (backward-compatible).
+                  Note: a claim explicitly ended (``end_fact``/``assert_validity``)
+                  CAN re-enter a point-in-time read with its window narrowed to
+                  when it was actually believed true; a denied or hard-excluded
+                  claim (Quarantined/Invalidated/Rejected, or rejected by an
+                  oracle Deny verdict) never re-enters, at any instant.
 
         Returns:
             dict with:
@@ -226,7 +231,10 @@ class PyEngine:
             request: dict with:
                 - agent_id (str)
                 - subject (str)
-                - valid_at (str | None): optional ISO-8601 string (valid-time axis)
+                - valid_at (str | None): optional ISO-8601 string (valid-time axis).
+                  A claim explicitly ended (``end_fact``/``assert_validity``) can
+                  re-enter with its window narrowed to when it was believed true;
+                  a denied/hard-excluded claim never does.
                 - as_of_tx_time (str | None): optional ISO-8601 string (tx-time axis)
 
         Returns:
@@ -380,7 +388,10 @@ class PyOracleEngine:
 
         Args:
             request: dict with: agent_id, subject, valid_at (optional ISO-8601),
-                as_of_tx_time (optional ISO-8601).
+                as_of_tx_time (optional ISO-8601). valid_at: a claim explicitly
+                ended (end_fact/assert_validity) can re-enter with its window
+                narrowed to when it was believed true; a denied/hard-excluded
+                claim never does.
 
         Returns:
             list[dict]: one per distinct predicate, sorted by predicate.

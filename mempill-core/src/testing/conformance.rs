@@ -2183,6 +2183,178 @@ pub fn run_reconcile_incumbent_selection_matches_query_memory_primary_conformanc
     );
 }
 
+// ── TASK-33-W5-LIB-R1 review blocker 1: narrowed-succession incumbent selection ───────────
+
+/// Cross-adapter conformance for the review blocker: `ingest_claim`'s incumbent selection
+/// must prefer the fold's step-4-selected CURRENT belief (`fold_result.live_claims.first()`)
+/// over the WIDENED, still-ascending-sorted `all_live_claims.first()` (which is the OLDEST
+/// claim on a succession line, not the current one).
+///
+/// Four sub-scenarios, each on its own subject-line:
+/// 1. Narrowed succession A[2020,2022)="Berlin" -> B[2022,∞)="Paris"; a NEW candidate
+///    "Munich"[2021,∞) (overlaps A) must be Contested with `contested_with = [B]` (the
+///    CURRENT belief), never CommittedCheap (the pre-fix bug: incumbent=A, step-3 shortcut
+///    inapplicable since values differ, so this alone would already fail loudly under the
+///    OLD code only via a value coincidence — scenario 2 below isolates that exact case).
+/// 2. Same succession; a candidate with the SAME value as B ("Paris") but a window
+///    overlapping A ("Berlin") must ALSO be Contested — never silently `CommittedCheap` via
+///    step 3's identical-value shortcut matching the (wrongly selected) stale incumbent A.
+/// 3. Ordinary single-incumbent conflict: `contested_with` must equal the sole current
+///    incumbent.
+/// 4. DIAG-C: incumbent fully closed via `assert_validity` Bound (fold_result.live_claims
+///    empty) — must fall back to the WIDENED set and stay Contested with the ended incumbent.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_narrowed_succession_incumbent_selection_conformance<P>(store: &std::sync::Arc<P>)
+where
+    P: PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+{
+    use std::sync::Arc;
+
+    use crate::application::{
+        assert_validity::AssertValidityUseCase,
+        dto::{AssertValidityRequest, IngestClaimRequest, ValidityAssertionInput},
+        ingest_claim::IngestClaimUseCase,
+    };
+    use crate::config::EngineConfig;
+    use crate::noop::NoOpOracle;
+
+    let agent = AgentId("conformance-narrowed-succession-incumbent".into());
+    let config = EngineConfig::default();
+    let now = Utc::now();
+
+    let ingest_uc = IngestClaimUseCase::<_, NoOpOracle>::new(Arc::clone(store), None, None, config.clone());
+
+    let write_claim = |subject: &str, value: serde_json::Value, vt_start: chrono::DateTime<Utc>, vt_end: Option<chrono::DateTime<Utc>>, tx: chrono::DateTime<Utc>| -> Claim {
+        make_vt_claim_for_conformance(&agent, subject, "nsi-pred", value, tx, vt_start, vt_end)
+    };
+
+    // ── Scenario 1 + 2: narrowed succession ────────────────────────────────────────────
+    let subj12 = "nsi-succession";
+    let a = write_claim(subj12, serde_json::json!("Berlin"),
+        now - chrono::Duration::days(2000), Some(now - chrono::Duration::days(1000)),
+        now - chrono::Duration::days(3000));
+    let b = write_claim(subj12, serde_json::json!("Paris"),
+        now - chrono::Duration::days(1000), None,
+        now - chrono::Duration::days(2900));
+    let b_ref = b.claim_ref().clone();
+    let mut txn = store.begin_atomic(&agent).expect("nsi: begin succession");
+    store.append_claim(&mut txn, &a).expect("nsi: append a");
+    store.append_claim(&mut txn, &b).expect("nsi: append b");
+    store.commit(txn).expect("nsi: commit succession");
+
+    // Scenario 1: different value ("Munich"), overlaps A.
+    let cand1 = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: subj12.into(),
+        predicate: "nsi-pred".into(),
+        value: serde_json::json!("Munich"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(ValidTime {
+            start: Some(now - chrono::Duration::days(1500)), end: None,
+            valid_time_confidence: 0.9, start_granularity: None, end_granularity: None,
+        }),
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    };
+    let resp1 = ingest_uc.execute_with_time(cand1, now).expect("nsi[1]: ingest must not error");
+    assert_eq!(resp1.disposition, Disposition::Contested,
+        "nsi[1]: candidate overlapping the OLDER succession member must be Contested, got {:?}", resp1.disposition);
+    assert_eq!(resp1.contested_with, vec![b_ref.clone()],
+        "nsi[1]: contested_with must be the CURRENT belief B, not the stale incumbent A");
+
+    // Scenario 2: SAME value as B ("Paris"), overlaps A — step-3 refinement.
+    let cand2 = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: subj12.into(),
+        predicate: "nsi-pred".into(),
+        value: serde_json::json!("Paris"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(ValidTime {
+            start: Some(now - chrono::Duration::days(1600)), end: None,
+            valid_time_confidence: 0.9, start_granularity: None, end_granularity: None,
+        }),
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    };
+    let resp2 = ingest_uc.execute_with_time(cand2, now).expect("nsi[2]: ingest must not error");
+    assert_ne!(resp2.disposition, Disposition::CommittedCheap,
+        "nsi[2]: identical value to the current incumbent B, but overlapping the OLDER \
+         differently-valued A, must NOT silently commit — got {:?}", resp2.disposition);
+    assert_eq!(resp2.disposition, Disposition::Contested);
+
+    // ── Scenario 3: ordinary single-incumbent conflict ─────────────────────────────────
+    let subj3 = "nsi-ordinary";
+    let c = write_claim(subj3, serde_json::json!("Foo"), now - chrono::Duration::days(10), None, now - chrono::Duration::days(20));
+    let c_ref = c.claim_ref().clone();
+    let mut txn = store.begin_atomic(&agent).expect("nsi[3]: begin");
+    store.append_claim(&mut txn, &c).expect("nsi[3]: append c");
+    store.commit(txn).expect("nsi[3]: commit");
+
+    let cand3 = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: subj3.into(),
+        predicate: "nsi-pred".into(),
+        value: serde_json::json!("Bar"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: None,
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    };
+    let resp3 = ingest_uc.execute_with_time(cand3, now).expect("nsi[3]: ingest must not error");
+    assert_eq!(resp3.disposition, Disposition::Contested);
+    assert_eq!(resp3.contested_with, vec![c_ref], "nsi[3]: contested_with must be the sole current incumbent");
+
+    // ── Scenario 4: DIAG-C — incumbent fully closed via assert_validity Bound ──────────
+    let subj4 = "nsi-diag-c";
+    let d = write_claim(subj4, serde_json::json!("Berlin"), now - chrono::Duration::days(1000), None, now - chrono::Duration::days(2000));
+    let d_ref = d.claim_ref().clone();
+    let mut txn = store.begin_atomic(&agent).expect("nsi[4]: begin");
+    store.append_claim(&mut txn, &d).expect("nsi[4]: append d");
+    store.commit(txn).expect("nsi[4]: commit");
+
+    let av_uc = AssertValidityUseCase::new(Arc::clone(store));
+    let bound_at = now - chrono::Duration::days(500);
+    av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(),
+            target: d_ref.clone(),
+            assertion: ValidityAssertionInput::Bound { at: bound_at },
+            provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        now,
+    ).expect("nsi[4]: bound must not error");
+
+    let cand4 = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: subj4.into(),
+        predicate: "nsi-pred".into(),
+        value: serde_json::json!("Munich"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(ValidTime {
+            start: Some(now - chrono::Duration::days(700)), end: None,
+            valid_time_confidence: 0.9, start_granularity: None, end_granularity: None,
+        }),
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    };
+    let resp4 = ingest_uc.execute_with_time(cand4, now).expect("nsi[4]: ingest must not error");
+    assert_eq!(resp4.disposition, Disposition::Contested,
+        "nsi[4]: a retroactive claim over an explicitly-closed historical window must be \
+         Contested, got {:?}", resp4.disposition);
+    assert_eq!(resp4.contested_with, vec![d_ref],
+        "nsi[4]: with no live successor, incumbent must fall back to the widened set (the ended incumbent D)");
+}
+
 /// Cross-adapter conformance: sweeping an EXPIRED pending row reverts the challenger to
 /// `Contested` and writes NO supersession (no Bound assertion, no edge) on the incumbent;
 /// supersession (incumbent → Superseded, challenger → CommittedCheap) happens ONLY when

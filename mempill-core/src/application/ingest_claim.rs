@@ -179,15 +179,28 @@ where
         let all_live_claims: Vec<mempill_types::Claim> =
             truth_engine::build_conflict_candidate_claims(&fold_result, &denied_via_adjudication);
 
-        // TASK-33-W5-LIB C: `incumbent_belief` (reconciler step 1's None-check / step 3's
-        // same-value check — see `reconciler::classify_conflict`) must be drawn from the SAME
-        // widened candidate set as `all_live_claims`, not the raw-live-only `fold_result.live_claims`.
-        // Otherwise a subject-line whose ONLY claim is bound-excluded (e.g. an end_fact-closed
-        // sole incumbent) would present as `incumbent = None` → step 1 short-circuits to
-        // NoConflict/CommittedCheap regardless of what the N-wide overlap check below would have
-        // found — exactly the DIAG-4 finding C gap (this is the fix that makes the N-wide check
-        // actually reachable, not just present).
-        let incumbent_belief = all_live_claims.first().map(truth_engine::claim_to_belief_raw);
+        // TASK-33-W5-LIB-R1 (review blocker 1): `incumbent_belief` (reconciler step 1's
+        // None-check / step 3's same-value check — see `reconciler::classify_conflict`) must
+        // prefer the fold's step-4-selected CURRENT belief — `fold_result.live_claims.first()`
+        // — not `all_live_claims.first()`. `all_live_claims` is `all_claims` filtered/widened,
+        // still sorted by the canonical ordering key (ascending), so its `.first()` is the
+        // OLDEST claim on the line, not the narrowed succession's current member: on a
+        // succession A [2020,2022) → B [2022,∞), `all_live_claims.first()` would be A even
+        // though B is the live/current belief, letting `classify_conflict` step 3's
+        // identical-value shortcut wave through a candidate whose value happens to match the
+        // STALE incumbent A.
+        //
+        // `fold_result.live_claims` (post step-4 narrowing) IS that current belief: a single
+        // claim when a trusted succession was narrowed to the query instant, or the sole live
+        // claim in the ordinary case. Fall back to the WIDENED `all_live_claims` set only when
+        // `fold_result.live_claims` is empty (DIAG-C: the incumbent was retroactively/entirely
+        // closed by an active Bound with no live successor — the widened, bound-narrowed set is
+        // the only source of an incumbent to classify against in that case).
+        let incumbent_belief = fold_result
+            .live_claims
+            .first()
+            .map(truth_engine::claim_to_belief)
+            .or_else(|| all_live_claims.first().map(truth_engine::claim_to_belief_raw));
 
         let oracle_present = self.oracle.is_some();
         let proposal = reconciler::reconcile(
@@ -447,18 +460,34 @@ pub(crate) fn build_latest_disposition_map(
     map.into_iter().map(|(k, (_, d))| (k, d)).collect()
 }
 
-/// Claims whose LATEST ledger disposition is `Superseded` but whose PENULTIMATE disposition
-/// (the entry immediately preceding it, by `recorded_at`) was `QueuedForAdjudication` — i.e.
-/// the claim was rejected via an oracle `Deny` verdict (`submit_adjudication.rs::bound_claim`),
-/// never genuinely "believed" for any valid-time window (TASK-33-W5-LIB A, DIAG-4 finding A).
+/// Claims whose LATEST ledger entry is a `Superseded` written by an oracle `Deny` verdict
+/// (`submit_adjudication.rs::bound_claim`) — i.e. rejected, never genuinely "believed" for any
+/// valid-time window (TASK-33-W5-LIB A, DIAG-4 finding A).
+///
+/// TASK-33-W5-LIB-R1 (review should-fix 2): `bound_claim` now writes an explicit
+/// `"verdict": "affirm" | "deny"` field into the Superseded entry's `rationale` JSON — read
+/// that directly off the LATEST entry rather than inferring it from ledger-entry ORDER.
+///
+/// Two guards around the marker read:
+/// - If the LATEST entry is not `Superseded` at all (e.g. `Reinstated` via an `assert_validity`
+///   `Reopen` — the one operation that intentionally REVERSES a prior Bound/denial), the claim
+///   is definitively NOT denied, regardless of an earlier deny in its history.
+/// - Otherwise, if the latest `Superseded` entry itself carries no `"verdict"` field (a legacy
+///   row written before this field existed, OR a non-adjudication closure such as
+///   `end_fact`/`assert_validity`), fall back to a QueuedForAdjudication → Superseded
+///   adjacent-transition scan over the FULL history (not just the immediate last pair) — a
+///   later, out-of-contract `Superseded` write must not erase a genuine earlier deny. This is
+///   the fix for the reachable sequence `[Queued, Superseded(deny), Superseded(end_fact)]`: the
+///   old penultimate-only heuristic checked only `entries[len-2]` (itself `Superseded`, not
+///   `QueuedForAdjudication`) and missed the deny buried one entry further back — a false
+///   negative that silently re-admitted a denied challenger's window as a conflict candidate.
 ///
 /// Both an Affirm's losing incumbent and a host `end_fact`/`assert_validity` closure ALSO end
-/// with a latest disposition of `Superseded`, but their PENULTIMATE disposition is always a
-/// committed-like state (`CommittedCheap`/`CommittedInferred`/`Reinstated`/...), never
-/// `QueuedForAdjudication` — the incumbent is never routed through adjudication itself (see
-/// `submit_adjudication.rs` module docs: "the incumbent is NOT checked/moved to
-/// QueuedForAdjudication"). This penultimate-disposition check is therefore a precise
-/// discriminator between "rejected, never believed" and "genuinely superseded, once believed".
+/// with a latest disposition of `Superseded`, but their rationale never carries
+/// `"verdict": "deny"` (Affirm writes `"verdict": "affirm"`; a host closure's Superseded entry
+/// carries no `"verdict"` key at all) — the incumbent/host-closed claim is never routed through
+/// adjudication itself (see `submit_adjudication.rs` module docs: "the incumbent is NOT
+/// checked/moved to QueuedForAdjudication").
 ///
 /// Consumed by `truth_engine::narrow_live_claims_for_valid_at`'s valid_at bound-reentry
 /// candidate set (see that function's rustdoc for the full reentry rule) so a denied
@@ -478,14 +507,31 @@ pub(crate) fn build_denied_via_adjudication_set(
     let mut denied = std::collections::HashSet::new();
     for (claim_ref, mut entries) in per_claim {
         entries.sort_by_key(|e| e.recorded_at.0);
-        if entries.len() >= 2 {
-            let last = entries[entries.len() - 1];
-            let penultimate = entries[entries.len() - 2];
-            if last.disposition == Disposition::Superseded
-                && penultimate.disposition == Disposition::QueuedForAdjudication
-            {
-                denied.insert(claim_ref);
-            }
+        let Some(last) = entries.last() else { continue };
+        // Latest entry isn't Superseded (e.g. Reinstated via Reopen) → definitively not denied.
+        if last.disposition != Disposition::Superseded {
+            continue;
+        }
+
+        let verdict_field = last
+            .rationale
+            .as_ref()
+            .and_then(|r| r.get("verdict"))
+            .and_then(|v| v.as_str());
+
+        let is_denied = match verdict_field {
+            Some(v) => v == "deny",
+            // Legacy fallback: the terminal Superseded entry carries no explicit marker — scan
+            // the FULL adjacent-entry history for a QueuedForAdjudication -> Superseded
+            // transition (not just the immediate last pair; see rustdoc above).
+            None => entries.windows(2).any(|pair| {
+                pair[0].disposition == Disposition::QueuedForAdjudication
+                    && pair[1].disposition == Disposition::Superseded
+            }),
+        };
+
+        if is_denied {
+            denied.insert(claim_ref);
         }
     }
     denied
@@ -1059,5 +1105,110 @@ mod tests {
 
         let rows = shared_pending.rows.lock().unwrap();
         assert_eq!(rows.len(), 0, "B11a: no pending row when Contested");
+    }
+
+    // ── build_denied_via_adjudication_set: reachable-sequence table (TASK-33-W5-LIB-R1
+    // review should-fix 2) ──────────────────────────────────────────────────────────────
+
+    fn dvs_entry(
+        claim_ref: &ClaimRef,
+        disposition: Disposition,
+        recorded_at_offset_secs: i64,
+        rationale: Option<serde_json::Value>,
+    ) -> LedgerEntry {
+        LedgerEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            agent_id: AgentId("dvs-agent".into()),
+            claim_ref: claim_ref.clone(),
+            event_kind: mempill_types::LedgerEventKind::AdjudicationResolved,
+            disposition,
+            rationale,
+            recorded_at: TransactionTime(
+                chrono::Utc::now() + chrono::Duration::seconds(recorded_at_offset_secs),
+            ),
+        }
+    }
+
+    #[test]
+    fn dvs_queued_then_deny_marker_is_excluded() {
+        // [Queued, Superseded(deny)] -> excluded (denied set contains it).
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::Superseded, 1, Some(serde_json::json!({"event": "oracle_supersession", "verdict": "deny"}))),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(denied.contains(&r), "denied challenger must be excluded (in the denied set)");
+    }
+
+    #[test]
+    fn dvs_affirm_winner_later_superseded_is_included() {
+        // [Queued, CommittedCheap, Superseded(affirm)] -> included (NOT in the denied set) —
+        // this claim was itself once believed (won an earlier Affirm), then later overturned
+        // by a NEW Affirm as the incumbent.
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::CommittedCheap, 1, Some(serde_json::json!({"event": "oracle_affirm", "verdict": "Affirm"}))),
+            dvs_entry(&r, Disposition::Superseded, 2, Some(serde_json::json!({"event": "oracle_supersession", "verdict": "affirm"}))),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(!denied.contains(&r), "an affirm-winner later superseded was genuinely believed — must not be denied");
+    }
+
+    #[test]
+    fn dvs_swept_then_end_fact_is_included() {
+        // [Queued, Contested, Superseded(end_fact, no marker)] -> included.
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::Contested, 1, None),
+            dvs_entry(&r, Disposition::Superseded, 2, Some(serde_json::json!({"event": "assert_validity_bound", "bound_at": "2024-01-01T00:00:00Z"}))),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(!denied.contains(&r), "swept-then-end_fact closure is not a denial — must not be denied");
+    }
+
+    #[test]
+    fn dvs_deny_then_reinstated_is_included() {
+        // [Queued, Superseded(deny), Reinstated] -> included — Reopen reverses the denial.
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::Superseded, 1, Some(serde_json::json!({"event": "oracle_supersession", "verdict": "deny"}))),
+            dvs_entry(&r, Disposition::Reinstated, 2, Some(serde_json::json!({"event": "assert_validity_reopen"}))),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(!denied.contains(&r), "Reopen must reverse a prior deny — claim is no longer denied");
+    }
+
+    #[test]
+    fn dvs_deny_then_out_of_contract_end_fact_still_excluded() {
+        // [Queued, Superseded(deny), Superseded(end_fact, no marker)] -> STILL excluded — the
+        // false negative of the OLD penultimate-only heuristic (which checked only the last
+        // pair, entries[len-2]=Superseded != QueuedForAdjudication, and missed the deny buried
+        // one entry further back). A later out-of-contract Superseded write must not erase a
+        // genuine earlier deny.
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::Superseded, 1, Some(serde_json::json!({"event": "oracle_supersession", "verdict": "deny"}))),
+            dvs_entry(&r, Disposition::Superseded, 2, Some(serde_json::json!({"event": "assert_validity_bound", "bound_at": "2024-01-01T00:00:00Z"}))),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(denied.contains(&r), "a genuine earlier deny must remain excluded despite a later out-of-contract Superseded write");
+    }
+
+    #[test]
+    fn dvs_legacy_row_without_marker_falls_back_to_heuristic() {
+        // Legacy 2-entry row predating the "verdict" field: [Queued, Superseded] with no
+        // rationale marker at all -> heuristic fallback (QFA -> Superseded transition) applies.
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::Superseded, 1, None),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(denied.contains(&r), "legacy row lacking the marker must fall back to the QFA->Superseded heuristic and still be denied");
     }
 }

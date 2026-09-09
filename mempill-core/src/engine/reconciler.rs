@@ -107,7 +107,10 @@ pub(crate) fn reconcile(input: ReconcilerInput<'_>, _config: &EngineConfig) -> P
 /// Decision order:
 /// 1. No incumbent → NoConflict (first write).
 /// 2. derived_from intersects superseded_claim_refs → DependsOnSuperseded.
-/// 3. Same (subject, predicate) + same JSON value → NoConflict (idempotent re-statement).
+/// 3. Same (subject, predicate) + same JSON value AND the candidate's window does not
+///    overlap any OTHER live claim (`all_live_claims`) with a DIFFERENT value → NoConflict
+///    (idempotent re-statement). Identical value overlapping a differently-valued OLDER live
+///    claim falls through to step 4 instead (TASK-33-W5-LIB-R1).
 /// 4. Same (subject, predicate) + different value:
 ///    4a. Candidate forms a trusted, pairwise-non-overlapping succession against EVERY OTHER
 ///        raw-live claim on the subject-line (N-wide, not just one incumbent) → Succession.
@@ -141,11 +144,33 @@ fn classify_conflict(input: &ReconcilerInput<'_>) -> ConflictType {
 
     if cand_subject == incumb_subject && cand_predicate == incumb_predicate {
         // Same subject-line.
-        if cand_value == incumb_value {
-            // Step 3: identical value — idempotent re-statement, not a contradiction.
+        //
+        // TASK-33-W5-LIB-R1 (review blocker 1, step-3 refinement): the identical-value
+        // shortcut below is a legitimate re-assertion ONLY when the candidate's window does
+        // not overlap any OTHER live claim (`all_live_claims`) whose value differs from the
+        // candidate's. Re-affirming the CURRENT incumbent's value while silently overlapping
+        // an OLDER, different-valued succession member (e.g. candidate "Paris" [2021,∞)
+        // overlapping A="Berlin" [2020,2022) even though the current incumbent B is also
+        // "Paris") must still be routed through the N-wide overlap check (step 4) — identical
+        // value against the CURRENT incumbent is not evidence about what was true during a
+        // window that belonged to a DIFFERENT, earlier claim. Overlapping the incumbent
+        // itself (same value) never disqualifies the shortcut.
+        let candidate_ref = input.candidate.claim_ref();
+        let overlaps_different_value = input.candidate.valid_time().start.is_some()
+            && input.all_live_claims.iter().any(|other| {
+                other.claim_ref() != candidate_ref
+                    && &other.fact().value != cand_value
+                    && other.valid_time().start.is_some()
+                    && !valid_time_helpers::windows_non_overlapping(input.candidate, other)
+            });
+
+        if cand_value == incumb_value && !overlaps_different_value {
+            // Step 3: identical value, no overlap with a differently-valued claim —
+            // idempotent re-statement, not a contradiction.
             ConflictType::NoConflict
         } else {
-            // Step 4: same line, different value — check for trusted temporal succession.
+            // Step 4: different value (or identical value overlapping a differently-valued
+            // claim) — check for trusted temporal succession.
             //
             // N-wide check (fixes the silent chain-overlap defect): the candidate must form a
             // trusted succession against EVERY raw-live claim on the subject-line, not just the
@@ -871,6 +896,92 @@ mod tests {
         assert_eq!(
             proposal.conflict_type, ConflictType::SameLineConflict,
             "zero-width challenger window inside Linda's window must still be SameLineConflict"
+        );
+    }
+
+    // ── Step 3 refinement: identical-value shortcut must not wave through an overlap with
+    // an OLDER, differently-valued live claim (TASK-33-W5-LIB-R1 review blocker 1) ─────────
+
+    /// Candidate value matches the CURRENT incumbent B ("Paris"), but the candidate's window
+    /// overlaps A ("Berlin"), an OLDER, differently-valued member of `all_live_claims`. The
+    /// step-3 identical-value shortcut must NOT wave this through as NoConflict — it must fall
+    /// through to the N-wide check (step 4), which correctly classifies it SameLineConflict
+    /// because it overlaps A.
+    #[test]
+    fn step3_identical_value_overlapping_older_different_value_claim_is_same_line_conflict() {
+        let a = make_claim_with_vt(
+            "user", "city", serde_json::json!("Berlin"),
+            Some(dt(2024, 1, 1)), Some(dt(2024, 2, 1)), 0.9,
+        );
+        let b = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 2, 1)), None, 0.9,
+        );
+        let incumbent_b = make_belief_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 2, 1)), None, 0.9,
+        );
+        // Candidate: same value as B ("Paris"), but window starts inside A's window.
+        let candidate = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 1, 15)), None, 0.9,
+        );
+        let all_live = vec![a.clone(), b.clone()];
+        let inp = ReconcilerInput {
+            candidate: &candidate,
+            incumbent: Some(&incumbent_b),
+            superseded_claim_refs: &[],
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+            succession_threshold: 0.7,
+            all_live_claims: &all_live,
+        };
+        let proposal = reconcile(inp, &cfg());
+        assert_eq!(
+            proposal.conflict_type, ConflictType::SameLineConflict,
+            "identical value to the CURRENT incumbent must not skip the N-wide check when the \
+             window overlaps an OLDER, differently-valued live claim (silent-commit regression)"
+        );
+    }
+
+    /// Negative control: candidate value matches incumbent B ("Paris") and its window overlaps
+    /// ONLY B (not A) — a legitimate re-assertion. Step 3's shortcut must still fire.
+    #[test]
+    fn step3_identical_value_no_overlap_with_different_value_claim_is_no_conflict() {
+        let a = make_claim_with_vt(
+            "user", "city", serde_json::json!("Berlin"),
+            Some(dt(2024, 1, 1)), Some(dt(2024, 2, 1)), 0.9,
+        );
+        let b = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 2, 1)), None, 0.9,
+        );
+        let incumbent_b = make_belief_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 2, 1)), None, 0.9,
+        );
+        // Candidate: same value as B, window starts AFTER A's window closes — overlaps only B.
+        let candidate = make_claim_with_vt(
+            "user", "city", serde_json::json!("Paris"),
+            Some(dt(2024, 3, 1)), None, 0.9,
+        );
+        let all_live = vec![a.clone(), b.clone()];
+        let inp = ReconcilerInput {
+            candidate: &candidate,
+            incumbent: Some(&incumbent_b),
+            superseded_claim_refs: &[],
+            measured_confidence: 0.9,
+            cardinality_proposal: Cardinality::Functional,
+            oracle_present: false,
+            succession_threshold: 0.7,
+            all_live_claims: &all_live,
+        };
+        let proposal = reconcile(inp, &cfg());
+        assert_eq!(
+            proposal.conflict_type, ConflictType::NoConflict,
+            "identical value overlapping ONLY the current incumbent's own window remains a \
+             legitimate idempotent re-assertion"
         );
     }
 }

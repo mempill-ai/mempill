@@ -296,6 +296,7 @@ where
                     affirm_incumbent_bound_at,
                     tx_time.clone(),
                     incumbent_edges,
+                    "affirm",
                     txn,
                 )?;
                 // 2. Write ledger entry for challenger → CommittedCheap with External provenance.
@@ -332,6 +333,7 @@ where
                     tx_time.0,
                     tx_time.clone(),
                     challenger_edges,
+                    "deny",
                     txn,
                 )?;
                 // Incumbent disposition is unchanged — no ledger entry needed for it.
@@ -388,6 +390,13 @@ where
     ///   tx-time are never conflated — see this module's doc comment).
     /// `overturning_ref` — the claim that caused the bounding (for rationale).
     /// `preloaded_edges` — DependsOn edges for `target_ref` (loaded before begin_atomic).
+    /// `verdict` — TASK-33-W5-LIB-R1 (review should-fix 2): explicit marker written into the
+    ///   Superseded ledger entry's `rationale` JSON as `"verdict": "affirm" | "deny"` — the
+    ///   Deny call bounds the CHALLENGER (rejected, never genuinely believed) and the Affirm
+    ///   call bounds the INCUMBENT (genuinely superseded, once believed). Both calls previously
+    ///   produced an IDENTICAL rationale shape, forcing `build_denied_via_adjudication_set` to
+    ///   infer which one occurred from ledger-entry ORDER (a penultimate-disposition heuristic)
+    ///   instead of reading the fact directly off the entry that recorded it.
     fn bound_claim(
         &self,
         agent_id: &AgentId,
@@ -396,6 +405,7 @@ where
         bound_at: DateTime<Utc>,
         tx_time: TransactionTime,
         preloaded_edges: &[mempill_types::ClaimEdge],
+        verdict: &'static str,
         txn: &mut P::Transaction,
     ) -> Result<(), MemError> {
         use mempill_types::{EdgeKind, ExternalKind, Confidence};
@@ -431,6 +441,7 @@ where
                 "event": "oracle_supersession",
                 "overturning_claim": overturning_ref.0.to_string(),
                 "bound_at": bound_at.to_rfc3339(),
+                "verdict": verdict,
             })),
             recorded_at: tx_time.clone(),
         };

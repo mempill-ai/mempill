@@ -13,6 +13,7 @@ use mempill_core::testing::conformance::{
     run_assert_validity_conformance,
     run_disposition_scope_conformance, run_granularity_conformance, run_history_conformance,
     run_history_granularity_conformance, run_persistence_conformance,
+    run_narrowed_succession_incumbent_selection_conformance,
     run_reconcile_incumbent_selection_matches_query_memory_primary_conformance,
     run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_conformance,
     run_valid_at_conformance,
@@ -151,6 +152,23 @@ fn postgres_reconcile_incumbent_selection_matches_query_memory_primary_pg16() {
 fn postgres_reconcile_incumbent_selection_matches_query_memory_primary_pg18() {
     common::with_pg("18", |store| {
         run_reconcile_incumbent_selection_matches_query_memory_primary_conformance(&store);
+    });
+}
+
+/// TASK-33-W5-LIB-R1 review blocker 1: narrowed-succession incumbent selection must prefer
+/// the fold's current belief over the widened set's oldest claim (postgres:16).
+#[test]
+fn postgres_narrowed_succession_incumbent_selection_pg16() {
+    common::with_pg("16", |store| {
+        run_narrowed_succession_incumbent_selection_conformance(&store);
+    });
+}
+
+/// Mirrors the pg16 suite above on postgres:18.
+#[test]
+fn postgres_narrowed_succession_incumbent_selection_pg18() {
+    common::with_pg("18", |store| {
+        run_narrowed_succession_incumbent_selection_conformance(&store);
     });
 }
 
