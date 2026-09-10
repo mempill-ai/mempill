@@ -74,7 +74,9 @@ pub(crate) fn execute<P: PersistencePort>(
         assertion_ref: uuid::Uuid::new_v4(),
         agent_id: req.agent_id.clone(),
         target_claim: req.superseded_ref.clone(),
-        kind: AssertionKind::Bound { bound_at: req.bound_at },
+        // No display-precision tracking on this legacy path (dead-at-ingest per
+        // ingest_claim.rs's module docs; retained only for pattern integrity).
+        kind: AssertionKind::Bound { bound_at: req.bound_at, bound_at_granularity: None },
         provenance: mempill_types::ProvenanceLabel::External(
             mempill_types::ExternalKind::ExternalFirstHand,
         ),

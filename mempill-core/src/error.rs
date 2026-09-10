@@ -124,6 +124,23 @@ pub enum MemError {
         existing_bound_at: String,
     },
 
+    /// `assert_validity` `Bound` was requested against a claim that is currently
+    /// `QueuedForAdjudication`, or was terminally rejected by an oracle `Deny` verdict
+    /// (TASK-33-W5-LIB-R1 nit): a claim under active adjudication has no host-asserted
+    /// window to narrow (the oracle owns its resolution), and a Deny-superseded claim was
+    /// never genuinely believed for any window, so bounding it again is meaningless.
+    /// `Reopen` on such a target is NOT rejected by this gate (a Deny verdict may
+    /// legitimately be reversed via `Reopen`, which restores the claim to a live/open
+    /// state — see `assert_validity.rs` module docs).
+    #[error(
+        "Claim {target:?} cannot be bounded: it is currently under oracle adjudication or was \
+         rejected by a Deny verdict (reopen it first if you intend to reverse the denial)"
+    )]
+    TargetUnderAdjudication {
+        /// The claim that is QueuedForAdjudication or Deny-superseded.
+        target: ClaimRef,
+    },
+
     /// `end_fact` (or any subject/predicate-scoped close) found more than one live claim
     /// on the line and refuses to guess which one to bound.
     #[error(

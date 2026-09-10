@@ -935,7 +935,15 @@ pub async fn end_fact(
     let subject = subject.into();
     let predicate = predicate.into();
 
-    let at_dt = crate::date::parse_lenient_date(&at.into())?;
+    // TASK-33-W5-LIB-R2 (DIAG-5): use the granularity-aware parse (not the discarding
+    // `parse_lenient_date` shim) so the closing bound honestly carries the precision the
+    // caller supplied (`"2024-09"` -> `Month`), not a fabricated day/instant precision.
+    let at_str = at.into();
+    let (at_dt, at_gran) = parse_valid_time_date(&at_str).ok_or_else(|| MempillDxError::UnparsableDate {
+        input: at_str,
+        hint: "Use YYYY, YYYY-MM, YYYY-MM-DD, or RFC3339 (e.g. 2026-01-01T00:00:00Z). \
+               Natural-language dates must be resolved by the caller before passing to end_fact().",
+    })?;
 
     let resolution = engine
         .resolve_live_claim_for_line_ergo(agent_id.clone(), subject.clone(), predicate.clone())
@@ -959,7 +967,7 @@ pub async fn end_fact(
     let req = mempill_core::AssertValidityRequest {
         agent_id,
         target,
-        assertion: mempill_core::ValidityAssertionInput::Bound { at: at_dt },
+        assertion: mempill_core::ValidityAssertionInput::Bound { at: at_dt, at_granularity: Some(at_gran) },
         provenance: opts
             .provenance
             .unwrap_or(ProvenanceLabel::External(ExternalKind::UserAsserted)),

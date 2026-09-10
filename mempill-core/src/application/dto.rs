@@ -122,6 +122,12 @@ pub enum ValidityAssertionInput {
     Bound {
         /// The UTC instant at which `target` stops being valid.
         at: chrono::DateTime<chrono::Utc>,
+        /// The display precision `at` was supplied at (e.g. `Month` for `"2024-09"`), if
+        /// known. `None` for callers that only have a bare instant (raw `assert_validity`
+        /// JSON) — honest absence, not a fabricated `Instant`. `#[serde(default)]` so
+        /// pre-existing callers that never sent this field keep deserializing (TASK-33-W5-LIB-R2).
+        #[serde(default)]
+        at_granularity: Option<DateGranularity>,
     },
     /// Reverse the most recent active Bound on `target`, reopening its valid-time window.
     ///
@@ -252,8 +258,19 @@ pub struct HistoryEntry {
     /// field's docs for the full derivation rule):
     ///   - this claim's own `end_granularity`, when its own end was used (the common case now
     ///     that own-end is honoured whenever present);
+    ///   - the BOUND's own `bound_at_granularity`, when `valid_until` is bound-derived (an
+    ///     active `Bound` narrowed the window). Its source depends on who wrote the bound:
+    ///     `end_fact`/`assert_validity` carry the caller's date precision as given (e.g.
+    ///     `"2024-09"` → `Month`); an adjudication `Affirm` stamps the winner's
+    ///     `valid_time.start` precision; a `Deny` stamps the claim's transaction time and so
+    ///     has no precision (`None`);
     ///   - the successor's `start_granularity`, only when the successor's ordering key was
     ///     used AND was itself sourced from `valid_time.start` (not a transaction-time fallback);
+    ///   - the successor's `start_granularity` ALSO when a bound-derived `valid_until` carries
+    ///     no granularity of its own (legacy assertion, or the `Deny` case above) and its
+    ///     instant coincides exactly with that successor key. This fallback is restricted to
+    ///     bound-derived ends: a claim's OWN `end_granularity == None` means the writer meant
+    ///     instant precision and is never overridden;
     ///   - `None` when the winning value came from a transaction-time fallback (a machine
     ///     timestamp has no user-supplied date precision) or is absent (open-ended / overlap).
     ///

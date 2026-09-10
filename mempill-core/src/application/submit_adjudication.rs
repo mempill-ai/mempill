@@ -9,9 +9,20 @@
 //!
 //! | Verdict | Challenger | Incumbent | Ledger entries |
 //! |---------|-----------|-----------|----------------|
-//! | Affirm  | → CommittedCheap (new ledger w/ External provenance) | → Superseded (ValidityAssertion Bound + ledger) | 2 |
-//! | Deny    | → Superseded (ValidityAssertion Bound + ledger) | stays committed (no change) | 1 |
+//! | Affirm  | → CommittedCheap (new ledger w/ External provenance) | → Superseded (ValidityAssertion Bound at challenger's valid-time start, ledger) | 2 |
+//! | Deny    | → Superseded (ValidityAssertion Bound at tx_time, ledger) | stays committed (no change) | 1 |
 //! | Unknown | → Contested (ledger abstain entry) | → Contested (ledger abstain entry) | 2 (one per claim) |
+//!
+//! # Affirm's `bound_at` (TASK-33-W5-LIB B, DIAG-4 finding B)
+//!
+//! `bound_at` is a VALID-time instant (it narrows the incumbent's displayed/folded window —
+//! see `truth_engine::compute_history_windows`), not a transaction-time stamp. On Affirm, the
+//! losing incumbent is therefore bounded at the WINNING challenger's `valid_time.start` (the
+//! instant belief actually changed in the world), falling back to `now` (tx_time) only when the
+//! challenger has no trusted valid-time start (`valid_time_helpers::claim_is_trusted`). On Deny
+//! the challenger never held any genuine belief window, so it keeps the simpler `bound_at = now`
+//! (tx_time) — see `truth_engine::narrow_live_claims_for_valid_at`'s rustdoc for why a
+//! Deny-bounded claim is also EXCLUDED from valid_at re-entry regardless of `bound_at`.
 //!
 //! # Lock invariant
 //!
@@ -34,6 +45,7 @@ use mempill_types::{
 };
 
 use crate::{
+    engine::valid_time_helpers,
     engine_handle::ErasedPendingStore,
     error::MemError,
     ports::PersistencePort,
@@ -48,14 +60,22 @@ where
 {
     persistence: Arc<P>,
     pending_store: Arc<dyn ErasedPendingStore>,
+    /// TASK-33-W5-LIB B: `valid_time_confidence_threshold` used to decide whether the winning
+    /// challenger's `valid_time.start` is trusted enough to bound the losing incumbent at
+    /// (falls back to tx_time otherwise). Additive field — does not change wire schema.
+    config: crate::config::EngineConfig,
 }
 
 impl<P> SubmitAdjudicationUseCase<P>
 where
     P: PersistencePort + Send + Sync + 'static,
 {
-    pub fn new(persistence: Arc<P>, pending_store: Arc<dyn ErasedPendingStore>) -> Self {
-        Self { persistence, pending_store }
+    pub fn new(
+        persistence: Arc<P>,
+        pending_store: Arc<dyn ErasedPendingStore>,
+        config: crate::config::EngineConfig,
+    ) -> Self {
+        Self { persistence, pending_store, config }
     }
 
     /// Execute the verdict-apply algorithm.
@@ -168,6 +188,36 @@ where
             .load_edges_for(&agent_id, &challenger_ref)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
 
+        // TASK-33-W5-LIB B: load the winning challenger's claim BEFORE begin_atomic (I9) so
+        // an Affirm can bound the incumbent at the challenger's valid-time start rather than
+        // at tx_time. Only the challenger's `valid_time` is needed; unused on Deny/Unknown.
+        let challenger_claim = self.persistence
+            .load_claim(&agent_id, &challenger_ref)
+            .map_err(|e| MemError::Persistence { source: Box::new(e) })?
+            .ok_or_else(|| MemError::ClaimNotFound { claim_ref: challenger_ref.clone() })?;
+        // TASK-33-W5-LIB-R2 (DIAG-5): carry the challenger's OWN start_granularity alongside
+        // bound_at, so the incumbent's bound-derived end honestly reflects the precision the
+        // challenger's valid-time start was supplied at (e.g. "2024-09" → Month), instead of
+        // silently rendering at day/instant precision. Only meaningful on the trusted branch —
+        // the tx_time fallback has no host-supplied date precision to report.
+        let (affirm_incumbent_bound_at, affirm_incumbent_bound_at_granularity) = if valid_time_helpers::claim_is_trusted(
+            &challenger_claim,
+            self.config.valid_time_confidence_threshold,
+        ) {
+            (
+                challenger_claim
+                    .valid_time()
+                    .start
+                    .expect("claim_is_trusted guarantees valid_time.start is Some"),
+                challenger_claim.valid_time().start_granularity,
+            )
+        } else {
+            // No trusted valid-time start on the challenger — fall back to tx_time (the
+            // pre-fix behavior), the only instant we can be certain is correct. tx_time has
+            // no tracked date-string precision, so granularity is honestly None.
+            (now, None)
+        };
+
         // ── Step 2 / Step 4–6: begin_atomic + apply verdict + mark resolved + commit ──
         let mut txn = self.persistence
             .begin_atomic(&agent_id)
@@ -180,6 +230,8 @@ where
             &challenger_ref,
             &incumbent_ref,
             tx_time.clone(),
+            affirm_incumbent_bound_at,
+            affirm_incumbent_bound_at_granularity,
             &incumbent_edges,
             &challenger_edges,
             &mut txn,
@@ -237,6 +289,8 @@ where
         challenger_ref: &mempill_types::ClaimRef,
         incumbent_ref: &mempill_types::ClaimRef,
         tx_time: TransactionTime,
+        affirm_incumbent_bound_at: DateTime<Utc>,
+        affirm_incumbent_bound_at_granularity: Option<mempill_types::DateGranularity>,
         incumbent_edges: &[mempill_types::ClaimEdge],
         challenger_edges: &[mempill_types::ClaimEdge],
         txn: &mut P::Transaction,
@@ -244,13 +298,17 @@ where
         match verdict {
             AdjudicationVerdict::Affirm => {
                 // Affirm: challenger wins.
-                // 1. Bound the incumbent (→ Superseded) + ledger entry.
+                // 1. Bound the incumbent (→ Superseded) + ledger entry, at the WINNING
+                //    challenger's valid-time start (TASK-33-W5-LIB B) — not at tx_time.
                 self.bound_claim(
                     agent_id,
                     incumbent_ref,
                     challenger_ref,
+                    affirm_incumbent_bound_at,
+                    affirm_incumbent_bound_at_granularity,
                     tx_time.clone(),
                     incumbent_edges,
+                    "affirm",
                     txn,
                 )?;
                 // 2. Write ledger entry for challenger → CommittedCheap with External provenance.
@@ -275,13 +333,21 @@ where
 
             AdjudicationVerdict::Deny => {
                 // Deny: incumbent stands.
-                // 1. Bound the challenger (→ Superseded) + ledger entry.
+                // 1. Bound the challenger (→ Superseded) + ledger entry. The challenger never
+                //    held a genuine belief window (it was QueuedForAdjudication throughout),
+                //    so it keeps `bound_at = tx_time` (TASK-33-W5-LIB B) — unlike Affirm's
+                //    incumbent, it is also excluded from valid_at re-entry regardless (see
+                //    `truth_engine::narrow_live_claims_for_valid_at`).
                 self.bound_claim(
                     agent_id,
                     challenger_ref,
                     incumbent_ref,
+                    tx_time.0,
+                    // Deny: tx_time has no tracked date-string precision — honestly None.
+                    None,
                     tx_time.clone(),
                     challenger_edges,
+                    "deny",
                     txn,
                 )?;
                 // Incumbent disposition is unchanged — no ledger entry needed for it.
@@ -331,25 +397,45 @@ where
     /// Write a Bound ValidityAssertion + Superseded ledger entry for `target_ref`
     /// inside the open transaction (reuses the supersession.rs pattern).
     ///
+    /// `bound_at` — the VALID-time instant the target's window closes at (TASK-33-W5-LIB B:
+    ///   the winning challenger's `valid_time.start` for Affirm; `tx_time.0` for Deny).
+    ///   `tx_time` — the transaction-time instant this write happens at; used for
+    ///   `asserted_at`/`recorded_at` ONLY, independent of `bound_at` (valid-time vs
+    ///   tx-time are never conflated — see this module's doc comment).
     /// `overturning_ref` — the claim that caused the bounding (for rationale).
     /// `preloaded_edges` — DependsOn edges for `target_ref` (loaded before begin_atomic).
+    /// `verdict` — TASK-33-W5-LIB-R1 (review should-fix 2): explicit marker written into the
+    ///   Superseded ledger entry's `rationale` JSON as `"verdict": "affirm" | "deny"` — the
+    ///   Deny call bounds the CHALLENGER (rejected, never genuinely believed) and the Affirm
+    ///   call bounds the INCUMBENT (genuinely superseded, once believed). Both calls previously
+    ///   produced an IDENTICAL rationale shape, forcing `build_denied_via_adjudication_set` to
+    ///   infer which one occurred from ledger-entry ORDER (a penultimate-disposition heuristic)
+    ///   instead of reading the fact directly off the entry that recorded it.
+    /// `bound_at_granularity` — TASK-33-W5-LIB-R2 (DIAG-5): the display precision of
+    ///   `bound_at`, when known — the winning challenger's `start_granularity` for Affirm;
+    ///   always `None` for Deny (tx_time has no tracked date-string precision).
+    #[allow(clippy::too_many_arguments)]
     fn bound_claim(
         &self,
         agent_id: &AgentId,
         target_ref: &mempill_types::ClaimRef,
         overturning_ref: &mempill_types::ClaimRef,
+        bound_at: DateTime<Utc>,
+        bound_at_granularity: Option<mempill_types::DateGranularity>,
         tx_time: TransactionTime,
         preloaded_edges: &[mempill_types::ClaimEdge],
+        verdict: &'static str,
         txn: &mut P::Transaction,
     ) -> Result<(), MemError> {
         use mempill_types::{EdgeKind, ExternalKind, Confidence};
 
-        // Step A: Bound ValidityAssertion (closes the claim's valid window).
+        // Step A: Bound ValidityAssertion (closes the claim's valid window at `bound_at`,
+        // a valid-time instant — `asserted_at` remains tx_time, the write's own timestamp).
         let assertion = ValidityAssertion {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent_id.clone(),
             target_claim: target_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: tx_time.0 },
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity },
             provenance: mempill_types::ProvenanceLabel::External(
                 ExternalKind::ExternalFirstHand,
             ),
@@ -373,7 +459,8 @@ where
             rationale: Some(serde_json::json!({
                 "event": "oracle_supersession",
                 "overturning_claim": overturning_ref.0.to_string(),
-                "bound_at": tx_time.0.to_rfc3339(),
+                "bound_at": bound_at.to_rfc3339(),
+                "verdict": verdict,
             })),
             recorded_at: tx_time.clone(),
         };
@@ -675,6 +762,11 @@ mod tests {
         let incumbent = make_claim(&agent);
         let now = Utc::now();
 
+        // TASK-33-W5-LIB B: apply_verdict now loads the challenger's Claim (for the Affirm
+        // bound_at derivation) BEFORE begin_atomic — register both claims in the mock store.
+        store.claims.lock().unwrap().push(challenger.clone());
+        store.claims.lock().unwrap().push(incumbent.clone());
+
         // The challenger is QueuedForAdjudication; the incumbent is CommittedCheap.
         // (Only the challenger is gated to QueuedForAdjudication by the engine.)
         store.ledger.lock().unwrap().push(LedgerEntry {
@@ -732,7 +824,7 @@ mod tests {
                 }
                 Delegate(Arc::clone(&pending))
             }));
-        SubmitAdjudicationUseCase::new(store, erased)
+        SubmitAdjudicationUseCase::new(store, erased, crate::config::EngineConfig::default())
     }
 
     // ── Test: unknown handle → AdjudicationHandleNotFound ────────────────────
@@ -768,7 +860,8 @@ mod tests {
             verdict: AdjudicationVerdict::Affirm,
             evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
         };
-        let outcome = uc.execute(handle_id, response, Utc::now()).unwrap();
+        let now = Utc::now();
+        let outcome = uc.execute(handle_id, response, now).unwrap();
 
         assert_eq!(outcome.handle_id, handle_id);
         assert_eq!(outcome.disposition, Disposition::CommittedCheap);
@@ -799,8 +892,127 @@ mod tests {
         assert_eq!(assertions.len(), 1, "one Bound assertion for incumbent");
         assert_eq!(assertions[0].target_claim, incumbent_ref);
 
+        // TASK-33-W5-LIB B: `make_claim` (used by `setup_queued_scenario`) gives the
+        // challenger NO valid_time (start=None) → not trusted → bound_at falls back to `now`
+        // (tx_time), the pre-fix value. Assert this EXPLICITLY (regression guard for the
+        // fallback branch) — see `affirm_bounds_incumbent_at_challenger_valid_time_start`
+        // below for the trusted-start case.
+        match assertions[0].kind {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
+                assert_eq!(bound_at, now, "fallback: untrusted challenger valid_time → bound_at = now (tx_time)");
+                assert_eq!(bound_at_granularity, None, "tx_time fallback has no tracked date-string precision");
+            }
+            _ => panic!("expected AssertionKind::Bound"),
+        }
+
         // Pending row marked resolved.
         assert!(pending.is_resolved(handle_id), "pending row must be resolved");
+    }
+
+    // ── Test: Affirm — bounds the incumbent at the WINNING challenger's valid-time start,
+    //    NOT at tx_time (TASK-33-W5-LIB B, DIAG-4 finding B) ──────────────────
+
+    #[test]
+    fn affirm_bounds_incumbent_at_challenger_valid_time_start() {
+        use chrono::TimeZone;
+
+        let store = Arc::new(MockStore::default());
+        let pending = Arc::new(MockPendingStore::default());
+        let handle_id = uuid::Uuid::new_v4();
+        let agent = make_agent();
+
+        // Challenger has a TRUSTED valid-time start (2024-09-01, confidence above threshold),
+        // well before `now` (tx_time) — this is the "Joan contests from 2024-09" scenario.
+        let challenger_vt_start = Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).unwrap();
+        let mut challenger = make_claim(&agent);
+        challenger = Claim::new(
+            challenger.claim_ref().clone(),
+            agent.clone(),
+            challenger.fact().clone(),
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            challenger.transaction_time().clone(),
+            ValidTime {
+                start: Some(challenger_vt_start),
+                end: None,
+                valid_time_confidence: 0.9,
+                start_granularity: Some(mempill_types::DateGranularity::Month),
+                end_granularity: None,
+            },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+            Criticality::Medium,
+            vec![],
+            None,
+            None,
+        );
+        let incumbent = make_claim(&agent);
+        let now = Utc::now();
+
+        store.claims.lock().unwrap().push(challenger.clone());
+        store.claims.lock().unwrap().push(incumbent.clone());
+        store.ledger.lock().unwrap().push(LedgerEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: challenger.claim_ref().clone(),
+            event_kind: LedgerEventKind::ClaimCommitted,
+            disposition: Disposition::QueuedForAdjudication,
+            rationale: None,
+            recorded_at: TransactionTime(now - chrono::Duration::seconds(5)),
+        });
+        store.ledger.lock().unwrap().push(LedgerEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            claim_ref: incumbent.claim_ref().clone(),
+            event_kind: LedgerEventKind::ClaimCommitted,
+            disposition: Disposition::CommittedCheap,
+            rationale: None,
+            recorded_at: TransactionTime(now - chrono::Duration::seconds(10)),
+        });
+        pending.seed(PendingAdjudicationRow {
+            handle_id,
+            agent_id: agent.clone(),
+            subject: "user".into(),
+            predicate: "city".into(),
+            challenger_claim_ref: challenger.claim_ref().clone(),
+            incumbent_claim_ref: incumbent.claim_ref().clone(),
+            request_payload: make_dummy_adj_request(&agent),
+            queued_at: now - chrono::Duration::seconds(10),
+            expires_at: None,
+            status: "pending".to_string(),
+        });
+
+        let uc = build_use_case(Arc::clone(&store), Arc::clone(&pending));
+        let response = AdjudicationResponse {
+            handle_id,
+            verdict: AdjudicationVerdict::Affirm,
+            evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+        };
+        uc.execute(handle_id, response, now).unwrap();
+
+        let assertions = store.validity_assertions.lock().unwrap();
+        assert_eq!(assertions.len(), 1, "one Bound assertion for incumbent");
+        assert_eq!(assertions[0].target_claim, incumbent.claim_ref().clone());
+        match assertions[0].kind {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
+                assert_eq!(
+                    bound_at, challenger_vt_start,
+                    "Affirm must bound the incumbent at the WINNING challenger's valid_time.start \
+                     ({challenger_vt_start:?}), not at tx_time ({now:?})"
+                );
+                assert_ne!(bound_at, now, "bound_at must NOT be tx_time when the challenger has a trusted valid-time start");
+                // TASK-33-W5-LIB-R2 (DIAG-5): the incumbent's bound must carry the challenger's
+                // OWN start_granularity (Month here) — not silently fabricated or dropped.
+                assert_eq!(
+                    bound_at_granularity, Some(mempill_types::DateGranularity::Month),
+                    "Affirm must propagate the winning challenger's start_granularity onto the incumbent's Bound"
+                );
+            }
+            _ => panic!("expected AssertionKind::Bound"),
+        }
+        // `asserted_at` (the write's own transaction-time stamp) IS tx_time — bound_at and
+        // asserted_at are independent axes (valid-time vs transaction-time, never conflated).
+        assert_eq!(assertions[0].asserted_at.0, now, "asserted_at is always tx_time");
     }
 
     // ── Test: Affirm — External provenance stamped on challenger ledger entry ──
@@ -848,7 +1060,8 @@ mod tests {
             verdict: AdjudicationVerdict::Deny,
             evidence_provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
         };
-        let outcome = uc.execute(handle_id, response, Utc::now()).unwrap();
+        let now = Utc::now();
+        let outcome = uc.execute(handle_id, response, now).unwrap();
 
         assert_eq!(outcome.disposition, Disposition::Superseded);
         assert_eq!(outcome.claim_ref, challenger_ref);
@@ -865,6 +1078,16 @@ mod tests {
         let assertions = store.validity_assertions.lock().unwrap();
         assert_eq!(assertions.len(), 1, "one Bound assertion for challenger");
         assert_eq!(assertions[0].target_claim, challenger_ref);
+
+        // TASK-33-W5-LIB B: Deny always keeps `bound_at = tx_time` (the challenger never held
+        // a genuine belief window to bound at).
+        match assertions[0].kind {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
+                assert_eq!(bound_at, now, "Deny must bound the challenger at tx_time");
+                assert_eq!(bound_at_granularity, None, "Deny's tx_time bound has no tracked date-string precision");
+            }
+            _ => panic!("expected AssertionKind::Bound"),
+        }
 
         // Incumbent has NO new entry — it remains committed.
         let incumbent_resolution = ledger.iter()

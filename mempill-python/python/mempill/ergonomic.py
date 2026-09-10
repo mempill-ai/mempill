@@ -676,7 +676,13 @@ def end_fact(
         subject:    Entity key.
         predicate:  Property key.
         at:         Lenient date string (YYYY / YYYY-MM / YYYY-MM-DD / RFC3339) — the
-                    instant the fact stops being true.
+                    instant the fact stops being true. Its PRECISION is preserved: the
+                    granularity of the string as given is sent alongside the normalized
+                    instant, so ending a fact at "2024-09" renders in history() as
+                    valid_until_display == "2024-09" (granularity "month"), never the
+                    fabricated day "2024-09-01". Precision is derived by the engine's
+                    single Rust date parser (_mempill.date_granularity_of), so Python and
+                    Rust can never disagree about what a date string means.
         provenance: Wire-shape provenance dict. Defaults to External/UserAsserted. Must
                     be External(*) — any other channel raises mempill.ValidationError.
         confidence: Confidence in this validity assertion (0.0-1.0). Defaults to 1.0.
@@ -695,9 +701,14 @@ def end_fact(
     bound is by definition not live. It is only reachable via engine.assert_validity()
     called directly with an already-known target claim_ref.
     """
-    from mempill._mempill import NotFoundError, ValidationError
+    from mempill._mempill import NotFoundError, ValidationError, date_granularity_of
 
     at_rfc3339 = _to_rfc3339(at)
+    # Display precision of `at` AS THE CALLER WROTE IT (never derived from the normalized
+    # instant, which has already had its placeholder month/day filled in). `None` when the
+    # engine's parser does not recognise the string — honest absence, never a fabricated
+    # "instant"; `_to_rfc3339` above still governs whether the value is usable at all.
+    at_granularity = date_granularity_of(at)
 
     resolution = engine.resolve_live_claim_for_line(agent_id, subject, predicate)
     status = resolution["status"]
@@ -719,7 +730,10 @@ def end_fact(
     request = {
         "agent_id": agent_id,
         "target": target,
-        "assertion": {"type": "Bound", "value": {"at": at_rfc3339}},
+        "assertion": {
+            "type": "Bound",
+            "value": {"at": at_rfc3339, "at_granularity": at_granularity},
+        },
         "provenance": provenance or {"type": "External", "kind": "UserAsserted"},
         "confidence": {"value_confidence": confidence, "valid_time_confidence": confidence},
     }
