@@ -523,26 +523,29 @@ impl PersistencePort for PostgresPersistenceStore {
         let valid_time_confidence = assertion.confidence.valid_time_confidence as f64;
         let asserted_at = assertion.asserted_at.0.to_rfc3339();
 
-        let (assertion_kind, bound_at, reopen_at): (&str, Option<String>, Option<String>) =
+        let (assertion_kind, bound_at, bound_at_granularity, reopen_at): (&str, Option<String>, Option<&'static str>, Option<String>) =
             match &assertion.kind {
-                AssertionKind::Bound { bound_at } => ("Bound", Some(bound_at.to_rfc3339()), None),
-                AssertionKind::Reopen { reopen_at } => ("Reopen", None, Some(reopen_at.to_rfc3339())),
+                AssertionKind::Bound { bound_at, bound_at_granularity } => {
+                    ("Bound", Some(bound_at.to_rfc3339()), bound_at_granularity.map(date_granularity_to_str), None)
+                }
+                AssertionKind::Reopen { reopen_at } => ("Reopen", None, None, Some(reopen_at.to_rfc3339())),
                 // AssertionKind is #[non_exhaustive] — future kinds stored as "Unknown" (no-op).
-                _ => ("Unknown", None, None),
+                _ => ("Unknown", None, None, None),
             };
 
         txn.client().execute(
             "INSERT INTO validity_assertions (
                 assertion_id, agent_id, target_claim_id,
-                assertion_kind, bound_at, reopen_at,
+                assertion_kind, bound_at, bound_at_granularity, reopen_at,
                 provenance_label, value_confidence, valid_time_confidence, asserted_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             &[
                 &assertion_id,
                 &agent_id,
                 &target_claim_id,
                 &assertion_kind,
                 &bound_at,
+                &bound_at_granularity,
                 &reopen_at,
                 &provenance,
                 &value_confidence,
@@ -709,7 +712,8 @@ impl PersistencePort for PostgresPersistenceStore {
         let rows = conn.query(
             "SELECT assertion_id, agent_id, target_claim_id,
                     assertion_kind, bound_at, reopen_at,
-                    provenance_label, value_confidence, valid_time_confidence, asserted_at
+                    provenance_label, value_confidence, valid_time_confidence, asserted_at,
+                    bound_at_granularity
              FROM validity_assertions
              WHERE agent_id = $1 AND target_claim_id = $2
              ORDER BY asserted_at ASC",
@@ -728,6 +732,8 @@ impl PersistencePort for PostgresPersistenceStore {
                 let value_confidence: f64 = row.get(7);
                 let valid_time_confidence: f64 = row.get(8);
                 let asserted_at_str: String = row.get(9);
+                // v4 column (TASK-33-W5-LIB-R2). Nullable — absent/NULL on legacy pre-v4 rows.
+                let bound_at_granularity_str: Option<String> = row.get(10);
 
                 let assertion_ref = uuid::Uuid::parse_str(&assertion_id_str)
                     .map_err(|e| PostgresStoreError::Mapping(format!("assertion_id UUID: {e}")))?;
@@ -747,7 +753,10 @@ impl PersistencePort for PostgresPersistenceStore {
                         let dt = chrono::DateTime::parse_from_rfc3339(&s)
                             .map(|dt| dt.with_timezone(&chrono::Utc))
                             .map_err(|e| PostgresStoreError::Mapping(format!("bound_at: {e}")))?;
-                        AssertionKind::Bound { bound_at: dt }
+                        let bound_at_granularity = bound_at_granularity_str
+                            .as_deref()
+                            .and_then(str_to_date_granularity);
+                        AssertionKind::Bound { bound_at: dt, bound_at_granularity }
                     }
                     "Reopen" => {
                         let s = reopen_at_str.ok_or_else(|| {

@@ -259,8 +259,15 @@ class PyEngine:
             request: dict with:
                 - agent_id (str)
                 - target (str): claim_ref UUID
-                - assertion: {"type": "Bound", "value": {"at": "<RFC3339>"}}
-                  or {"type": "Reopen"}
+                - assertion: {"type": "Bound", "value": {"at": "<RFC3339>",
+                  "at_granularity": "year"|"month"|"day"|"instant" | None}}
+                  or {"type": "Reopen"}. ``at_granularity`` is optional and
+                  DISPLAY-ONLY: it records the precision the caller's date was
+                  written at, so a bound at "2024-09" renders as "2024-09" in
+                  history() instead of the fabricated day "2024-09-01". Omit it (or
+                  pass None) for unknown precision — never fabricate "instant".
+                  Derive it with ``date_granularity_of()`` from the ORIGINAL date
+                  string; ``at`` alone still determines the bound instant.
                 - provenance (dict): must be External(*) — any other channel raises
                   ValidationError (only first-hand external evidence may bound/reopen)
                 - confidence: {"value_confidence": float, "valid_time_confidence": float}
@@ -276,7 +283,14 @@ class PyEngine:
 
         Raises:
             ValidationError: provenance not External(*), or `at` precedes the claim's
-                own valid_time.start (IncoherentTemporalWindow)
+                own valid_time.start (IncoherentTemporalWindow); also raised when
+                `target` is currently `QueuedForAdjudication` or terminally
+                Deny-superseded (TargetUnderAdjudication — the oracle owns
+                resolution; use `Reopen` to reverse a Deny). Reachable via
+                `mempill.ergonomic.end_fact()` too: if a subject-line's sole LIVE
+                claim (per `resolve_live_claim_for_line`) is itself
+                `QueuedForAdjudication`, `end_fact` resolves to it and hits this
+                same gate.
             NotFoundError: target does not exist or belongs to another agent
             ConflictError: a different bound is already active (never "later wins")
             StorageError: persistence layer failure
@@ -452,6 +466,19 @@ def open_default_for_agent(base_dir: str, agent_id: str) -> PyEngine:
     Raises:
         StorageError: if ``agent_id`` contains characters that could cause a filename
             collision, if the database cannot be opened, or if migrations fail.
+    """
+    ...
+
+def date_granularity_of(value: str) -> str | None:
+    """Display precision of a lenient date string, as the engine's own parser sees it.
+
+    "2024" -> "year", "2024-09" -> "month", "2024-09-15" -> "day", an RFC3339 string
+    -> "instant"; None when the string is not a date mempill can parse.
+
+    Thin wrapper over the single Rust date parser shared with the Rust facade, so Python
+    and Rust can never disagree about what a date string means. Used to populate the
+    ``at_granularity`` field of an ``assert_validity`` Bound assertion (see
+    ``PyEngine.assert_validity``); ``mempill.ergonomic.end_fact()`` calls it for you.
     """
     ...
 

@@ -174,7 +174,12 @@ impl PyEngine {
     /// `request` must be a dict with:
     ///   - `agent_id`  — str
     ///   - `target`    — claim_ref UUID string
-    ///   - `assertion` — `{"type": "Bound", "value": {"at": "<RFC3339>"}}` or `{"type": "Reopen"}`
+    ///   - `assertion` — `{"type": "Bound", "value": {"at": "<RFC3339>", "at_granularity":
+    ///     "year"|"month"|"day"|"instant"}}` or `{"type": "Reopen"}`. `at_granularity` is
+    ///     OPTIONAL (omit or `None` = unknown precision, never a fabricated `"instant"`); it
+    ///     is DISPLAY-ONLY — `at` alone determines the bound instant. Derive it with
+    ///     `date_granularity_of()` from the caller's original date string so `"2024-09"`
+    ///     renders as `2024-09`, not `2024-09-01`.
     ///   - `provenance` — must be `External(*)`; any other channel raises `ValidationError`
     ///   - `confidence` — `{"value_confidence": float, "valid_time_confidence": float}`
     ///
@@ -265,6 +270,23 @@ pub fn open_in_memory() -> PyResult<PyEngine> {
     mempill_sqlite::open_default_in_memory()
         .map(|engine| PyEngine { engine })
         .map_err(|e| StorageError::new_err(e.to_string()))
+}
+
+/// Derive the DISPLAY PRECISION of a lenient date string — `"2024"` → `"year"`,
+/// `"2024-09"` → `"month"`, `"2024-09-15"` → `"day"`, RFC-3339 → `"instant"`; `None` when
+/// the string is not a date mempill can parse.
+///
+/// Thin wrapper over `mempill_types::parse_valid_time_date` — the SINGLE date parser in the
+/// system (the Rust `end_fact` facade derives its `at_granularity` from the very same call),
+/// so Python and Rust can never disagree about what `"2024-09"` means. Python's
+/// `mempill.ergonomic.end_fact()` calls this to populate the `Bound` assertion's
+/// `at_granularity`; without it, `"2024-09"` would round-trip as a bare
+/// `2024-09-01T00:00:00Z` instant and history would render the fabricated day.
+#[pyfunction]
+#[pyo3(signature = (value))]
+pub fn date_granularity_of(value: &str) -> Option<String> {
+    mempill_types::parse_valid_time_date(value)
+        .map(|(_, gran)| mempill_types::date_granularity_to_str(gran).to_string())
 }
 
 // ── Rust unit tests ───────────────────────────────────────────────────────────

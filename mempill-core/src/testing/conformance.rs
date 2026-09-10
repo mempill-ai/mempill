@@ -76,7 +76,7 @@ fn make_validity_assertion(agent_id: &AgentId, claim_ref: &ClaimRef) -> Validity
         assertion_ref: Uuid::new_v4(),
         agent_id: agent_id.clone(),
         target_claim: claim_ref.clone(),
-        kind: AssertionKind::Bound { bound_at: Utc::now() },
+        kind: AssertionKind::Bound { bound_at: Utc::now(), bound_at_granularity: None },
         provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
         confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
         asserted_at: TransactionTime(Utc::now()),
@@ -598,7 +598,7 @@ where
         assertion_ref: Uuid::new_v4(),
         agent_id: agent.clone(),
         target_claim: claim_ref.clone(),
-        kind: AssertionKind::Bound { bound_at: t1 },
+        kind: AssertionKind::Bound { bound_at: t1, bound_at_granularity: None },
         provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
         confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
         asserted_at: TransactionTime(t1),
@@ -2203,6 +2203,18 @@ pub fn run_reconcile_incumbent_selection_matches_query_memory_primary_conformanc
 ///    incumbent.
 /// 4. DIAG-C: incumbent fully closed via `assert_validity` Bound (fold_result.live_claims
 ///    empty) — must fall back to the WIDENED set and stay Contested with the ended incumbent.
+/// 5. DIAG-C variant, WITH a live successor present (TASK-33-W5-LIB-R2 nit):
+///    incumbent D is closed via `assert_validity` Bound, then a NEW live successor E is
+///    written on the same line — `fold_result.live_claims` is now NON-EMPTY (`[E]`), so
+///    `incumbent_belief` prefers `E` (per the review-blocker-1 rule above; the widened-set
+///    fallback is for the empty-`live_claims` case ONLY). A retroactive candidate whose
+///    window falls entirely inside D's (now-closed) historical window — and does NOT
+///    overlap E's window at all — must still be Contested (the N-wide step-4 check tests
+///    the candidate against every member of the widened set, D included, not just the
+///    reported incumbent), reported against the CURRENT belief E: `contested_with = [E]`,
+///    not the ended D. This documents/pins the intentional distinction from scenario 4:
+///    `contested_with` always surfaces the live/current incumbent when one exists — an
+///    ended claim is only ever reported when there is no live claim to report instead.
 #[cfg(any(test, feature = "test-support"))]
 pub fn run_narrowed_succession_incumbent_selection_conformance<P>(store: &std::sync::Arc<P>)
 where
@@ -2325,7 +2337,7 @@ where
         AssertValidityRequest {
             agent_id: agent.clone(),
             target: d_ref.clone(),
-            assertion: ValidityAssertionInput::Bound { at: bound_at },
+            assertion: ValidityAssertionInput::Bound { at: bound_at, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -2353,6 +2365,62 @@ where
          Contested, got {:?}", resp4.disposition);
     assert_eq!(resp4.contested_with, vec![d_ref],
         "nsi[4]: with no live successor, incumbent must fall back to the widened set (the ended incumbent D)");
+
+    // ── Scenario 5: DIAG-C variant WITH a live successor ────────────────────────────────
+    let subj5 = "nsi-diag-c-live-succ";
+    let e_start = now - chrono::Duration::days(1400);
+
+    // D: closed via assert_validity Bound at now-1500d — effective window [now-3000d, now-1500d).
+    let d5 = write_claim(subj5, serde_json::json!("Berlin"), now - chrono::Duration::days(3000), None, now - chrono::Duration::days(4000));
+    let d5_ref = d5.claim_ref().clone();
+    let mut txn = store.begin_atomic(&agent).expect("nsi[5]: begin d5");
+    store.append_claim(&mut txn, &d5).expect("nsi[5]: append d5");
+    store.commit(txn).expect("nsi[5]: commit d5");
+    av_uc.execute(
+        AssertValidityRequest {
+            agent_id: agent.clone(),
+            target: d5_ref.clone(),
+            assertion: ValidityAssertionInput::Bound { at: now - chrono::Duration::days(1500), at_granularity: None },
+            provenance: ProvenanceLabel::External(ExternalKind::ExternalFirstHand),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+        },
+        now,
+    ).expect("nsi[5]: bound d5 must not error");
+
+    // E: the live, current successor — [now-1400d, ∞), written AFTER D was closed.
+    let e5 = write_claim(subj5, serde_json::json!("Paris"), e_start, None, now - chrono::Duration::days(1300));
+    let e5_ref = e5.claim_ref().clone();
+    let mut txn = store.begin_atomic(&agent).expect("nsi[5]: begin e5");
+    store.append_claim(&mut txn, &e5).expect("nsi[5]: append e5");
+    store.commit(txn).expect("nsi[5]: commit e5");
+
+    // Candidate: retroactive write entirely INSIDE D's now-closed window — [now-2000d, now-1600d)
+    // — does not overlap E's [now-1400d, ∞) window at all, only D's.
+    let cand5 = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: subj5.into(),
+        predicate: "nsi-pred".into(),
+        value: serde_json::json!("Munich"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(ValidTime {
+            start: Some(now - chrono::Duration::days(2000)),
+            end: Some(now - chrono::Duration::days(1600)),
+            valid_time_confidence: 0.9, start_granularity: None, end_granularity: None,
+        }),
+        confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+        criticality: Criticality::Medium,
+        derived_from: vec![],
+    };
+    let resp5 = ingest_uc.execute_with_time(cand5, now).expect("nsi[5]: ingest must not error");
+    assert_eq!(resp5.disposition, Disposition::Contested,
+        "nsi[5]: a retroactive write into an ended incumbent's window must be Contested even \
+         when a live successor exists on the line, got {:?}", resp5.disposition);
+    assert_eq!(resp5.contested_with, vec![e5_ref],
+        "nsi[5]: with a live successor present, contested_with reports the CURRENT belief E \
+         (fold_result.live_claims is non-empty, so the widened-set fallback — which would \
+         surface the ended D — never applies); D's overlap still drives the N-wide step-4 \
+         conflict classification, it just isn't the reported incumbent");
 }
 
 /// Cross-adapter conformance: sweeping an EXPIRED pending row reverts the challenger to
@@ -2843,7 +2911,7 @@ where
         assertion_ref: Uuid::new_v4(),
         agent_id: agent.clone(),
         target_claim: alice_ref.clone(),
-        kind: AssertionKind::Bound { bound_at },
+        kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
         provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
         confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         asserted_at: TransactionTime(asserted_at),
@@ -2997,7 +3065,7 @@ where
         assertion_ref: Uuid::new_v4(),
         agent_id: agent.clone(),
         target_claim: diane_ref.clone(),
-        kind: AssertionKind::Bound { bound_at },
+        kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
         provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
         confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         asserted_at: TransactionTime(bound_at),
@@ -4490,7 +4558,7 @@ where
             AssertValidityRequest {
                 agent_id: agent.clone(),
                 target: incumbent.clone(),
-                assertion: ValidityAssertionInput::Bound { at: close_at },
+                assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
                 provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
                 confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             },
@@ -4532,7 +4600,7 @@ where
     let req = || AssertValidityRequest {
         agent_id: agent.clone(),
         target: incumbent.clone(),
-        assertion: ValidityAssertionInput::Bound { at: close_at },
+        assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
         provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
         confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
     };
@@ -4571,7 +4639,7 @@ where
         .execute(
             AssertValidityRequest {
                 agent_id: agent.clone(), target: incumbent.clone(),
-                assertion: ValidityAssertionInput::Bound { at: first_close },
+                assertion: ValidityAssertionInput::Bound { at: first_close, at_granularity: None },
                 provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
                 confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             },
@@ -4582,7 +4650,7 @@ where
     let result = av_uc.execute(
         AssertValidityRequest {
             agent_id: agent, target: incumbent,
-            assertion: ValidityAssertionInput::Bound { at: second_close },
+            assertion: ValidityAssertionInput::Bound { at: second_close, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -4609,7 +4677,7 @@ where
     let result = av_uc.execute(
         AssertValidityRequest {
             agent_id: agent, target: incumbent,
-            assertion: ValidityAssertionInput::Bound { at: before_start },
+            assertion: ValidityAssertionInput::Bound { at: before_start, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -4636,7 +4704,7 @@ where
     let result = av_uc.execute(
         AssertValidityRequest {
             agent_id: agent, target: incumbent,
-            assertion: ValidityAssertionInput::Bound { at: close_at },
+            assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
             provenance: ProvenanceLabel::ModelDerived,
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -4665,7 +4733,7 @@ where
     let result = av_uc.execute(
         AssertValidityRequest {
             agent_id: agent_b, target: claim_a,
-            assertion: ValidityAssertionInput::Bound { at: close_at },
+            assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -4699,7 +4767,7 @@ where
     av_uc.execute(
         AssertValidityRequest {
             agent_id: agent.clone(), target: incumbent.clone(),
-            assertion: ValidityAssertionInput::Bound { at: close_at },
+            assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -4761,7 +4829,7 @@ where
     av_uc.execute(
         AssertValidityRequest {
             agent_id: agent.clone(), target: incumbent.clone(),
-            assertion: ValidityAssertionInput::Bound { at: close_at },
+            assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -4810,7 +4878,7 @@ where
     av_uc.execute(
         AssertValidityRequest {
             agent_id: agent.clone(), target: incumbent.clone(),
-            assertion: ValidityAssertionInput::Bound { at: close_at },
+            assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -4908,7 +4976,7 @@ where
         .execute(
             AssertValidityRequest {
                 agent_id: agent, target: resolved_ref.clone(),
-                assertion: ValidityAssertionInput::Bound { at: close_at },
+                assertion: ValidityAssertionInput::Bound { at: close_at, at_granularity: None },
                 provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
                 confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             },
@@ -4957,7 +5025,7 @@ where
     av_uc.execute(
         AssertValidityRequest {
             agent_id: agent.clone(), target: claim_a.clone(),
-            assertion: ValidityAssertionInput::Bound { at: e },
+            assertion: ValidityAssertionInput::Bound { at: e, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },
@@ -5023,7 +5091,7 @@ where
     av_uc.execute(
         AssertValidityRequest {
             agent_id: agent.clone(), target: diane.clone(),
-            assertion: ValidityAssertionInput::Bound { at: e },
+            assertion: ValidityAssertionInput::Bound { at: e, at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
         },

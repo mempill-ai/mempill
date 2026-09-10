@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 import mempill
-from mempill import remember, recall, end_fact, EndFactReceipt, RememberOptions
+from mempill import remember, recall, history, end_fact, EndFactReceipt, RememberOptions
 from mempill import NotFoundError, ValidationError, ConflictError
 
 
@@ -201,3 +201,42 @@ class TestEndFact:
         result = recall(engine, AGENT, "diag3-subj", "diag3-pred")
         assert not result.is_contested(), f"expected clean succession, got status={result.status}"
         assert result.value == "NYC"
+
+
+# ── end_fact date precision (TASK-33-W5-LIB-R2, F2) ────────────────────────────
+
+class TestEndFactGranularity:
+    """`end_fact(at=...)` must preserve the PRECISION of the caller's date string.
+
+    Before this wiring the ergonomic layer posted only the normalized instant, so
+    end_fact(..., "2024-09") stored 2024-09-01T00:00:00Z with no granularity and history
+    rendered the fabricated day "2024-09-01". The granularity now travels with the bound
+    (`assertion.value.at_granularity`), derived by the engine's single Rust date parser.
+    """
+
+    def test_month_precision_round_trips_to_history(self, engine: mempill.Engine) -> None:
+        remember(engine, AGENT, "gran-ef-subj", "gran-ef-pred", "v1",
+                  RememberOptions(valid_from="2020-01-01"))
+        end_fact(engine, AGENT, "gran-ef-subj", "gran-ef-pred", "2024-09")
+
+        entry = history(engine, AGENT, "gran-ef-subj", "gran-ef-pred").entries[0]
+        assert entry.valid_until_granularity == "month"
+        assert entry.valid_until_display == "2024-09"
+
+    def test_year_precision_round_trips_to_history(self, engine: mempill.Engine) -> None:
+        remember(engine, AGENT, "gran-ef-y-subj", "gran-ef-y-pred", "v1",
+                  RememberOptions(valid_from="2020-01-01"))
+        end_fact(engine, AGENT, "gran-ef-y-subj", "gran-ef-y-pred", "2024")
+
+        entry = history(engine, AGENT, "gran-ef-y-subj", "gran-ef-y-pred").entries[0]
+        assert entry.valid_until_granularity == "year"
+        assert entry.valid_until_display == "2024"
+
+    def test_date_granularity_of_matches_the_rust_parser(self) -> None:
+        from mempill._mempill import date_granularity_of
+
+        assert date_granularity_of("2024") == "year"
+        assert date_granularity_of("2024-09") == "month"
+        assert date_granularity_of("2024-09-15") == "day"
+        assert date_granularity_of("2024-09-15T10:30:00Z") == "instant"
+        assert date_granularity_of("last September") is None

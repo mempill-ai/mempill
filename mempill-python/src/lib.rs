@@ -10,6 +10,7 @@
 //!   - `open_in_memory`               — open an in-memory engine (no oracle)
 //!   - `open_with_oracle_for_agent`   — open a file-backed, per-agent engine wired to a Python oracle
 //!   - `open_with_oracle_in_memory`   — open an in-memory engine wired to a Python oracle
+//!   - `date_granularity_of`          — display precision of a lenient date string
 //!   - Exception types:  `MempillError`, `ValidationError`, `NotFoundError`,
 //!     `ConflictError`, `StorageError`, `ConfigError`, `InternalError`
 
@@ -20,7 +21,7 @@ mod oracle;
 
 use pyo3::prelude::*;
 
-use engine::{open_default_for_agent, open_in_memory, PyEngine};
+use engine::{date_granularity_of, open_default_for_agent, open_in_memory, PyEngine};
 use errors::register_exceptions;
 use oracle::{open_with_oracle_for_agent, open_with_oracle_in_memory, PyOracleEngine};
 
@@ -33,6 +34,9 @@ fn _mempill(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register no-oracle constructors.
     m.add_function(wrap_pyfunction!(open_default_for_agent, m)?)?;
     m.add_function(wrap_pyfunction!(open_in_memory, m)?)?;
+
+    // Date-precision helper (single Rust date parser, shared with the Rust facade).
+    m.add_function(wrap_pyfunction!(date_granularity_of, m)?)?;
 
     // Register Python-oracle constructors.
     m.add_function(wrap_pyfunction!(open_with_oracle_for_agent, m)?)?;

@@ -195,18 +195,27 @@ where
             .load_claim(&agent_id, &challenger_ref)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?
             .ok_or_else(|| MemError::ClaimNotFound { claim_ref: challenger_ref.clone() })?;
-        let affirm_incumbent_bound_at = if valid_time_helpers::claim_is_trusted(
+        // TASK-33-W5-LIB-R2 (DIAG-5): carry the challenger's OWN start_granularity alongside
+        // bound_at, so the incumbent's bound-derived end honestly reflects the precision the
+        // challenger's valid-time start was supplied at (e.g. "2024-09" → Month), instead of
+        // silently rendering at day/instant precision. Only meaningful on the trusted branch —
+        // the tx_time fallback has no host-supplied date precision to report.
+        let (affirm_incumbent_bound_at, affirm_incumbent_bound_at_granularity) = if valid_time_helpers::claim_is_trusted(
             &challenger_claim,
             self.config.valid_time_confidence_threshold,
         ) {
-            challenger_claim
-                .valid_time()
-                .start
-                .expect("claim_is_trusted guarantees valid_time.start is Some")
+            (
+                challenger_claim
+                    .valid_time()
+                    .start
+                    .expect("claim_is_trusted guarantees valid_time.start is Some"),
+                challenger_claim.valid_time().start_granularity,
+            )
         } else {
             // No trusted valid-time start on the challenger — fall back to tx_time (the
-            // pre-fix behavior), the only instant we can be certain is correct.
-            now
+            // pre-fix behavior), the only instant we can be certain is correct. tx_time has
+            // no tracked date-string precision, so granularity is honestly None.
+            (now, None)
         };
 
         // ── Step 2 / Step 4–6: begin_atomic + apply verdict + mark resolved + commit ──
@@ -222,6 +231,7 @@ where
             &incumbent_ref,
             tx_time.clone(),
             affirm_incumbent_bound_at,
+            affirm_incumbent_bound_at_granularity,
             &incumbent_edges,
             &challenger_edges,
             &mut txn,
@@ -280,6 +290,7 @@ where
         incumbent_ref: &mempill_types::ClaimRef,
         tx_time: TransactionTime,
         affirm_incumbent_bound_at: DateTime<Utc>,
+        affirm_incumbent_bound_at_granularity: Option<mempill_types::DateGranularity>,
         incumbent_edges: &[mempill_types::ClaimEdge],
         challenger_edges: &[mempill_types::ClaimEdge],
         txn: &mut P::Transaction,
@@ -294,6 +305,7 @@ where
                     incumbent_ref,
                     challenger_ref,
                     affirm_incumbent_bound_at,
+                    affirm_incumbent_bound_at_granularity,
                     tx_time.clone(),
                     incumbent_edges,
                     "affirm",
@@ -331,6 +343,8 @@ where
                     challenger_ref,
                     incumbent_ref,
                     tx_time.0,
+                    // Deny: tx_time has no tracked date-string precision — honestly None.
+                    None,
                     tx_time.clone(),
                     challenger_edges,
                     "deny",
@@ -397,12 +411,17 @@ where
     ///   produced an IDENTICAL rationale shape, forcing `build_denied_via_adjudication_set` to
     ///   infer which one occurred from ledger-entry ORDER (a penultimate-disposition heuristic)
     ///   instead of reading the fact directly off the entry that recorded it.
+    /// `bound_at_granularity` — TASK-33-W5-LIB-R2 (DIAG-5): the display precision of
+    ///   `bound_at`, when known — the winning challenger's `start_granularity` for Affirm;
+    ///   always `None` for Deny (tx_time has no tracked date-string precision).
+    #[allow(clippy::too_many_arguments)]
     fn bound_claim(
         &self,
         agent_id: &AgentId,
         target_ref: &mempill_types::ClaimRef,
         overturning_ref: &mempill_types::ClaimRef,
         bound_at: DateTime<Utc>,
+        bound_at_granularity: Option<mempill_types::DateGranularity>,
         tx_time: TransactionTime,
         preloaded_edges: &[mempill_types::ClaimEdge],
         verdict: &'static str,
@@ -416,7 +435,7 @@ where
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent_id.clone(),
             target_claim: target_ref.clone(),
-            kind: AssertionKind::Bound { bound_at },
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity },
             provenance: mempill_types::ProvenanceLabel::External(
                 ExternalKind::ExternalFirstHand,
             ),
@@ -879,8 +898,9 @@ mod tests {
         // fallback branch) — see `affirm_bounds_incumbent_at_challenger_valid_time_start`
         // below for the trusted-start case.
         match assertions[0].kind {
-            AssertionKind::Bound { bound_at } => {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
                 assert_eq!(bound_at, now, "fallback: untrusted challenger valid_time → bound_at = now (tx_time)");
+                assert_eq!(bound_at_granularity, None, "tx_time fallback has no tracked date-string precision");
             }
             _ => panic!("expected AssertionKind::Bound"),
         }
@@ -917,7 +937,7 @@ mod tests {
                 start: Some(challenger_vt_start),
                 end: None,
                 valid_time_confidence: 0.9,
-                start_granularity: None,
+                start_granularity: Some(mempill_types::DateGranularity::Month),
                 end_granularity: None,
             },
             Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
@@ -974,13 +994,19 @@ mod tests {
         assert_eq!(assertions.len(), 1, "one Bound assertion for incumbent");
         assert_eq!(assertions[0].target_claim, incumbent.claim_ref().clone());
         match assertions[0].kind {
-            AssertionKind::Bound { bound_at } => {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
                 assert_eq!(
                     bound_at, challenger_vt_start,
                     "Affirm must bound the incumbent at the WINNING challenger's valid_time.start \
                      ({challenger_vt_start:?}), not at tx_time ({now:?})"
                 );
                 assert_ne!(bound_at, now, "bound_at must NOT be tx_time when the challenger has a trusted valid-time start");
+                // TASK-33-W5-LIB-R2 (DIAG-5): the incumbent's bound must carry the challenger's
+                // OWN start_granularity (Month here) — not silently fabricated or dropped.
+                assert_eq!(
+                    bound_at_granularity, Some(mempill_types::DateGranularity::Month),
+                    "Affirm must propagate the winning challenger's start_granularity onto the incumbent's Bound"
+                );
             }
             _ => panic!("expected AssertionKind::Bound"),
         }
@@ -1056,8 +1082,9 @@ mod tests {
         // TASK-33-W5-LIB B: Deny always keeps `bound_at = tx_time` (the challenger never held
         // a genuine belief window to bound at).
         match assertions[0].kind {
-            AssertionKind::Bound { bound_at } => {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
                 assert_eq!(bound_at, now, "Deny must bound the challenger at tx_time");
+                assert_eq!(bound_at_granularity, None, "Deny's tx_time bound has no tracked date-string precision");
             }
             _ => panic!("expected AssertionKind::Bound"),
         }

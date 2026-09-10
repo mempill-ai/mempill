@@ -190,9 +190,10 @@ where
         // identical-value shortcut wave through a candidate whose value happens to match the
         // STALE incumbent A.
         //
-        // `fold_result.live_claims` (post step-4 narrowing) IS that current belief: a single
-        // claim when a trusted succession was narrowed to the query instant, or the sole live
-        // claim in the ordinary case. Fall back to the WIDENED `all_live_claims` set only when
+        // `fold_result.live_claims` (post step-4 narrowing) IS the fold's live set — narrowed
+        // to the current belief when a trusted succession exists, otherwise ascending (the
+        // ordinary, non-succession case: canonical-order, oldest first). Fall back to the
+        // WIDENED `all_live_claims` set only when
         // `fold_result.live_claims` is empty (DIAG-C: the incumbent was retroactively/entirely
         // closed by an active Bound with no live successor — the widened, bound-narrowed set is
         // the only source of an incumbent to classify against in that case).
@@ -472,21 +473,25 @@ pub(crate) fn build_latest_disposition_map(
 /// - If the LATEST entry is not `Superseded` at all (e.g. `Reinstated` via an `assert_validity`
 ///   `Reopen` — the one operation that intentionally REVERSES a prior Bound/denial), the claim
 ///   is definitively NOT denied, regardless of an earlier deny in its history.
-/// - Otherwise, if the latest `Superseded` entry itself carries no `"verdict"` field (a legacy
-///   row written before this field existed, OR a non-adjudication closure such as
-///   `end_fact`/`assert_validity`), fall back to a QueuedForAdjudication → Superseded
-///   adjacent-transition scan over the FULL history (not just the immediate last pair) — a
-///   later, out-of-contract `Superseded` write must not erase a genuine earlier deny. This is
-///   the fix for the reachable sequence `[Queued, Superseded(deny), Superseded(end_fact)]`: the
-///   old penultimate-only heuristic checked only `entries[len-2]` (itself `Superseded`, not
-///   `QueuedForAdjudication`) and missed the deny buried one entry further back — a false
-///   negative that silently re-admitted a denied challenger's window as a conflict candidate.
+/// - Otherwise, if the latest `Superseded` entry itself carries no `"verdict"` field (a LEGACY
+///   row written before the marker existed), fall back to a QueuedForAdjudication → Superseded
+///   adjacent-transition scan over the history that FOLLOWS the last `Reinstated` entry (not
+///   just the immediate last pair, and not the pre-Reopen prefix) — a later, out-of-contract
+///   `Superseded` write must not erase a genuine earlier deny, but a `Reopen` deliberately
+///   does. This is the fix for the reachable sequence `[Queued, Superseded(deny),
+///   Superseded(legacy end_fact)]`: the old penultimate-only heuristic checked only
+///   `entries[len-2]` (itself `Superseded`, not `QueuedForAdjudication`) and missed the deny
+///   buried one entry further back — a false negative that silently re-admitted a denied
+///   challenger's window as a conflict candidate. Starting the scan after the last `Reinstated`
+///   keeps `[Queued, Superseded(deny), Reinstated, Superseded(legacy)]` NOT denied.
 ///
 /// Both an Affirm's losing incumbent and a host `end_fact`/`assert_validity` closure ALSO end
 /// with a latest disposition of `Superseded`, but their rationale never carries
-/// `"verdict": "deny"` (Affirm writes `"verdict": "affirm"`; a host closure's Superseded entry
-/// carries no `"verdict"` key at all) — the incumbent/host-closed claim is never routed through
-/// adjudication itself (see `submit_adjudication.rs` module docs: "the incumbent is NOT
+/// `"verdict": "deny"`: Affirm writes `"verdict": "affirm"`, and a host closure writes
+/// `"verdict": "host_bound"` (`assert_validity.rs`, constant
+/// `assert_validity::VERDICT_HOST_BOUND`) — so current-format host closures take the explicit
+/// marker branch above, not the legacy scan. The incumbent/host-closed claim is never routed
+/// through adjudication itself (see `submit_adjudication.rs` module docs: "the incumbent is NOT
 /// checked/moved to QueuedForAdjudication").
 ///
 /// Consumed by `truth_engine::narrow_live_claims_for_valid_at`'s valid_at bound-reentry
@@ -522,12 +527,23 @@ pub(crate) fn build_denied_via_adjudication_set(
         let is_denied = match verdict_field {
             Some(v) => v == "deny",
             // Legacy fallback: the terminal Superseded entry carries no explicit marker — scan
-            // the FULL adjacent-entry history for a QueuedForAdjudication -> Superseded
-            // transition (not just the immediate last pair; see rustdoc above).
-            None => entries.windows(2).any(|pair| {
-                pair[0].disposition == Disposition::QueuedForAdjudication
-                    && pair[1].disposition == Disposition::Superseded
-            }),
+            // the adjacent-entry history for a QueuedForAdjudication -> Superseded transition
+            // (not just the immediate last pair; see rustdoc above). The scan window starts
+            // AFTER the last `Reinstated` entry (TASK-33-W5-LIB-R2): a Reopen reverses any
+            // denial that preceded it, so an earlier QFA->Superseded(deny) pair from before
+            // the Reopen must never resurrect a denial once the claim has since been closed
+            // again by an unrelated, unmarked Superseded write (e.g. a legacy host closure).
+            None => {
+                let scan_from = entries
+                    .iter()
+                    .rposition(|e| e.disposition == Disposition::Reinstated)
+                    .map(|idx| idx + 1)
+                    .unwrap_or(0);
+                entries[scan_from..].windows(2).any(|pair| {
+                    pair[0].disposition == Disposition::QueuedForAdjudication
+                        && pair[1].disposition == Disposition::Superseded
+                })
+            }
         };
 
         if is_denied {
@@ -1210,5 +1226,38 @@ mod tests {
         ];
         let denied = build_denied_via_adjudication_set(&ledger);
         assert!(denied.contains(&r), "legacy row lacking the marker must fall back to the QFA->Superseded heuristic and still be denied");
+    }
+
+    #[test]
+    fn dvs_deny_reinstated_then_unmarked_host_close_is_not_denied() {
+        // [Queued, Superseded(deny), Reinstated, Superseded(end_fact, no marker)] -> NOT
+        // denied (TASK-33-W5-LIB-R2). The Reopen reverses the earlier deny; a later legacy
+        // (unmarked) host closure must not resurrect it by tripping the full-history
+        // fallback heuristic — the fallback scan window starts AFTER the last Reinstated.
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::Superseded, 1, Some(serde_json::json!({"event": "oracle_supersession", "verdict": "deny"}))),
+            dvs_entry(&r, Disposition::Reinstated, 2, Some(serde_json::json!({"event": "assert_validity_reopen"}))),
+            dvs_entry(&r, Disposition::Superseded, 3, None),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(!denied.contains(&r), "a Reopen followed by an unmarked host closure must not be treated as denied");
+    }
+
+    #[test]
+    fn dvs_deny_reinstated_then_host_bound_marker_is_not_denied() {
+        // Same shape as above but the closing Superseded entry carries the explicit
+        // "host_bound" marker (assert_validity.rs's real write path) — must resolve via the
+        // marker branch directly (v != "deny"), independent of the fallback's Reinstated cut.
+        let r = ClaimRef(uuid::Uuid::new_v4());
+        let ledger = vec![
+            dvs_entry(&r, Disposition::QueuedForAdjudication, 0, None),
+            dvs_entry(&r, Disposition::Superseded, 1, Some(serde_json::json!({"event": "oracle_supersession", "verdict": "deny"}))),
+            dvs_entry(&r, Disposition::Reinstated, 2, Some(serde_json::json!({"event": "assert_validity_reopen"}))),
+            dvs_entry(&r, Disposition::Superseded, 3, Some(serde_json::json!({"event": "assert_validity_bound", "bound_at": "2024-01-01T00:00:00Z", "verdict": crate::application::assert_validity::VERDICT_HOST_BOUND}))),
+        ];
+        let denied = build_denied_via_adjudication_set(&ledger);
+        assert!(!denied.contains(&r), "an explicit host_bound marker must never be classified as denied");
     }
 }

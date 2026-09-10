@@ -155,6 +155,13 @@ fn classify_conflict(input: &ReconcilerInput<'_>) -> ConflictType {
         // value against the CURRENT incumbent is not evidence about what was true during a
         // window that belonged to a DIFFERENT, earlier claim. Overlapping the incumbent
         // itself (same value) never disqualifies the shortcut.
+        //
+        // Precondition: `.start.is_some()` gates the check on BOTH sides (TASK-33-W5-LIB-R2
+        // nit). A claim with no stated `valid_time.start` has no closed-form window to test
+        // via `windows_non_overlapping` (open-start windows are only ever narrowed/ordered by
+        // `bound_at`, never compared here) — such a claim is simply excluded from the
+        // differently-valued-overlap scan rather than being treated as trivially overlapping
+        // or non-overlapping. Same guard is used on `other` for the identical reason.
         let candidate_ref = input.candidate.claim_ref();
         let overlaps_different_value = input.candidate.valid_time().start.is_some()
             && input.all_live_claims.iter().any(|other| {

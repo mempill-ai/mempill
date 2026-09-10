@@ -91,6 +91,13 @@ pub(crate) struct ClaimWithStatus {
     /// `valid_until` and overlap classification — the claim's own stored row is never
     /// touched (I1); this is a read-time derivation only.
     pub bound_at: Option<DateTime<Utc>>,
+    /// The display-precision granularity of `bound_at`, if known (TASK-33-W5-LIB-R2,
+    /// DIAG-5). Mirrors `bound_at`: `None` when the claim is open, or when the active
+    /// `Bound`'s own `bound_at_granularity` is `None` (legacy row, or a Deny's tx_time
+    /// fallback with no tracked precision). Consumed by `narrowed_valid_end` so a
+    /// bound-derived end can carry its true precision instead of silently rendering as
+    /// full-instant/day precision.
+    pub bound_at_granularity: Option<DateGranularity>,
 }
 
 // ── Ordering key ──────────────────────────────────────────────────────────────
@@ -132,6 +139,8 @@ pub(crate) struct BoundState {
     /// The `assertion_ref` of the currently active `Bound` assertion — consumed by
     /// `assert_validity.rs` for idempotency / single-writer-per-target checks (gate 4).
     pub assertion_ref: uuid::Uuid,
+    /// The display-precision granularity of `bound_at`, if known (TASK-33-W5-LIB-R2).
+    pub bound_at_granularity: Option<DateGranularity>,
 }
 
 /// Evaluate the active `Bound`, if any, at `as_of_tx_time` given the full set of validity
@@ -170,9 +179,13 @@ pub(crate) fn active_bound_at(
             continue;
         }
         match &assertion.kind {
-            AssertionKind::Bound { bound_at } => {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
                 if *bound_at <= as_of_tx_time {
-                    state = Some(BoundState { bound_at: *bound_at, assertion_ref: assertion.assertion_ref });
+                    state = Some(BoundState {
+                        bound_at: *bound_at,
+                        assertion_ref: assertion.assertion_ref,
+                        bound_at_granularity: *bound_at_granularity,
+                    });
                 }
             }
             AssertionKind::Reopen { reopen_at } => {
@@ -263,12 +276,14 @@ where
             let active_bound = active_bound_at(&assertions, as_of_tx_time);
             let assertion_live = active_bound.is_none();
             let bound_at = active_bound.map(|s| s.bound_at);
+            let bound_at_granularity = active_bound.and_then(|s| s.bound_at_granularity);
             let live = assertion_live && disposition_live;
             ClaimWithStatus {
                 claim: c,
                 is_live: live,
                 last_disposition: last_disp,
                 bound_at,
+                bound_at_granularity,
             }
         })
         .collect();
@@ -363,14 +378,30 @@ where
 pub(crate) fn narrowed_valid_end(
     claim: &Claim,
     bound_at: Option<DateTime<Utc>>,
+    bound_at_granularity: Option<DateGranularity>,
 ) -> (Option<DateTime<Utc>>, Option<DateGranularity>) {
     let raw_own_end = claim.valid_time().end;
     let raw_own_end_gran = claim.valid_time().end_granularity;
     match (raw_own_end, bound_at) {
-        (Some(oe), Some(ba)) if ba < oe => (Some(ba), None),
+        (Some(oe), Some(ba)) if ba < oe => (Some(ba), bound_at_granularity),
         (Some(oe), _) => (Some(oe), raw_own_end_gran),
-        (None, Some(ba)) => (Some(ba), None),
+        (None, Some(ba)) => (Some(ba), bound_at_granularity),
         (None, None) => (None, None),
+    }
+}
+
+/// `true` when [`narrowed_valid_end`] would return the BOUND instant rather than the claim's
+/// own `valid_time.end` — i.e. the displayed end is bound-derived and its granularity comes
+/// from the `ValidityAssertion`, not from the claim row. Mirrors `narrowed_valid_end`'s arms
+/// one-for-one and lives next to it so the two cannot drift.
+///
+/// Note the `ba < oe` (strict) condition: a bound landing exactly ON the claim's own end is a
+/// no-effect bound — the end still belongs to the CLAIM, with the claim's own precision.
+pub(crate) fn end_is_bound_derived(claim: &Claim, bound_at: Option<DateTime<Utc>>) -> bool {
+    match (claim.valid_time().end, bound_at) {
+        (Some(oe), Some(ba)) => ba < oe,
+        (None, Some(_)) => true,
+        _ => false,
     }
 }
 
@@ -381,7 +412,7 @@ pub(crate) fn narrowed_valid_end(
 /// `select_by_valid_time_instant`) that operate on `&Claim` — so a bound-narrowed window and
 /// an own-end window can never classify differently (I8).
 pub(crate) fn claim_with_effective_window(cs: &ClaimWithStatus) -> Claim {
-    let (end, end_granularity) = narrowed_valid_end(&cs.claim, cs.bound_at);
+    let (end, end_granularity) = narrowed_valid_end(&cs.claim, cs.bound_at, cs.bound_at_granularity);
     let vt = mempill_types::ValidTime { end, end_granularity, ..cs.claim.valid_time().clone() };
     Claim::new(
         cs.claim.claim_ref().clone(),
@@ -716,19 +747,24 @@ pub(crate) fn compute_history_windows(
         // has no own end at all, the bound instant becomes its effective end outright — this
         // is exactly what closes DIAG-3 (an open-ended incumbent explicitly bounded via
         // `assert_validity`/`end_fact` must display + fold as ended at that instant, not stay
-        // open forever). A bound instant carries no tracked display granularity (`AssertionKind`
-        // has none — deferred per the TASK-33 architecture doc §3), so it never fabricates one.
+        // open forever). A bound-derived end now carries the bounding instant's OWN
+        // granularity (`ClaimWithStatus.bound_at_granularity`, TASK-33-W5-LIB-R2, DIAG-5) —
+        // an Affirm sets it from the winning challenger's `start_granularity`;
+        // `assert_validity`/`end_fact` set it from the parsed `at`'s granularity; Deny and
+        // legacy rows leave it `None` (honest absence, never fabricated).
         //
         // Delegates to `narrowed_valid_end` — the SAME narrowing `narrow_live_claims_for_valid_at`
         // (valid_at read-path) and the ingest/reconcile conflict-candidate widening use
         // (TASK-33-W5-LIB, I8: one narrowing computation, no parallel algorithms).
         let bound_at = all_claims[i].bound_at;
-        let (own_end, own_end_gran) = narrowed_valid_end(claim, bound_at);
+        let bound_at_gran = all_claims[i].bound_at_granularity;
+        let (own_end, own_end_gran) = narrowed_valid_end(claim, bound_at, bound_at_gran);
 
         let (valid_until, valid_until_granularity, pairwise_overlap) = match succ_idx {
             None => (own_end, own_end_gran, false),
             Some(j) => {
                 let succ = &all_claims[j].claim;
+                let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
                 let both_trusted = valid_time_helpers::claim_is_trusted(claim, threshold)
                     && valid_time_helpers::claim_is_trusted(succ, threshold);
                 // Overlap is evaluated against the BOUND-ADJUSTED own_end, not the raw claim
@@ -748,21 +784,42 @@ pub(crate) fn compute_history_windows(
                         succ.valid_time().start.expect("both_trusted guarantees Some"),
                         succ.valid_time().end,
                     );
+                // TASK-33-W5-LIB-R2 (DIAG-5): when the displayed end is BOUND-DERIVED, the
+                // bound carries no granularity of its own (a legacy `ValidityAssertion`, or a
+                // Deny closure that stamped only an instant), and it numerically coincides
+                // with the successor's start instant, attribute the successor's start
+                // granularity to it instead of silently downgrading to full-instant precision.
+                //
+                // Two hard restrictions (TASK-33-W5-LIB-R2 review F4):
+                // - Bound-derived ONLY. A claim's own `valid_time.end` never takes the
+                //   successor's granularity: whoever wrote that claim supplied its end
+                //   precision, so `end_granularity == None` there is a deliberate "instant",
+                //   not missing information. `end_is_bound_derived` gates exactly this.
+                // - `own_end_gran == None` only — an honestly-tracked precision (from the
+                //   bound itself) is never overridden.
+                //
+                // Not applied in the `overlapping` arm: overlap means the windows genuinely
+                // cross, so `own_end == succ_key` cannot hold under the half-open comparison
+                // that produced `overlapping` — the fallback would be dead code there, and
+                // leaving it in would blur that invariant.
+                let bound_derived_no_gran =
+                    own_end_gran.is_none() && end_is_bound_derived(claim, bound_at);
+                let gran_at_succ_key = |oe: DateTime<Utc>, g: Option<DateGranularity>| {
+                    g.or_else(|| {
+                        if bound_derived_no_gran && oe == succ_key { succ_gran } else { None }
+                    })
+                };
                 match own_end {
                     Some(oe) if overlapping => (Some(oe), own_end_gran, true),
                     Some(oe) => {
-                        let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
                         if oe <= succ_key {
-                            (Some(oe), own_end_gran, false)
+                            (Some(oe), gran_at_succ_key(oe, own_end_gran), false)
                         } else {
                             (Some(succ_key), succ_gran, false)
                         }
                     }
                     None if overlapping => (None, None, true),
-                    None => {
-                        let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
-                        (Some(succ_key), succ_gran, false)
-                    }
+                    None => (Some(succ_key), succ_gran, false),
                 }
             }
         };
@@ -837,6 +894,102 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         Utc::now()
+    }
+
+    // ── HISTORY WINDOW GRANULARITY (TASK-33-W5-LIB-R2, F4) ───────────────────
+
+    /// Claim with an explicit valid_time window, optionally bound at read time.
+    fn windowed(
+        start: DateTime<Utc>,
+        end: Option<DateTime<Utc>>,
+        start_gran: Option<DateGranularity>,
+        end_gran: Option<DateGranularity>,
+        bound_at: Option<DateTime<Utc>>,
+        bound_at_granularity: Option<DateGranularity>,
+    ) -> ClaimWithStatus {
+        let claim = Claim::new(
+            ClaimRef::new_random(),
+            agent(),
+            Fact { subject: "gran-corp".into(), predicate: "ceo".into(), value: serde_json::json!("x") },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(start),
+            ValidTime {
+                start: Some(start),
+                end,
+                valid_time_confidence: 0.9,
+                start_granularity: start_gran,
+                end_granularity: end_gran,
+            },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+            mempill_types::Criticality::Medium,
+            vec![],
+            None,
+            None,
+        );
+        ClaimWithStatus {
+            claim,
+            is_live: true,
+            last_disposition: None,
+            bound_at,
+            bound_at_granularity,
+        }
+    }
+
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(secs, 0).unwrap()
+    }
+
+    /// A claim's OWN `valid_time.end` never inherits the successor's start granularity, even
+    /// when the two instants coincide: `end_granularity == None` on the claim row means the
+    /// writer supplied instant precision, not "unknown" (F4).
+    #[test]
+    fn own_end_equal_to_successor_key_keeps_its_own_granularity() {
+        let start_a = ts(1_577_836_800); // 2020-01-01
+        let start_b = ts(1_609_459_200); // 2021-01-01
+        let claims = vec![
+            windowed(start_a, Some(start_b), None, None, None, None),
+            windowed(start_b, None, Some(DateGranularity::Year), None, None, None),
+        ];
+        let windows = compute_history_windows(&claims, false, ts(1_700_000_000), &EngineConfig::default());
+        assert_eq!(windows[0].valid_until, Some(start_b));
+        assert_eq!(
+            windows[0].valid_until_granularity, None,
+            "a claim's own end must keep its own (instant) precision, never the successor's"
+        );
+    }
+
+    /// The DIAG-5 fallback still fires for a BOUND-DERIVED end whose bound carries no
+    /// granularity and whose instant coincides with the successor's start key.
+    #[test]
+    fn bound_derived_end_equal_to_successor_key_inherits_successor_granularity() {
+        let start_a = ts(1_577_836_800); // 2020-01-01
+        let start_b = ts(1_609_459_200); // 2021-01-01
+        let claims = vec![
+            windowed(start_a, None, None, None, Some(start_b), None),
+            windowed(start_b, None, Some(DateGranularity::Year), None, None, None),
+        ];
+        let windows = compute_history_windows(&claims, false, ts(1_700_000_000), &EngineConfig::default());
+        assert_eq!(windows[0].valid_until, Some(start_b));
+        assert_eq!(
+            windows[0].valid_until_granularity,
+            Some(DateGranularity::Year),
+            "a granularity-less bound landing on the successor's start adopts its precision"
+        );
+    }
+
+    /// A bound that carries its OWN granularity is never overridden by the successor's.
+    #[test]
+    fn bound_with_own_granularity_is_not_overridden() {
+        let start_a = ts(1_577_836_800);
+        let start_b = ts(1_609_459_200);
+        let claims = vec![
+            windowed(start_a, None, None, None, Some(start_b), Some(DateGranularity::Month)),
+            windowed(start_b, None, Some(DateGranularity::Year), None, None, None),
+        ];
+        let windows = compute_history_windows(&claims, false, ts(1_700_000_000), &EngineConfig::default());
+        assert_eq!(windows[0].valid_until_granularity, Some(DateGranularity::Month));
     }
 
     // ── FOLD DETERMINISM (I8): arrival-order independence ────────────────────
@@ -962,7 +1115,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: incumbent_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: bound_time },
+            kind: AssertionKind::Bound { bound_at: bound_time, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_time),
@@ -1017,7 +1170,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: incumbent_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: bound_time },
+            kind: AssertionKind::Bound { bound_at: bound_time, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_time),
@@ -1098,7 +1251,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: claim_ref.clone(),
-            kind: AssertionKind::Bound { bound_at },
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_at),
@@ -1141,7 +1294,7 @@ mod tests {
                     let t = base + chrono::Duration::hours(i as i64);
                     let is_bound = (pattern >> i) & 1 == 0;
                     let kind = if is_bound {
-                        AssertionKind::Bound { bound_at: t }
+                        AssertionKind::Bound { bound_at: t, bound_at_granularity: None }
                     } else {
                         AssertionKind::Reopen { reopen_at: t }
                     };
@@ -1193,7 +1346,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: claim_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: bound_at_future_relative_to_past_now },
+            kind: AssertionKind::Bound { bound_at: bound_at_future_relative_to_past_now, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_at_future_relative_to_past_now),
@@ -1386,7 +1539,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent_id.clone(),
             target_claim: target.clone(),
-            kind: AssertionKind::Bound { bound_at },
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(asserted_at),
@@ -1627,7 +1780,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: AgentId("agent-1".into()),
             target_claim: c1_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: may1 },
+            kind: AssertionKind::Bound { bound_at: may1, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(may1), // asserted at May → not visible at Feb
