@@ -240,3 +240,16 @@ class TestEndFactGranularity:
         assert date_granularity_of("2024-09-15") == "day"
         assert date_granularity_of("2024-09-15T10:30:00Z") == "instant"
         assert date_granularity_of("last September") is None
+
+
+# ── date_granularity_of public API ────────────────────────────────────────────
+
+class TestDateGranularityOfPublicAPI:
+    """Verify that date_granularity_of is re-exported at the package level."""
+
+    def test_date_granularity_of_is_exposed_at_package_level(self) -> None:
+        assert hasattr(mempill, "date_granularity_of")
+        assert mempill.date_granularity_of("2024-09") == "month"
+
+    def test_date_granularity_of_is_in_all(self) -> None:
+        assert "date_granularity_of" in mempill.__all__
