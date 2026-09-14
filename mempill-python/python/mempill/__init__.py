@@ -34,6 +34,7 @@ from mempill._mempill import (
     StorageError,
     ConfigError,
     InternalError,
+    date_granularity_of,
 )
 
 from mempill.types import (
@@ -172,6 +173,7 @@ __all__ = [
     # Enums / helpers
     "Disposition",
     "ProvenanceLabel",
+    "date_granularity_of",
     # TypedDicts
     "ConfidenceDict",
     "ValidTimeDict",

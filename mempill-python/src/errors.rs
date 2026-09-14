@@ -53,6 +53,7 @@ pub fn mem_err_to_pyerr(e: MemError) -> PyErr {
         // assert_validity / end_fact gates (TASK-33 E2)
         MemError::InsufficientProvenanceForOverturn { .. } => ValidationError::new_err(msg),
         MemError::AmbiguousLineForClose { .. } => ValidationError::new_err(msg),
+        MemError::TargetUnderAdjudication { .. } => ValidationError::new_err(msg),
 
         // NotFoundError group
         MemError::ClaimNotFound { .. } => NotFoundError::new_err(msg),

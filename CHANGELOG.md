@@ -70,7 +70,16 @@ Version headings are dated at publish time. A version with no date and the
   on the entry itself, the honest granularity to report is the **successor's**
   `start_granularity` — never this entry's own (never-populated) `end_granularity`.
   When the successor's ordering key falls back to `transaction_time` (low valid-time
-  confidence), `valid_until_granularity` is `None`. The Rust facade's `history()`
+  confidence), `valid_until_granularity` is `None`. Ends produced by a **bound**
+  instead of a successor — an adjudication that narrows the incumbent, or an
+  `assert_validity` / `end_fact` close — carry the granularity of the **bounding
+  instant**: the winning challenger's `start_granularity` for an adjudication (a `Deny`
+  bounds nothing and stays `None`) and the date exactly as the caller gave it for
+  `end_fact`, so `end_fact(.., "2024-09")` renders `2024-09` and never a fabricated
+  `2024-09-01`; it is persisted on the assertion in the new nullable
+  `bound_at_granularity` column (SQLite schema v4, Postgres
+  `V4__add_bound_granularity.sql`), and rows written before v4 read back `None`. The
+  Rust facade's `history()`
   passes both fields through verbatim (`HistoryEntry` is re-exported directly from
   `mempill-core`, no facade change needed). The Python wheel's `query_history` is now
   enriched the same way `query_memory` is (`enrich_query_history` mirrors
@@ -113,6 +122,9 @@ Version headings are dated at publish time. A version with no date and the
 - SQLite schema migrations now run inside a single immediate transaction;
   concurrent first opens of a brand-new per-agent database file no longer fail
   with `duplicate column name`.
+- Point-in-time reads (`valid_at` on `query_memory`, `query_subject`, `recall`) now consider claims that were explicitly ended and always window-check the candidate: an instant inside an ended fact's window returns that fact, and an instant before any claim's start returns no belief.
+- An affirmed adjudication now ends the losing incumbent at the winning claim's valid-time start instead of at the adjudication's transaction time.
+- A claim written retroactively into a window that was explicitly ended is now contested against the ended incumbent instead of being committed silently.
 
 ### Notes
 

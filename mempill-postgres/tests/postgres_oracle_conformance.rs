@@ -107,6 +107,23 @@ fn run_01_affirm(conn_str: &str) {
     });
 }
 
+/// TASK-33-W5-LIB B: Affirm bounds the incumbent at the winning challenger's valid-time
+/// start, not tx_time — Diane/Joan scenario (DIAG-4 finding B).
+fn run_01b_affirm_bounds_incumbent_at_challenger_valid_time_start(conn_str: &str) {
+    let conn_str = conn_str.to_owned();
+    run_in_thread(move || {
+        let handle_id = uuid::Uuid::new_v4();
+        let engine = build_engine(&conn_str, handle_id);
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let result = rt.block_on(async {
+            oc::scenario_affirm_bounds_incumbent_at_challenger_valid_time_start_with_handle(&engine, handle_id).await;
+            Ok(())
+        });
+        drop(engine);
+        result
+    });
+}
+
 fn run_02_deny(conn_str: &str) {
     let conn_str = conn_str.to_owned();
     run_in_thread(move || {
@@ -465,6 +482,11 @@ fn pg16_oc_01_affirm_challenger_wins() {
 }
 
 #[test]
+fn pg16_oc_01b_affirm_bounds_incumbent_at_challenger_valid_time_start() {
+    common::with_pg_and_conn("16", |_store, conn_str| run_01b_affirm_bounds_incumbent_at_challenger_valid_time_start(&conn_str));
+}
+
+#[test]
 fn pg16_oc_02_deny_incumbent_stands() {
     common::with_pg_and_conn("16", |_store, conn_str| run_02_deny(&conn_str));
 }
@@ -545,6 +567,11 @@ fn pg16_oc_12_b11_oracle_absent_contested() {
 #[test]
 fn pg18_oc_01_affirm_challenger_wins() {
     common::with_pg_and_conn("18", |_store, conn_str| run_01_affirm(&conn_str));
+}
+
+#[test]
+fn pg18_oc_01b_affirm_bounds_incumbent_at_challenger_valid_time_start() {
+    common::with_pg_and_conn("18", |_store, conn_str| run_01b_affirm_bounds_incumbent_at_challenger_valid_time_start(&conn_str));
 }
 
 #[test]

@@ -409,7 +409,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: claim_ref.clone(),
-            kind: AssertionKind::Bound { bound_at },
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_at),

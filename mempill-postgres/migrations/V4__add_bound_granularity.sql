@@ -1,0 +1,11 @@
+-- migrations/V4__add_bound_granularity.sql
+-- mempill-postgres v4 migration: add bound_at_granularity to validity_assertions.
+--
+-- Persists the display-only precision hint for a Bound assertion's `bound_at`
+-- (TASK-33-W5-LIB-R2, DIAG-5): an Affirm sets this from the winning challenger's
+-- start_granularity; assert_validity/end_fact set it from the parsed date's
+-- granularity; Deny and legacy rows leave it NULL.
+--
+-- Nullable TEXT so existing rows upgrade cleanly: old rows → NULL → None on read.
+-- Values are the snake_case strings from DateGranularity serde: "year", "month", "day", "instant".
+ALTER TABLE validity_assertions ADD COLUMN IF NOT EXISTS bound_at_granularity TEXT;

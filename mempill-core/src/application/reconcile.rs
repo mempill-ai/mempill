@@ -106,6 +106,9 @@ where
             .load_ledger_for_claims(&req.agent_id, &all_claim_refs, None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
+        // TASK-33-W5-LIB D: same ledger slice, zero extra reads — see build_conflict_candidate_claims.
+        let denied_via_adjudication =
+            crate::application::ingest_claim::build_denied_via_adjudication_set(&all_ledger);
 
         let mut subject_line_data: Vec<SubjectLineData> = Vec::new();
 
@@ -123,16 +126,17 @@ where
                 &latest_disposition,
             );
 
-            // N-wide succession check (fixes the silent chain-overlap defect): each candidate
-            // is compared against EVERY raw-live claim on this subject-line (`FoldResult::all_claims`
-            // filtered `is_live`), not just a single "current" incumbent. Shared across every
-            // candidate on this line; `classify_conflict` filters self out internally.
-            let all_live_claims: Vec<mempill_types::Claim> = fold
-                .all_claims
-                .iter()
-                .filter(|cs| cs.is_live)
-                .map(|cs| cs.claim.clone())
-                .collect();
+            // N-wide succession/conflict check (fixes the silent chain-overlap defect, and
+            // TASK-33-W5-LIB D: mirrors ingest_claim.rs — a retroactive claim over an
+            // explicitly-closed historical window must be contested, not committed silently).
+            // Each candidate is compared against EVERY raw-live claim on this subject-line PLUS
+            // every claim closed by an active Bound, narrowed to its real believed window — see
+            // `truth_engine::build_conflict_candidate_claims`. Shared across every candidate on
+            // this line; `classify_conflict` filters self out internally. reconcile() still
+            // NEVER writes a supersession (see module docs) — this only widens what a candidate
+            // is CLASSIFIED against.
+            let all_live_claims: Vec<mempill_types::Claim> =
+                truth_engine::build_conflict_candidate_claims(&fold, &denied_via_adjudication);
 
             let mut per_claim = Vec::new();
             for cs in &fold.live_claims {
@@ -140,21 +144,37 @@ where
 
                 // Per-candidate incumbent (DIAG_silent_succession §6(b)): NEVER feed the
                 // candidate itself as `incumbent` — `classify_conflict`'s step-3 same-value
-                // check (reconciler.rs:143-146) would then trivially match (identical claim),
-                // returning NoConflict/CheapPath for a claim that is genuinely part of a
-                // contested line. Choose the first OTHER live claim in `fold.live_claims`'
-                // canonical ordering-key order (I8, deterministic/arrival-independent — same
-                // order the fold itself produces) as the legacy `incumbent` field (used only
-                // for step 1's None-check and step 3's same-value check; the real N-wide
-                // conflict/succession classification below uses `all_live_claims`, not this
-                // field). `None` only when this candidate is the sole live claim on the line
-                // (must NOT be fed when len() > 1 — that would short-circuit every candidate to
-                // NoConflict at reconciler.rs:117-120).
+                // check would then trivially match (identical claim), returning
+                // NoConflict/CheapPath for a claim that is genuinely part of a contested line.
+                //
+                // TASK-33-W5-LIB-R1 (review blocker 1, mirrors the ingest_claim.rs fix): prefer
+                // the first OTHER claim in the NARROWED `fold.live_claims` (the fold's
+                // step-4-selected current belief) over `all_live_claims` — the latter is the
+                // WIDENED set, still sorted ascending by canonical ordering key, so its
+                // `.first()`/`.find()` would surface the OLDEST claim on a succession line, not
+                // the current one, letting `classify_conflict` step 3's identical-value
+                // shortcut wave through a candidate whose value matches a STALE claim.
+                //
+                // Fall back to the first OTHER claim in the WIDENED `all_live_claims` set
+                // (TASK-33-W5-LIB D) only when `fold.live_claims` has no OTHER member —
+                // drawing from `fold.live_claims` alone in that case would present
+                // `incumbent = None` whenever every OTHER claim on the line is bound-excluded,
+                // short-circuiting reconciler step 1 to NoConflict before the N-wide overlap
+                // check below even runs. This `incumbent` field is used only for step 1's
+                // None-check and step 3's same-value check; the real N-wide
+                // conflict/succession classification uses `all_live_claims`, not this field.
+                // `None` only when this candidate is the sole widened candidate on the line.
                 let incumbent = fold
                     .live_claims
                     .iter()
-                    .find(|other| other.claim.claim_ref() != candidate.claim_ref())
-                    .map(truth_engine::claim_to_belief);
+                    .map(|other_cs| &other_cs.claim)
+                    .find(|other| other.claim_ref() != candidate.claim_ref())
+                    .or_else(|| {
+                        all_live_claims
+                            .iter()
+                            .find(|other| other.claim_ref() != candidate.claim_ref())
+                    })
+                    .map(truth_engine::claim_to_belief_raw);
 
                 let proposal = reconciler::reconcile(
                     ReconcilerInput {

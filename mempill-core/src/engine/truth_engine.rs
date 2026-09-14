@@ -91,6 +91,13 @@ pub(crate) struct ClaimWithStatus {
     /// `valid_until` and overlap classification — the claim's own stored row is never
     /// touched (I1); this is a read-time derivation only.
     pub bound_at: Option<DateTime<Utc>>,
+    /// The display-precision granularity of `bound_at`, if known (TASK-33-W5-LIB-R2,
+    /// DIAG-5). Mirrors `bound_at`: `None` when the claim is open, or when the active
+    /// `Bound`'s own `bound_at_granularity` is `None` (legacy row, or a Deny's tx_time
+    /// fallback with no tracked precision). Consumed by `narrowed_valid_end` so a
+    /// bound-derived end can carry its true precision instead of silently rendering as
+    /// full-instant/day precision.
+    pub bound_at_granularity: Option<DateGranularity>,
 }
 
 // ── Ordering key ──────────────────────────────────────────────────────────────
@@ -132,6 +139,8 @@ pub(crate) struct BoundState {
     /// The `assertion_ref` of the currently active `Bound` assertion — consumed by
     /// `assert_validity.rs` for idempotency / single-writer-per-target checks (gate 4).
     pub assertion_ref: uuid::Uuid,
+    /// The display-precision granularity of `bound_at`, if known (TASK-33-W5-LIB-R2).
+    pub bound_at_granularity: Option<DateGranularity>,
 }
 
 /// Evaluate the active `Bound`, if any, at `as_of_tx_time` given the full set of validity
@@ -170,9 +179,13 @@ pub(crate) fn active_bound_at(
             continue;
         }
         match &assertion.kind {
-            AssertionKind::Bound { bound_at } => {
+            AssertionKind::Bound { bound_at, bound_at_granularity } => {
                 if *bound_at <= as_of_tx_time {
-                    state = Some(BoundState { bound_at: *bound_at, assertion_ref: assertion.assertion_ref });
+                    state = Some(BoundState {
+                        bound_at: *bound_at,
+                        assertion_ref: assertion.assertion_ref,
+                        bound_at_granularity: *bound_at_granularity,
+                    });
                 }
             }
             AssertionKind::Reopen { reopen_at } => {
@@ -263,12 +276,14 @@ where
             let active_bound = active_bound_at(&assertions, as_of_tx_time);
             let assertion_live = active_bound.is_none();
             let bound_at = active_bound.map(|s| s.bound_at);
+            let bound_at_granularity = active_bound.and_then(|s| s.bound_at_granularity);
             let live = assertion_live && disposition_live;
             ClaimWithStatus {
                 claim: c,
                 is_live: live,
                 last_disposition: last_disp,
                 bound_at,
+                bound_at_granularity,
             }
         })
         .collect();
@@ -347,6 +362,239 @@ where
     FoldResult { live_claims, has_conflict, succession_selected, all_claims }
 }
 
+// ── Shared effective-window derivation (I8: ONE narrowing computation) ────────
+
+/// Narrow a claim's own `valid_time.end` by an active host-asserted `Bound` (TASK-33-W5-LIB A).
+///
+/// `min(own_end, bound_at)` — a `Bound` only ever NARROWS a claim's displayed/classified
+/// window; it never widens a narrower stated end. When the claim has no own end at all, the
+/// bound instant becomes its effective end outright.
+///
+/// THE SINGLE SOURCE OF TRUTH for this narrowing: consumed by [`compute_history_windows`]
+/// (history read-path), [`narrow_live_claims_for_valid_at`] (valid_at read-path, via
+/// [`claim_with_effective_window`]), and the ingest/reconcile conflict-candidate widening
+/// (`ingest_claim.rs::build_conflict_candidate_claims`, `reconcile.rs`) — so a claim's
+/// "believed-then" window can never drift between history, valid_at, and conflict detection.
+pub(crate) fn narrowed_valid_end(
+    claim: &Claim,
+    bound_at: Option<DateTime<Utc>>,
+    bound_at_granularity: Option<DateGranularity>,
+) -> (Option<DateTime<Utc>>, Option<DateGranularity>) {
+    let raw_own_end = claim.valid_time().end;
+    let raw_own_end_gran = claim.valid_time().end_granularity;
+    match (raw_own_end, bound_at) {
+        (Some(oe), Some(ba)) if ba < oe => (Some(ba), bound_at_granularity),
+        (Some(oe), _) => (Some(oe), raw_own_end_gran),
+        (None, Some(ba)) => (Some(ba), bound_at_granularity),
+        (None, None) => (None, None),
+    }
+}
+
+/// `true` when [`narrowed_valid_end`] would return the BOUND instant rather than the claim's
+/// own `valid_time.end` — i.e. the displayed end is bound-derived and its granularity comes
+/// from the `ValidityAssertion`, not from the claim row. Mirrors `narrowed_valid_end`'s arms
+/// one-for-one and lives next to it so the two cannot drift.
+///
+/// Note the `ba < oe` (strict) condition: a bound landing exactly ON the claim's own end is a
+/// no-effect bound — the end still belongs to the CLAIM, with the claim's own precision.
+pub(crate) fn end_is_bound_derived(claim: &Claim, bound_at: Option<DateTime<Utc>>) -> bool {
+    match (claim.valid_time().end, bound_at) {
+        (Some(oe), Some(ba)) => ba < oe,
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+/// Build a transient, READ-TIME-ONLY `Claim` clone whose `valid_time.end` is narrowed via
+/// [`narrowed_valid_end`] — never written back to storage (I1: the stored row is never
+/// touched). Consumed wherever a bound-narrowed claim must be compared/selected using the
+/// exact same half-open-window primitives (`valid_time_helpers::is_trusted_succession`,
+/// `select_by_valid_time_instant`) that operate on `&Claim` — so a bound-narrowed window and
+/// an own-end window can never classify differently (I8).
+pub(crate) fn claim_with_effective_window(cs: &ClaimWithStatus) -> Claim {
+    let (end, end_granularity) = narrowed_valid_end(&cs.claim, cs.bound_at, cs.bound_at_granularity);
+    let vt = mempill_types::ValidTime { end, end_granularity, ..cs.claim.valid_time().clone() };
+    Claim::new(
+        cs.claim.claim_ref().clone(),
+        cs.claim.agent_id().clone(),
+        cs.claim.fact().clone(),
+        cs.claim.cardinality().clone(),
+        cs.claim.provenance().clone(),
+        cs.claim.external_anchor().clone(),
+        cs.claim.transaction_time().clone(),
+        vt,
+        cs.claim.confidence().clone(),
+        cs.claim.criticality().clone(),
+        cs.claim.derived_from().to_vec(),
+        cs.claim.metadata().cloned(),
+        cs.claim.snapshot_schema_version(),
+    )
+}
+
+/// Dispositions that mean "never validly believed at any instant" — hard-excluded from the
+/// valid_at bound-reentry candidate set (and from the ingest/reconcile conflict-candidate
+/// widening) regardless of any active Bound. Distinct from [`is_non_live_disposition`]: this
+/// list deliberately OMITS `Superseded` — a Superseded-via-Bound claim is exactly the case
+/// that MAY re-enter (see [`narrow_live_claims_for_valid_at`]'s rustdoc for the full rule).
+fn is_hard_excluded_disposition(d: &Disposition) -> bool {
+    matches!(d, Disposition::Quarantined | Disposition::Invalidated | Disposition::Rejected)
+}
+
+/// Re-derive `FoldResult.live_claims` (+ `succession_selected`/`has_conflict`) for an EXPLICIT
+/// valid-time query instant (TASK-33-W5-LIB A, DIAG-4 finding A). Called by the read-path
+/// (`query_memory.rs`, and transitively `query_subject.rs`) immediately after [`fold`], ONLY
+/// when the caller supplied a `valid_at` — `fold`'s own step 3/4 output is otherwise used
+/// unchanged (the `valid_at = None` path is untouched by this function and by `fold` itself).
+///
+/// ## Why a separate pass instead of editing `fold`'s step 4 in place
+///
+/// `fold`'s own step 4 (raw-live-only, `len() > 1`-guarded) stays the single source of truth
+/// for every OTHER caller (ingest, reconcile, the 500+ existing tests that never pass
+/// `valid_at`). This function fully RE-DERIVES the valid-time selection from `FoldResult.all_claims`
+/// (the RAW, pre-narrowing set — always available regardless of what `fold` selected), so it can
+/// never disagree with `fold`'s own default-instant narrowing for the cases `fold` already gets
+/// right (e.g. an all-live, non-bounded succession) — it only differs where `fold`'s raw-live-only
+/// view is insufficient (a candidate excluded only by a Bound; a single live candidate that
+/// needs a window check).
+///
+/// ## The candidate set (I3/I7 point-in-time correctness)
+///
+/// A claim is a valid_at candidate iff:
+///   1. Its latest disposition is NOT hard-excluded ([`is_hard_excluded_disposition`]:
+///      Quarantined / Invalidated / Rejected — "never validly believed").
+///   2. It is currently live (`is_live`, unconditional — no window check needed to know it was
+///      once live for windowing purposes), OR
+///   3. It is excluded ONLY by an active Bound (`bound_at.is_some()`) AND it is not in
+///      `denied_via_adjudication` — i.e. the Bound closed a claim that WAS genuinely believed
+///      ("bound-by-succession/affirm/host"): an Affirm's losing incumbent, a host
+///      `end_fact`/`assert_validity` closure, or any other succession-style Bound. A claim
+///      bounded via an oracle `Deny` verdict (the challenger was found WRONG, and per
+///      `submit_adjudication.rs` was `QueuedForAdjudication` — never live — for its entire
+///      existence before being denied) is EXCLUDED — it was never a "believed then" state, and
+///      re-entering it would let rejected content resurface as a point-in-time answer. See
+///      `build_denied_via_adjudication_set` (`ingest_claim.rs`) for the derivation.
+///
+/// Each candidate's window is narrowed via [`claim_with_effective_window`] (the SAME derivation
+/// `compute_history_windows` uses — I8), then the widened, narrowed candidate set is tested with
+/// the EXACT SAME primitives `fold` itself uses (`is_trusted_succession` +
+/// `select_by_valid_time_instant`) — dropping `fold`'s `len() > 1` guard: even a single candidate
+/// is window-tested, so an instant outside its window (e.g. before its start) correctly yields
+/// NoBelief instead of unconditionally returning it.
+///
+/// If the widened candidate set is NOT a clean trusted succession (untrusted claims, or a
+/// genuine unresolved overlap even after narrowing), this function falls back to whatever
+/// `fold` already computed for `live_claims`/`has_conflict` — i.e. behaves as if the valid_at
+/// axis could not cleanly resolve, preserving `fold`'s existing Conflict/Contested semantics.
+pub(crate) fn narrow_live_claims_for_valid_at(
+    fold_result: FoldResult,
+    valid_at_instant: DateTime<Utc>,
+    denied_via_adjudication: &std::collections::HashSet<ClaimRef>,
+    config: &EngineConfig,
+) -> FoldResult {
+    let candidates: Vec<ClaimWithStatus> = fold_result
+        .all_claims
+        .iter()
+        .filter(|cs| {
+            let hard_excluded = cs
+                .last_disposition
+                .as_ref()
+                .map(is_hard_excluded_disposition)
+                .unwrap_or(false);
+            if hard_excluded {
+                return false;
+            }
+            cs.is_live
+                || (cs.bound_at.is_some() && !denied_via_adjudication.contains(cs.claim.claim_ref()))
+        })
+        .cloned()
+        .collect();
+
+    let narrowed_claims: Vec<Claim> = candidates.iter().map(claim_with_effective_window).collect();
+    let candidate_refs: Vec<&Claim> = narrowed_claims.iter().collect();
+
+    if valid_time_helpers::is_trusted_succession(&candidate_refs, config.valid_time_confidence_threshold) {
+        let selected = valid_time_helpers::select_by_valid_time_instant(&candidate_refs, valid_at_instant);
+        let selected_ref = selected.map(|c| c.claim_ref().clone());
+        let live_claims: Vec<ClaimWithStatus> = match selected_ref {
+            Some(ref cref) => candidates.into_iter().filter(|cs| cs.claim.claim_ref() == cref).collect(),
+            None => vec![], // gap → NoBelief
+        };
+        FoldResult {
+            live_claims,
+            has_conflict: false, // succession-selected result is never Conflict (0 or 1 claim)
+            succession_selected: true,
+            all_claims: fold_result.all_claims,
+        }
+    } else {
+        // Could not cleanly resolve the widened set — fall back to fold()'s own (unwidened)
+        // live_claims/has_conflict, preserving existing Conflict/Contested semantics.
+        fold_result
+    }
+}
+
+/// Build the WIDENED conflict-candidate set consumed by `reconciler::classify_conflict`'s
+/// N-wide succession check (TASK-33-W5-LIB C/D, DIAG-4 finding C — "retroactive claim over a
+/// closed historical window commits silently").
+///
+/// Prior behavior (`ingest_claim.rs`/`reconcile.rs`) built the candidate set from raw-live
+/// claims ONLY (`FoldResult.all_claims` filtered `is_live`), so a claim explicitly closed via
+/// `end_fact`/`assert_validity`/Affirm was never compared against a new retroactive write —
+/// letting an overlapping retroactive claim commit silently against an ended incumbent instead
+/// of being contested. The candidate set is now raw-live ∪ bound-narrowed claims: every claim
+/// not hard-excluded ([`is_hard_excluded_disposition`]: Quarantined/Invalidated/Rejected) AND
+/// not Deny-bounded (`denied_via_adjudication`), narrowed to its effective window via
+/// [`claim_with_effective_window`] — the SAME derivation [`compute_history_windows`] and
+/// [`narrow_live_claims_for_valid_at`] use (I8).
+///
+/// Deny-bounded claims are EXCLUDED here too (not merely "conservative to include" — a
+/// rejected challenger's `bound_at` is tx_time, an essentially arbitrary instant with no
+/// relation to any OTHER claim's valid-time window; leaving a denied claim's phantom
+/// [challenger_start, tx_time) window in the candidate set can spuriously overlap a LATER,
+/// entirely unrelated, genuinely non-overlapping succession member and misclassify it as
+/// SameLineConflict — confirmed by a regression: Diane/Linda/Sam(denied)/John, where Sam's
+/// denied window overlapping John's real succession against Linda incorrectly forced John to
+/// QueuedForAdjudication). Same discriminator [`narrow_live_claims_for_valid_at`] uses.
+///
+/// A clean succession is preserved: after `end_fact(A at e)`, a claim `B` starting exactly at
+/// `e` does NOT overlap `A`'s narrowed window `[s, e)` (half-open touching boundary) — `B` still
+/// commits cheaply. Only a claim that genuinely overlaps the ended window is caught.
+///
+/// Complexity: O(N) over `all_claims` (already loaded for the fold) — zero extra DB round trips.
+pub(crate) fn build_conflict_candidate_claims(
+    fold_result: &FoldResult,
+    denied_via_adjudication: &std::collections::HashSet<ClaimRef>,
+) -> Vec<Claim> {
+    fold_result
+        .all_claims
+        .iter()
+        .filter(|cs| {
+            let hard_excluded = cs
+                .last_disposition
+                .as_ref()
+                .map(is_hard_excluded_disposition)
+                .unwrap_or(false);
+            if hard_excluded {
+                return false;
+            }
+            if cs.is_live {
+                return true;
+            }
+            // "raw-live ∪ bound-narrowed": a not-live claim only widens in when it has an
+            // ACTIVE Bound (`bound_at.is_some()`) — a claim excluded purely by ledger
+            // disposition (e.g. a legacy direct-write Superseded entry with no accompanying
+            // ValidityAssertion) carries no known valid-time end to narrow to, so
+            // `claim_with_effective_window` would be a no-op and silently re-admit it as a
+            // phantom OPEN-ENDED candidate — exactly the regression this guard prevents
+            // (dscope[wa1]: a claim superseded by ledger-only entry, no Bound assertion, must
+            // stay excluded from every candidate set, matching `is_live` exactly). A
+            // Deny-bounded claim (rejected, never believed) also stays excluded regardless of
+            // its `bound_at` — see this function's rustdoc.
+            cs.bound_at.is_some() && !denied_via_adjudication.contains(cs.claim.claim_ref())
+        })
+        .map(|cs| if cs.is_live { cs.claim.clone() } else { claim_with_effective_window(cs) })
+        .collect()
+}
+
 // ── Build a Belief from a ClaimWithStatus ────────────────────────────────────
 
 /// Convert a live `ClaimWithStatus` into a `Belief` value type.
@@ -358,19 +606,30 @@ where
 /// so `start_granularity` and `end_granularity` are preserved here.  Granularity is
 /// purely a display hint — it does NOT influence fold selection, matching, or ordering.
 pub(crate) fn claim_to_belief(cs: &ClaimWithStatus) -> Belief {
+    claim_to_belief_raw(&cs.claim)
+}
+
+/// Convert any `Claim` into a `Belief` value type — the same derivation `claim_to_belief`
+/// uses, but callable on a bare `&Claim` (no `ClaimWithStatus` wrapper needed). Consumed by
+/// `ingest_claim.rs`/`reconcile.rs` to build the reconciler's `incumbent: Option<&Belief>`
+/// from the WIDENED conflict-candidate set (`build_conflict_candidate_claims`, TASK-33-W5-LIB
+/// C/D) — that set is `Vec<Claim>`, not `Vec<ClaimWithStatus>`, since bound-narrowed candidates
+/// are synthetic read-time-only claims ([`claim_with_effective_window`]) with no `ClaimWithStatus`
+/// of their own.
+pub(crate) fn claim_to_belief_raw(claim: &Claim) -> Belief {
     Belief {
-        claim_ref: cs.claim.claim_ref().clone(),
-        fact: cs.claim.fact().clone(),
-        provenance: cs.claim.provenance().clone(),
-        valid_time: cs.claim.valid_time().clone(),
-        transaction_time: cs.claim.transaction_time().clone(),
-        confidence: cs.claim.confidence().clone(),
+        claim_ref: claim.claim_ref().clone(),
+        fact: claim.fact().clone(),
+        provenance: claim.provenance().clone(),
+        valid_time: claim.valid_time().clone(),
+        transaction_time: claim.transaction_time().clone(),
+        confidence: claim.confidence().clone(),
         currency_signal: CurrencySignal {
-            last_refreshed_at: cs.claim.transaction_time().clone(),
+            last_refreshed_at: claim.transaction_time().clone(),
             state: CurrencyState::Fresh, // placeholder; projection.rs computes real state
             corroboration_count: 0,
         },
-        criticality: cs.claim.criticality().clone(),
+        criticality: claim.criticality().clone(),
     }
 }
 
@@ -488,22 +747,24 @@ pub(crate) fn compute_history_windows(
         // has no own end at all, the bound instant becomes its effective end outright — this
         // is exactly what closes DIAG-3 (an open-ended incumbent explicitly bounded via
         // `assert_validity`/`end_fact` must display + fold as ended at that instant, not stay
-        // open forever). A bound instant carries no tracked display granularity (`AssertionKind`
-        // has none — deferred per the TASK-33 architecture doc §3), so it never fabricates one.
-        let raw_own_end = claim.valid_time().end;
-        let raw_own_end_gran = claim.valid_time().end_granularity;
+        // open forever). A bound-derived end now carries the bounding instant's OWN
+        // granularity (`ClaimWithStatus.bound_at_granularity`, TASK-33-W5-LIB-R2, DIAG-5) —
+        // an Affirm sets it from the winning challenger's `start_granularity`;
+        // `assert_validity`/`end_fact` set it from the parsed `at`'s granularity; Deny and
+        // legacy rows leave it `None` (honest absence, never fabricated).
+        //
+        // Delegates to `narrowed_valid_end` — the SAME narrowing `narrow_live_claims_for_valid_at`
+        // (valid_at read-path) and the ingest/reconcile conflict-candidate widening use
+        // (TASK-33-W5-LIB, I8: one narrowing computation, no parallel algorithms).
         let bound_at = all_claims[i].bound_at;
-        let (own_end, own_end_gran) = match (raw_own_end, bound_at) {
-            (Some(oe), Some(ba)) if ba < oe => (Some(ba), None),
-            (Some(oe), _) => (Some(oe), raw_own_end_gran),
-            (None, Some(ba)) => (Some(ba), None),
-            (None, None) => (None, None),
-        };
+        let bound_at_gran = all_claims[i].bound_at_granularity;
+        let (own_end, own_end_gran) = narrowed_valid_end(claim, bound_at, bound_at_gran);
 
         let (valid_until, valid_until_granularity, pairwise_overlap) = match succ_idx {
             None => (own_end, own_end_gran, false),
             Some(j) => {
                 let succ = &all_claims[j].claim;
+                let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
                 let both_trusted = valid_time_helpers::claim_is_trusted(claim, threshold)
                     && valid_time_helpers::claim_is_trusted(succ, threshold);
                 // Overlap is evaluated against the BOUND-ADJUSTED own_end, not the raw claim
@@ -523,21 +784,42 @@ pub(crate) fn compute_history_windows(
                         succ.valid_time().start.expect("both_trusted guarantees Some"),
                         succ.valid_time().end,
                     );
+                // TASK-33-W5-LIB-R2 (DIAG-5): when the displayed end is BOUND-DERIVED, the
+                // bound carries no granularity of its own (a legacy `ValidityAssertion`, or a
+                // Deny closure that stamped only an instant), and it numerically coincides
+                // with the successor's start instant, attribute the successor's start
+                // granularity to it instead of silently downgrading to full-instant precision.
+                //
+                // Two hard restrictions (TASK-33-W5-LIB-R2 review F4):
+                // - Bound-derived ONLY. A claim's own `valid_time.end` never takes the
+                //   successor's granularity: whoever wrote that claim supplied its end
+                //   precision, so `end_granularity == None` there is a deliberate "instant",
+                //   not missing information. `end_is_bound_derived` gates exactly this.
+                // - `own_end_gran == None` only — an honestly-tracked precision (from the
+                //   bound itself) is never overridden.
+                //
+                // Not applied in the `overlapping` arm: overlap means the windows genuinely
+                // cross, so `own_end == succ_key` cannot hold under the half-open comparison
+                // that produced `overlapping` — the fallback would be dead code there, and
+                // leaving it in would blur that invariant.
+                let bound_derived_no_gran =
+                    own_end_gran.is_none() && end_is_bound_derived(claim, bound_at);
+                let gran_at_succ_key = |oe: DateTime<Utc>, g: Option<DateGranularity>| {
+                    g.or_else(|| {
+                        if bound_derived_no_gran && oe == succ_key { succ_gran } else { None }
+                    })
+                };
                 match own_end {
                     Some(oe) if overlapping => (Some(oe), own_end_gran, true),
                     Some(oe) => {
-                        let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
                         if oe <= succ_key {
-                            (Some(oe), own_end_gran, false)
+                            (Some(oe), gran_at_succ_key(oe, own_end_gran), false)
                         } else {
                             (Some(succ_key), succ_gran, false)
                         }
                     }
                     None if overlapping => (None, None, true),
-                    None => {
-                        let (succ_key, succ_gran) = primary_key_and_granularity(succ, config);
-                        (Some(succ_key), succ_gran, false)
-                    }
+                    None => (Some(succ_key), succ_gran, false),
                 }
             }
         };
@@ -612,6 +894,102 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         Utc::now()
+    }
+
+    // ── HISTORY WINDOW GRANULARITY (TASK-33-W5-LIB-R2, F4) ───────────────────
+
+    /// Claim with an explicit valid_time window, optionally bound at read time.
+    fn windowed(
+        start: DateTime<Utc>,
+        end: Option<DateTime<Utc>>,
+        start_gran: Option<DateGranularity>,
+        end_gran: Option<DateGranularity>,
+        bound_at: Option<DateTime<Utc>>,
+        bound_at_granularity: Option<DateGranularity>,
+    ) -> ClaimWithStatus {
+        let claim = Claim::new(
+            ClaimRef::new_random(),
+            agent(),
+            Fact { subject: "gran-corp".into(), predicate: "ceo".into(), value: serde_json::json!("x") },
+            Cardinality::Functional,
+            ProvenanceLabel::External(ExternalKind::UserAsserted),
+            ExternalAnchor { nearest_external_anchor: None, derivation_depth: 0 },
+            TransactionTime(start),
+            ValidTime {
+                start: Some(start),
+                end,
+                valid_time_confidence: 0.9,
+                start_granularity: start_gran,
+                end_granularity: end_gran,
+            },
+            Confidence { value_confidence: 0.9, valid_time_confidence: 0.9 },
+            mempill_types::Criticality::Medium,
+            vec![],
+            None,
+            None,
+        );
+        ClaimWithStatus {
+            claim,
+            is_live: true,
+            last_disposition: None,
+            bound_at,
+            bound_at_granularity,
+        }
+    }
+
+    fn ts(secs: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(secs, 0).unwrap()
+    }
+
+    /// A claim's OWN `valid_time.end` never inherits the successor's start granularity, even
+    /// when the two instants coincide: `end_granularity == None` on the claim row means the
+    /// writer supplied instant precision, not "unknown" (F4).
+    #[test]
+    fn own_end_equal_to_successor_key_keeps_its_own_granularity() {
+        let start_a = ts(1_577_836_800); // 2020-01-01
+        let start_b = ts(1_609_459_200); // 2021-01-01
+        let claims = vec![
+            windowed(start_a, Some(start_b), None, None, None, None),
+            windowed(start_b, None, Some(DateGranularity::Year), None, None, None),
+        ];
+        let windows = compute_history_windows(&claims, false, ts(1_700_000_000), &EngineConfig::default());
+        assert_eq!(windows[0].valid_until, Some(start_b));
+        assert_eq!(
+            windows[0].valid_until_granularity, None,
+            "a claim's own end must keep its own (instant) precision, never the successor's"
+        );
+    }
+
+    /// The DIAG-5 fallback still fires for a BOUND-DERIVED end whose bound carries no
+    /// granularity and whose instant coincides with the successor's start key.
+    #[test]
+    fn bound_derived_end_equal_to_successor_key_inherits_successor_granularity() {
+        let start_a = ts(1_577_836_800); // 2020-01-01
+        let start_b = ts(1_609_459_200); // 2021-01-01
+        let claims = vec![
+            windowed(start_a, None, None, None, Some(start_b), None),
+            windowed(start_b, None, Some(DateGranularity::Year), None, None, None),
+        ];
+        let windows = compute_history_windows(&claims, false, ts(1_700_000_000), &EngineConfig::default());
+        assert_eq!(windows[0].valid_until, Some(start_b));
+        assert_eq!(
+            windows[0].valid_until_granularity,
+            Some(DateGranularity::Year),
+            "a granularity-less bound landing on the successor's start adopts its precision"
+        );
+    }
+
+    /// A bound that carries its OWN granularity is never overridden by the successor's.
+    #[test]
+    fn bound_with_own_granularity_is_not_overridden() {
+        let start_a = ts(1_577_836_800);
+        let start_b = ts(1_609_459_200);
+        let claims = vec![
+            windowed(start_a, None, None, None, Some(start_b), Some(DateGranularity::Month)),
+            windowed(start_b, None, Some(DateGranularity::Year), None, None, None),
+        ];
+        let windows = compute_history_windows(&claims, false, ts(1_700_000_000), &EngineConfig::default());
+        assert_eq!(windows[0].valid_until_granularity, Some(DateGranularity::Month));
     }
 
     // ── FOLD DETERMINISM (I8): arrival-order independence ────────────────────
@@ -737,7 +1115,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: incumbent_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: bound_time },
+            kind: AssertionKind::Bound { bound_at: bound_time, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_time),
@@ -792,7 +1170,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: incumbent_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: bound_time },
+            kind: AssertionKind::Bound { bound_at: bound_time, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_time),
@@ -873,7 +1251,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: claim_ref.clone(),
-            kind: AssertionKind::Bound { bound_at },
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_at),
@@ -916,7 +1294,7 @@ mod tests {
                     let t = base + chrono::Duration::hours(i as i64);
                     let is_bound = (pattern >> i) & 1 == 0;
                     let kind = if is_bound {
-                        AssertionKind::Bound { bound_at: t }
+                        AssertionKind::Bound { bound_at: t, bound_at_granularity: None }
                     } else {
                         AssertionKind::Reopen { reopen_at: t }
                     };
@@ -968,7 +1346,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: claim_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: bound_at_future_relative_to_past_now },
+            kind: AssertionKind::Bound { bound_at: bound_at_future_relative_to_past_now, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_at_future_relative_to_past_now),
@@ -1145,6 +1523,232 @@ mod tests {
         assert!(!fold.has_conflict, "gap must not produce has_conflict");
     }
 
+    // ── TASK-33-W5-LIB A: narrow_live_claims_for_valid_at — DIAG-4 scenarios ─────
+
+    fn empty_denied() -> std::collections::HashSet<ClaimRef> {
+        std::collections::HashSet::new()
+    }
+
+    fn bound_assertion_for(
+        agent_id: &AgentId,
+        target: &ClaimRef,
+        bound_at: DateTime<Utc>,
+        asserted_at: DateTime<Utc>,
+    ) -> ValidityAssertion {
+        ValidityAssertion {
+            assertion_ref: uuid::Uuid::new_v4(),
+            agent_id: agent_id.clone(),
+            target_claim: target.clone(),
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            asserted_at: TransactionTime(asserted_at),
+        }
+    }
+
+    /// DIAG-4 scenario 1: Diane open [2021-04, ∞) explicitly ended (end_fact) at 2025-01;
+    /// John [2025-01, ∞) live. valid_at BEFORE the bound (2022-06, 2024-12) must still return
+    /// Diane (the bound-narrowed reentry); valid_at AFTER (2025-06) returns John.
+    #[test]
+    fn narrow_live_claims_for_valid_at_reenters_end_fact_bounded_incumbent() {
+        use chrono::TimeZone;
+        let config = EngineConfig::default();
+        let agent = agent();
+
+        let diane_start = chrono::Utc.with_ymd_and_hms(2021, 4, 1, 0, 0, 0).unwrap();
+        let bound_at = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let tx = diane_start - chrono::Duration::days(1);
+
+        let diane = make_vt_claim(&agent, serde_json::json!("diane"), tx, diane_start, None);
+        let diane_ref = diane.claim_ref().clone();
+        let john = make_vt_claim(&agent, serde_json::json!("john"), tx, bound_at, None);
+
+        let assertion = bound_assertion_for(&agent, &diane_ref, bound_at, bound_at);
+        let assertions_fn = move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if *cr == diane_ref { vec![assertion.clone()] } else { vec![] }
+        };
+
+        let as_of = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let claims = vec![diane.clone(), john.clone()];
+
+        for (label, valid_at, expect) in [
+            ("2022-06 (in Diane's window, before bound)", chrono::Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap(), "diane"),
+            ("2024-12 (still in Diane's window)", chrono::Utc.with_ymd_and_hms(2024, 12, 1, 0, 0, 0).unwrap(), "diane"),
+            ("2025-06 (in John's window)", chrono::Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap(), "john"),
+        ] {
+            let fold_result = fold(claims.clone(), assertions_fn.clone(), as_of, Some(valid_at), &config, &no_dispositions());
+            let narrowed = narrow_live_claims_for_valid_at(fold_result, valid_at, &empty_denied(), &config);
+            assert_eq!(narrowed.live_claims.len(), 1, "{label}: exactly one claim selected");
+            assert_eq!(
+                narrowed.live_claims[0].claim.fact().value,
+                serde_json::json!(expect),
+                "{label}: expected {expect}"
+            );
+        }
+    }
+
+    /// DIAG-4 scenario 2 (control): both claims bounded AT INGEST (own valid_time.end set,
+    /// no ValidityAssertion involved) — must behave identically to scenario 1's reentry path.
+    #[test]
+    fn narrow_live_claims_for_valid_at_control_bounded_at_ingest() {
+        use chrono::TimeZone;
+        let config = EngineConfig::default();
+        let agent = agent();
+
+        let start = chrono::Utc.with_ymd_and_hms(2021, 4, 1, 0, 0, 0).unwrap();
+        let end = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let tx = start - chrono::Duration::days(1);
+
+        let diane = make_vt_claim(&agent, serde_json::json!("diane"), tx, start, Some(end));
+        let john = make_vt_claim(&agent, serde_json::json!("john"), tx, end, None);
+        let as_of = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let valid_at = chrono::Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap();
+
+        let fold_result = fold(vec![diane, john], no_assertions, as_of, Some(valid_at), &config, &no_dispositions());
+        let narrowed = narrow_live_claims_for_valid_at(fold_result, valid_at, &empty_denied(), &config);
+        assert_eq!(narrowed.live_claims.len(), 1);
+        assert_eq!(narrowed.live_claims[0].claim.fact().value, serde_json::json!("diane"));
+    }
+
+    /// DIAG-4 scenario 3 (Affirm): the losing incumbent (Diane) is bounded at the winning
+    /// challenger's (Joan) valid-time start (TASK-33-W5-LIB B fix). valid_at BEFORE that
+    /// instant must still return Diane, not the winner.
+    #[test]
+    fn narrow_live_claims_for_valid_at_reenters_affirm_bounded_incumbent() {
+        use chrono::TimeZone;
+        let config = EngineConfig::default();
+        let agent = agent();
+
+        let diane_start = chrono::Utc.with_ymd_and_hms(2021, 4, 1, 0, 0, 0).unwrap();
+        let joan_start = chrono::Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).unwrap(); // Affirm bound_at
+        let tx = diane_start - chrono::Duration::days(1);
+
+        let diane = make_vt_claim(&agent, serde_json::json!("diane"), tx, diane_start, None);
+        let diane_ref = diane.claim_ref().clone();
+        let joan = make_vt_claim(&agent, serde_json::json!("joan"), tx, joan_start, None);
+
+        // Simulates submit_adjudication's Affirm bound_claim: bound_at = Joan's valid_time.start.
+        let assertion = bound_assertion_for(&agent, &diane_ref, joan_start, joan_start);
+        let assertions_fn = move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if *cr == diane_ref { vec![assertion.clone()] } else { vec![] }
+        };
+
+        let as_of = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let valid_at = chrono::Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap(); // before Joan starts
+
+        let fold_result = fold(vec![diane, joan], assertions_fn, as_of, Some(valid_at), &config, &no_dispositions());
+        let narrowed = narrow_live_claims_for_valid_at(fold_result, valid_at, &empty_denied(), &config);
+        assert_eq!(narrowed.live_claims.len(), 1, "valid_at=2022-06 must select exactly one claim");
+        assert_eq!(
+            narrowed.live_claims[0].claim.fact().value,
+            serde_json::json!("diane"),
+            "valid_at=2022-06 (before the Affirm bound at Joan's start) must return diane"
+        );
+    }
+
+    /// DIAG-4 scenario 6: a single open, unbounded claim (Eve [2010, ∞)) with a valid_at
+    /// BEFORE its start must return NoBelief, not the claim unconditionally (the `len() > 1`
+    /// guard drop).
+    #[test]
+    fn narrow_live_claims_for_valid_at_single_claim_pre_history_gap() {
+        use chrono::TimeZone;
+        let config = EngineConfig::default();
+        let agent = agent();
+
+        let eve_start = chrono::Utc.with_ymd_and_hms(2010, 1, 1, 0, 0, 0).unwrap();
+        let tx = eve_start - chrono::Duration::days(1);
+        let eve = make_vt_claim(&agent, serde_json::json!("eve"), tx, eve_start, None);
+
+        let as_of = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let valid_at = chrono::Utc.with_ymd_and_hms(1995, 1, 1, 0, 0, 0).unwrap(); // before Eve's start
+
+        let fold_result = fold(vec![eve], no_assertions, as_of, Some(valid_at), &config, &no_dispositions());
+        let narrowed = narrow_live_claims_for_valid_at(fold_result, valid_at, &empty_denied(), &config);
+        assert_eq!(narrowed.live_claims.len(), 0, "valid_at before Eve's only window must be NoBelief");
+        assert!(narrowed.succession_selected);
+        assert!(!narrowed.has_conflict);
+    }
+
+    /// A Deny-bounded challenger must NEVER re-enter the valid_at candidate set — it was
+    /// `QueuedForAdjudication` (never live) for its entire existence before being denied, so
+    /// it was never "believed then". Fixed-end incumbent [2021, 2024) + a denied challenger
+    /// claiming [2024, ∞) (bounded at 2026 by the Deny): valid_at=2025 (inside the denied
+    /// claim's raw window, after the incumbent's real end) must be NoBelief, not the rejected
+    /// challenger's value.
+    #[test]
+    fn narrow_live_claims_for_valid_at_excludes_denied_challenger() {
+        use chrono::TimeZone;
+        let config = EngineConfig::default();
+        let agent = agent();
+
+        let incumbent_start = chrono::Utc.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
+        let incumbent_end = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let deny_bound_at = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(); // Deny keeps tx_time
+        let tx = incumbent_start - chrono::Duration::days(1);
+
+        let incumbent = make_vt_claim(&agent, serde_json::json!("incumbent"), tx, incumbent_start, Some(incumbent_end));
+        let challenger = make_vt_claim(&agent, serde_json::json!("rejected"), tx, incumbent_end, None);
+        let challenger_ref = challenger.claim_ref().clone();
+
+        let assertion = bound_assertion_for(&agent, &challenger_ref, deny_bound_at, deny_bound_at);
+        let assertions_fn = move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if *cr == challenger_ref { vec![assertion.clone()] } else { vec![] }
+        };
+
+        let mut denied = std::collections::HashSet::new();
+        denied.insert(challenger.claim_ref().clone());
+
+        let as_of = chrono::Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap();
+        let valid_at = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(); // inside the denied claim's raw window
+
+        let fold_result = fold(vec![incumbent, challenger], assertions_fn, as_of, Some(valid_at), &config, &no_dispositions());
+        let narrowed = narrow_live_claims_for_valid_at(fold_result, valid_at, &denied, &config);
+        assert_eq!(
+            narrowed.live_claims.len(), 0,
+            "a Deny-bounded (rejected) claim must never resurface as a valid_at belief"
+        );
+    }
+
+    /// as_of_tx_time interplay: an `as_of` BEFORE the Bound was asserted sees the incumbent as
+    /// raw-live (Bound not tx-visible yet); an `as_of` AFTER sees it bounded (reentry kicks in).
+    /// A valid_at instant INSIDE the incumbent's real (eventually-bounded) window must resolve
+    /// to the SAME claim in both cases — D2 independence holds even with bound-reentry.
+    #[test]
+    fn narrow_live_claims_for_valid_at_as_of_tx_time_interplay() {
+        use chrono::TimeZone;
+        let config = EngineConfig::default();
+        let agent = agent();
+
+        let alice_start = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let bound_at = chrono::Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap(); // valid-time end
+        let asserted_at = chrono::Utc.with_ymd_and_hms(2023, 6, 1, 0, 0, 0).unwrap(); // tx-time of the end_fact write
+        let tx = alice_start - chrono::Duration::days(1);
+
+        let alice = make_vt_claim(&agent, serde_json::json!("alice"), tx, alice_start, None);
+        let alice_ref = alice.claim_ref().clone();
+        let assertion = bound_assertion_for(&agent, &alice_ref, bound_at, asserted_at);
+        let assertions_fn = move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if *cr == alice_ref { vec![assertion.clone()] } else { vec![] }
+        };
+
+        let valid_at = chrono::Utc.with_ymd_and_hms(2021, 6, 1, 0, 0, 0).unwrap(); // inside [2020, 2022)
+
+        // Query A: as_of BEFORE asserted_at → Bound not tx-visible → Alice raw-live, unbounded.
+        let as_of_before = chrono::Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap();
+        let fold_before = fold(vec![alice.clone()], assertions_fn.clone(), as_of_before, Some(valid_at), &config, &no_dispositions());
+        let narrowed_before = narrow_live_claims_for_valid_at(fold_before, valid_at, &empty_denied(), &config);
+        assert_eq!(narrowed_before.live_claims.len(), 1, "before the bound: valid_at in-window still selects Alice");
+        assert_eq!(narrowed_before.live_claims[0].claim.fact().value, serde_json::json!("alice"));
+
+        // Query B: as_of AFTER asserted_at → Bound tx-visible → Alice bounded; reentry narrows
+        // to [2020, 2022) — the SAME in-window instant still selects Alice.
+        let as_of_after = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let fold_after = fold(vec![alice], assertions_fn, as_of_after, Some(valid_at), &config, &no_dispositions());
+        let narrowed_after = narrow_live_claims_for_valid_at(fold_after, valid_at, &empty_denied(), &config);
+        assert_eq!(narrowed_after.live_claims.len(), 1, "after the bound: valid_at in-window still selects Alice via reentry");
+        assert_eq!(narrowed_after.live_claims[0].claim.fact().value, serde_json::json!("alice"));
+    }
+
     /// D2 ordering: validity-assertion (tx-time axis) filter runs BEFORE valid-at selection.
     ///
     /// C1 is bounded (via ValidityAssertion::Bound) at a time AFTER the query as_of_tx_time,
@@ -1176,7 +1780,7 @@ mod tests {
             assertion_ref: uuid::Uuid::new_v4(),
             agent_id: AgentId("agent-1".into()),
             target_claim: c1_ref.clone(),
-            kind: AssertionKind::Bound { bound_at: may1 },
+            kind: AssertionKind::Bound { bound_at: may1, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(may1), // asserted at May → not visible at Feb

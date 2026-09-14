@@ -79,7 +79,7 @@ fn make_validity_assertion(agent_id: &AgentId, claim_ref: &ClaimRef) -> Validity
         assertion_ref: Uuid::new_v4(),
         agent_id: agent_id.clone(),
         target_claim: claim_ref.clone(),
-        kind: mempill_types::AssertionKind::Bound { bound_at: Utc::now() },
+        kind: mempill_types::AssertionKind::Bound { bound_at: Utc::now(), bound_at_granularity: None },
         provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
         confidence: Confidence { value_confidence: 0.9, valid_time_confidence: 0.0 },
         asserted_at: TransactionTime(Utc::now()),

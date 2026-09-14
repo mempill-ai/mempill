@@ -92,6 +92,26 @@ where
             &latest_disposition,
         );
 
+        // TASK-33-W5-LIB A (DIAG-4 finding A): when the caller supplies an explicit `valid_at`,
+        // re-derive the live set from `fold.all_claims` so a claim excluded only by an active
+        // Bound (a succession/host/Affirm closure) re-enters, narrowed to its real believed
+        // window — `fold`'s own step 4 above only ever sees the raw-live set. Zero extra DB
+        // round trips: reuses the SAME `all_ledger` already loaded for `latest_disposition`.
+        // `valid_at = None` is a complete no-op (see `narrow_live_claims_for_valid_at`'s doc).
+        let fold = match req.valid_at {
+            Some(instant) => {
+                let denied_via_adjudication =
+                    crate::application::ingest_claim::build_denied_via_adjudication_set(&all_ledger);
+                truth_engine::narrow_live_claims_for_valid_at(
+                    fold,
+                    instant,
+                    &denied_via_adjudication,
+                    &self.config,
+                )
+            }
+            None => fold,
+        };
+
         // Build ledger entries per claim (for A26 PendingReview detection).
         // Reuse the already-loaded all_ledger from above (no second load needed).
         let ledger_entries: Vec<_> = claims.iter().flat_map(|c| {
@@ -708,6 +728,7 @@ mod tests {
         let submit_uc = SubmitAdjudicationUseCase::new(
             Arc::clone(&store),
             Arc::clone(&erased_pending),
+            EngineConfig::default(),
         );
         let adj_response = mempill_types::AdjudicationResponse {
             handle_id: handle_uuid,

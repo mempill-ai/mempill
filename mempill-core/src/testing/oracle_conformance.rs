@@ -42,12 +42,13 @@ use std::time::Duration;
 #[cfg(any(test, feature = "test-support"))]
 use mempill_types::{
     AdjudicationResponse, AdjudicationVerdict, AgentId, BeliefStatus, Cardinality, Confidence,
-    Criticality, Disposition, ExternalKind, LedgerEventKind, ProvenanceLabel,
+    Criticality, Disposition, ExternalKind, HistoryEntryStatus, LedgerEventKind, ProvenanceLabel,
+    ValidTime,
 };
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::{
-    application::{AuditQueryRequest, IngestClaimRequest, QueryMemoryRequest},
+    application::{AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest},
     ports::OraclePort,
     EngineConfig, EngineHandle,
 };
@@ -206,6 +207,129 @@ pub async fn scenario_affirm_challenger_wins_with_handle<P, O, V>(
         .expect("conformance[affirm]: incumbent Superseded entry must exist");
     assert_eq!(inc_entry.disposition, Disposition::Superseded,
         "conformance[affirm]: incumbent must be Superseded");
+}
+
+// ── Scenario 1b: Affirm bounds the incumbent at the winning challenger's valid-time
+//    start (TASK-33-W5-LIB B, DIAG-4 finding B) ──────────────────────────────
+
+/// Diane open from 2021-04; Joan from 2024-09 contests; Affirm Joan.
+///
+/// Verifies (DIAG-4 finding B / scenario 3):
+///   - `query_history`: Diane's `valid_until` == Joan's `valid_from` (2024-09-01), NOT the
+///     adjudication's transaction time ("today") — and no overlapping pair (`contested=false`).
+///   - `query_memory(valid_at=2022-06)` → Diane (the bound-narrowed reentry, TASK-33-W5-LIB A).
+///
+/// Callers pass `handle_id` matching the UUID used when building the engine's `TestOracle`.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn scenario_affirm_bounds_incumbent_at_challenger_valid_time_start_with_handle<P, O, V>(
+    engine: &EngineHandle<P, O, V>,
+    handle_id: uuid::Uuid,
+) where
+    P: crate::ports::PersistencePort + Send + Sync + 'static,
+    P::Error: std::fmt::Debug,
+    O: OraclePort + Send + Sync + 'static,
+    V: crate::ports::VectorPort + Send + Sync + 'static,
+{
+    use chrono::TimeZone;
+
+    let agent = AgentId("conformance-affirm-vt-agent".into());
+    let diane_start = chrono::Utc.with_ymd_and_hms(2021, 4, 1, 0, 0, 0).unwrap();
+    let joan_start = chrono::Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).unwrap();
+
+    let diane_req = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "subject".into(),
+        predicate: "predicate".into(),
+        value: serde_json::json!("diane"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(ValidTime {
+            start: Some(diane_start),
+            end: None,
+            valid_time_confidence: 0.9,
+            start_granularity: None,
+            end_granularity: None,
+        }),
+        confidence: Confidence { value_confidence: 0.95, valid_time_confidence: 0.9 },
+        criticality: Criticality::High,
+        derived_from: vec![],
+    };
+    let resp_diane = engine.ingest_claim(diane_req).await
+        .expect("conformance[affirm-vt]: ingest diane must succeed");
+    assert_eq!(resp_diane.disposition, Disposition::CommittedCheap,
+        "conformance[affirm-vt]: diane must be CommittedCheap");
+
+    let joan_req = IngestClaimRequest {
+        agent_id: agent.clone(),
+        subject: "subject".into(),
+        predicate: "predicate".into(),
+        value: serde_json::json!("joan"),
+        provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+        cardinality: Cardinality::Functional,
+        valid_time: Some(ValidTime {
+            start: Some(joan_start),
+            end: None,
+            valid_time_confidence: 0.9,
+            start_granularity: None,
+            end_granularity: None,
+        }),
+        confidence: Confidence { value_confidence: 0.95, valid_time_confidence: 0.9 },
+        criticality: Criticality::High,
+        derived_from: vec![],
+    };
+    let resp_joan = engine.ingest_claim(joan_req).await
+        .expect("conformance[affirm-vt]: ingest joan must succeed");
+    assert_eq!(resp_joan.disposition, Disposition::QueuedForAdjudication,
+        "conformance[affirm-vt]: joan (conflicting, non-succession overlap) must be QueuedForAdjudication");
+
+    // Affirm Joan.
+    let outcome = engine.submit_adjudication(
+        handle_id,
+        adj_response(handle_id, AdjudicationVerdict::Affirm),
+    ).await.expect("conformance[affirm-vt]: Affirm submit must succeed");
+    assert_eq!(outcome.disposition, Disposition::CommittedCheap,
+        "conformance[affirm-vt]: joan must be CommittedCheap after Affirm");
+
+    // query_history: diane's valid_until must be Joan's start (2024-09-01), NOT "today" —
+    // and no entry may be flagged contested (no overlapping pair).
+    let history = engine.query_history(QueryHistoryRequest {
+        agent_id: agent.clone(),
+        subject: "subject".into(),
+        predicate: "predicate".into(),
+    }).await.expect("conformance[affirm-vt]: query_history must succeed");
+
+    let diane_entry = history.entries.iter()
+        .find(|e| e.value == serde_json::json!("diane"))
+        .expect("conformance[affirm-vt]: diane entry must exist in history");
+    assert_eq!(
+        diane_entry.valid_until, Some(joan_start),
+        "conformance[affirm-vt]: diane's valid_until must be joan's valid_time.start (2024-09-01), \
+         not the adjudication's transaction time"
+    );
+    assert_ne!(diane_entry.status, HistoryEntryStatus::Contested,
+        "conformance[affirm-vt]: diane must not be flagged contested (no overlapping pair)");
+    let joan_entry = history.entries.iter()
+        .find(|e| e.value == serde_json::json!("joan"))
+        .expect("conformance[affirm-vt]: joan entry must exist in history");
+    assert_ne!(joan_entry.status, HistoryEntryStatus::Contested,
+        "conformance[affirm-vt]: joan must not be flagged contested (no overlapping pair)");
+    assert_eq!(joan_entry.status, HistoryEntryStatus::Current, "conformance[affirm-vt]: joan must be Current");
+
+    // query_memory(valid_at=2022-06) → diane (bound-narrowed reentry, TASK-33-W5-LIB A).
+    let valid_at_2022 = chrono::Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap();
+    let qr = engine.query_memory(QueryMemoryRequest {
+        agent_id: agent.clone(),
+        subject: "subject".into(),
+        predicate: "predicate".into(),
+        as_of_tx_time: None,
+        valid_at: Some(valid_at_2022),
+    }).await.expect("conformance[affirm-vt]: valid_at query must succeed");
+    assert_eq!(
+        qr.belief.primary.as_ref().map(|b| b.fact.value.clone()),
+        Some(serde_json::json!("diane")),
+        "conformance[affirm-vt]: valid_at=2022-06 must return diane, got {:?}",
+        qr.belief.primary.as_ref().map(|b| &b.fact.value)
+    );
 }
 
 // ── Scenario 2: Deny — incumbent stands ──────────────────────────────────────

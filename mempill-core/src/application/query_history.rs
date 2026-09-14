@@ -527,7 +527,7 @@ mod tests {
             assertion_ref: Uuid::new_v4(),
             agent_id: agent.clone(),
             target_claim: claim_ref.clone(),
-            kind: AssertionKind::Bound { bound_at },
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity: None },
             provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
             confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
             asserted_at: TransactionTime(bound_at),
@@ -685,6 +685,96 @@ mod tests {
         assert_eq!(
             windows[0].valid_until_granularity, None,
             "successor's ordering key used tx_time fallback → valid_until_granularity must be None, not Year"
+        );
+    }
+
+    // ── Bound-derived-end granularity (TASK-33-W5-LIB-R2, DIAG-5) ────────────────
+
+    /// The bound-narrowed end of an open-ended incumbent honours the Bound's OWN tracked
+    /// granularity (e.g. the winning challenger's `start_granularity` on an Affirm) instead of
+    /// silently rendering it at day/instant precision.
+    #[test]
+    fn bound_derived_end_honours_own_tracked_granularity() {
+        use mempill_types::{AssertionKind, DateGranularity, ValidityAssertion};
+
+        let config = EngineConfig::default();
+        let agent = agent();
+        let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        // Bound at month precision, at an instant that does NOT coincide with any successor
+        // (no successor at all here) — proves the granularity comes from the Bound itself,
+        // not a succ_gran fallback.
+        let bound_at = Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).unwrap();
+
+        let c1 = make_claim(&agent, "a", "b", serde_json::json!("v1"), t1, None, None, 0.0);
+        let c1_ref = c1.claim_ref().clone();
+
+        let assertion = ValidityAssertion {
+            assertion_ref: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            target_claim: c1_ref.clone(),
+            kind: AssertionKind::Bound { bound_at, bound_at_granularity: Some(DateGranularity::Month) },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            asserted_at: TransactionTime(bound_at),
+        };
+
+        let now = bound_at + chrono::Duration::days(1);
+        let assertions_fn = move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if *cr == c1_ref { vec![assertion.clone()] } else { vec![] }
+        };
+        let fold = truth_engine::fold(vec![c1], assertions_fn, now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+        assert_eq!(windows[0].valid_until, Some(bound_at));
+        assert_eq!(
+            windows[0].valid_until_granularity,
+            Some(DateGranularity::Month),
+            "bound-derived end must carry the Bound's OWN granularity (2024-09), not None/day"
+        );
+    }
+
+    /// When the Bound carries no granularity (Deny's tx_time fallback, or a legacy row) but
+    /// its instant numerically coincides with the successor's start key, the successor's start
+    /// granularity is attributed to the bound-derived end (DIAG-5 fallback rule) — never
+    /// fabricated when the instants differ.
+    #[test]
+    fn bound_derived_end_falls_back_to_successor_granularity_when_instants_coincide() {
+        use mempill_types::{AssertionKind, DateGranularity, ValidityAssertion};
+
+        let config = EngineConfig::default();
+        let agent = agent();
+        let t1 = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let joan_start = Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).unwrap();
+
+        // Incumbent, open-ended, bounded (via Affirm-shaped write) at joan_start with NO
+        // tracked granularity of its own — simulates a legacy row / pre-population gap.
+        let incumbent = make_claim(&agent, "a", "b", serde_json::json!("diane"), t1, None, None, 0.0);
+        let incumbent_ref = incumbent.claim_ref().clone();
+        // Successor: trusted, high confidence, start = joan_start, tracked as Month precision.
+        let successor = make_claim_gran(&agent, "a", "b", serde_json::json!("joan"), joan_start, Some(joan_start), Some(DateGranularity::Month), 0.9);
+
+        let assertion = ValidityAssertion {
+            assertion_ref: uuid::Uuid::new_v4(),
+            agent_id: agent.clone(),
+            target_claim: incumbent_ref.clone(),
+            kind: AssertionKind::Bound { bound_at: joan_start, bound_at_granularity: None },
+            provenance: ProvenanceLabel::External(ExternalKind::UserAsserted),
+            confidence: Confidence { value_confidence: 1.0, valid_time_confidence: 1.0 },
+            asserted_at: TransactionTime(joan_start),
+        };
+
+        let now = joan_start + chrono::Duration::days(1);
+        let assertions_fn = move |cr: &ClaimRef| -> Vec<ValidityAssertion> {
+            if *cr == incumbent_ref { vec![assertion.clone()] } else { vec![] }
+        };
+        let fold = truth_engine::fold(vec![incumbent, successor], assertions_fn, now, None, &config, &std::collections::HashMap::new());
+        let windows = truth_engine::compute_history_windows(&fold.all_claims, fold.has_conflict, now, &config);
+
+        assert_eq!(windows[0].valid_until, Some(joan_start));
+        assert_eq!(
+            windows[0].valid_until_granularity,
+            Some(DateGranularity::Month),
+            "Bound with no own granularity, coinciding with the successor's start, must fall back to succ_gran (2024-09, not 2024-09-01)"
         );
     }
 

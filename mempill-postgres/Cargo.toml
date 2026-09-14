@@ -104,3 +104,8 @@ required-features = ["postgres-integration"]
 name = "postgres_pool_exhaustion"
 path = "tests/postgres_pool_exhaustion.rs"
 required-features = ["postgres-integration"]
+
+[[test]]
+name = "postgres_bound_granularity"
+path = "tests/postgres_bound_granularity.rs"
+required-features = ["postgres-integration"]
