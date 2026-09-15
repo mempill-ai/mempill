@@ -6,6 +6,8 @@ Tests:
   1. query_memory with valid_at accepted (no error, returns a belief).
   2. query_memory with valid_at + as_of_tx_time both set (D2 independence).
   3. query_memory without valid_at still works (backward-compatible).
+  4. query_memory with valid_at re-enters a claim closed by the end_fact tool
+     (TASK-33-W5-LIB A, DIAG-4 finding A).
 """
 
 from __future__ import annotations
@@ -135,6 +137,75 @@ async def test_query_memory_without_valid_at_still_works(agent_id: str) -> None:
         primary = result.get("belief", {}).get("primary", {})
         assert primary.get("fact", {}).get("value") == "user@example.com", (
             f"Without valid_at, live belief must still be returned. Got: {result}"
+        )
+
+
+@pytest.mark.anyio
+async def test_query_memory_valid_at_reenters_end_fact_bounded_claim(agent_id: str) -> None:
+    """TASK-33-W5-LIB A (DIAG-4 finding A): a claim closed via the `end_fact` tool must
+    still re-enter the valid_at candidate set for an in-window instant, narrowed to its
+    real believed window — not silently replaced by the successor or dropped to NoBelief.
+    """
+    mcp_server = _get_mcp()
+    async with create_connected_server_and_client_session(mcp_server) as client:
+        await _call(
+            client,
+            "ingest_claim",
+            subject="acme",
+            predicate="ceo",
+            value="Diane",
+            provenance="External:UserAsserted",
+            valid_time={
+                "start": "2021-04-01T00:00:00Z",
+                "valid_time_confidence": 1.0,
+            },
+        )
+        end_fact_result = await _call(
+            client,
+            "end_fact",
+            subject="acme",
+            predicate="ceo",
+            at="2025-01-01",
+            provenance="External:UserAsserted",
+        )
+        assert isinstance(end_fact_result, dict), (
+            f"end_fact must return dict, got: {end_fact_result!r}"
+        )
+        await _call(
+            client,
+            "ingest_claim",
+            subject="acme",
+            predicate="ceo",
+            value="John",
+            provenance="External:UserAsserted",
+            valid_time={
+                "start": "2025-01-01T00:00:00Z",
+                "valid_time_confidence": 1.0,
+            },
+        )
+
+        # valid_at BEFORE the end_fact bound must still return Diane.
+        result = await _call(
+            client,
+            "query_memory",
+            subject="acme",
+            predicate="ceo",
+            valid_at="2022-06-01T00:00:00Z",
+        )
+        assert result.get("belief", {}).get("primary", {}).get("fact", {}).get("value") == "Diane", (
+            f"valid_at=2022-06-01 (before the end_fact bound) must return Diane, got: {result}"
+        )
+
+        # valid_at AFTER the bound must return John.
+        result2 = await _call(
+            client,
+            "query_memory",
+            subject="acme",
+            predicate="ceo",
+            valid_at="2025-06-01T00:00:00Z",
+        )
+        assert result2.get("belief", {}).get("primary", {}).get("fact", {}).get("value") == "John", (
+            f"valid_at=2025-06-01 (after the bound) must return John, got: {result2}"
         )
 
 

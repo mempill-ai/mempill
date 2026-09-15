@@ -140,19 +140,28 @@ pub enum Marker {
     LowDerivationAnchor,
 }
 
-/// History entry status for `query_history` — whether the claim is the current belief
-/// or was superseded by a later one.
+/// History entry status for `query_history` — whether the claim is the current belief,
+/// was superseded, is in active conflict, or its own window has expired unsuperseded.
 ///
-/// `Current` and `Superseded` are derived from `is_live` in the canonical fold result
-/// so that `history()` and `recall()` always agree on which entry is current.
+/// All four variants are derived from the SAME canonical fold result (`FoldResult::all_claims`,
+/// `FoldResult::live_claims`, `FoldResult::has_conflict`) that `query_memory` uses, so `history()`
+/// and `recall()` always agree on which entry is current and which is contested.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "PascalCase")]
 pub enum HistoryEntryStatus {
-    /// This claim is the live (current) belief at the time of the query.
+    /// Live, unconflicted, and in effect at the query instant (`now`).
     Current,
-    /// This claim was superseded by a later claim on the same subject-line.
+    /// Not live — closed by a non-overlapping successor (explicitly bounded / disposed).
     Superseded,
+    /// Live and part of an unresolved conflict: either the fold-wide `has_conflict` signal, or
+    /// a pairwise valid-time overlap detected against an adjacent entry in the timeline (I7 —
+    /// never silently narrowed or picked).
+    Contested,
+    /// Still live per the ledger (never explicitly bounded), but its own valid-time window has
+    /// naturally expired with no live successor covering `now` — was previously mislabeled
+    /// `Current` (if in the live set) or `Superseded` (if not) before this variant existed.
+    Ended,
 }
 
 #[cfg(test)]
@@ -174,6 +183,29 @@ mod tests {
             let back: BeliefStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(s, &back);
         }
+    }
+
+    #[test]
+    fn history_entry_status_round_trip_serde() {
+        let statuses = [
+            HistoryEntryStatus::Current,
+            HistoryEntryStatus::Superseded,
+            HistoryEntryStatus::Contested,
+            HistoryEntryStatus::Ended,
+        ];
+        for s in &statuses {
+            let json = serde_json::to_string(s).unwrap();
+            let back: HistoryEntryStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(s, &back);
+        }
+    }
+
+    #[test]
+    fn history_entry_status_serde_tag_is_pascal_case() {
+        assert_eq!(serde_json::to_string(&HistoryEntryStatus::Current).unwrap(), "\"Current\"");
+        assert_eq!(serde_json::to_string(&HistoryEntryStatus::Superseded).unwrap(), "\"Superseded\"");
+        assert_eq!(serde_json::to_string(&HistoryEntryStatus::Contested).unwrap(), "\"Contested\"");
+        assert_eq!(serde_json::to_string(&HistoryEntryStatus::Ended).unwrap(), "\"Ended\"");
     }
 
     #[test]

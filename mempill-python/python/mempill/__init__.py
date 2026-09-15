@@ -34,6 +34,7 @@ from mempill._mempill import (
     StorageError,
     ConfigError,
     InternalError,
+    date_granularity_of,
 )
 
 from mempill.types import (
@@ -66,6 +67,8 @@ from mempill.ergonomic import (
     history,
     History,
     HistoryEntry,
+    end_fact,
+    EndFactReceipt,
 )
 
 try:
@@ -170,6 +173,7 @@ __all__ = [
     # Enums / helpers
     "Disposition",
     "ProvenanceLabel",
+    "date_granularity_of",
     # TypedDicts
     "ConfidenceDict",
     "ValidTimeDict",
@@ -197,4 +201,7 @@ __all__ = [
     "history",
     "History",
     "HistoryEntry",
+    # assert_validity / end_fact API (TASK-33 E2)
+    "end_fact",
+    "EndFactReceipt",
 ]

@@ -1,5 +1,5 @@
 """
-mempill_mcp.tools — The 4 MCP tools wrapping the mempill Engine.
+mempill_mcp.tools — The 5 MCP tools wrapping the mempill Engine.
 
 All tools pull (engine, agent_id) from the lifespan context via the MCP
 Context object: ctx.request_context.lifespan_context.
@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import Context
 
-from mempill import ProvenanceLabel
+from mempill import ProvenanceLabel, end_fact as _end_fact_ergo
 from mempill.types import Disposition
 
 from mempill_mcp.server import mcp
@@ -354,3 +354,68 @@ async def audit(
         "from_tx_time": from_tx_time,
     }
     return engine.query_audit(request)
+
+
+# ── Tool 5: end_fact ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def end_fact(
+    subject: str,
+    predicate: str,
+    at: str,
+    provenance: Any = None,
+    confidence: float = 1.0,
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """End an open-ended fact: explicitly close the incumbent claim on (subject,
+    predicate) as of `at` (SDK_CONTRACT.md §3.1 `assert_validity`, TASK-33 E2).
+
+    This is the correct way to say "X stopped being true at time T" — it bounds the
+    incumbent claim in place (the original row is never touched or duplicated) so a
+    later, non-overlapping claim on the same line folds to a clean succession with no
+    conflict and no adjudication needed.
+
+    Resolution never guesses which claim to close:
+      - Zero live claims on the line  -> raises NotFoundError.
+      - Exactly one live claim        -> bounds it at `at`.
+      - More than one live claim (a genuinely contested or set-valued line) ->
+        raises ValidationError; call ingest_claim / query_memory to inspect the line
+        and resolve the ambiguity before retrying.
+
+    Repeating end_fact() on an already-fully-closed line (nothing left live) also
+    raises NotFoundError — there is no live claim left to close.
+
+    Args:
+        subject: The entity the claim is about (e.g. "user:alice").
+        predicate: The property being asserted (e.g. "location").
+        at: ISO-8601 date/time the fact stopped being true. Accepts YYYY, YYYY-MM,
+            YYYY-MM-DD, or full RFC3339 (e.g. "2024-09-23" or
+            "2024-09-23T00:00:00Z").
+        provenance: Wire-shape dict {"type": ..., "kind"?: ...} or a friendly
+            string: "External:UserAsserted" or "External:ExternalFirstHand" (same
+            forms as ingest_claim). Must be first-hand external evidence — only the
+            host acting as its own oracle may close or reopen a fact. Defaults to
+            External:UserAsserted when omitted.
+        confidence: Confidence in this validity assertion, in [0, 1]. Default 1.0.
+
+    Returns:
+        {"claim_ref": str, "disposition": str, "effective_at": str, "no_op": bool}
+        "no_op" is true only when this call repeated an identical bound already in
+        effect (I6 idempotent) — no new write was made.
+    """
+    lc = ctx.request_context.lifespan_context
+    engine = lc["engine"]
+    agent_id = lc["agent_id"]
+
+    prov = _normalise_provenance(provenance) if provenance is not None else None
+
+    receipt = _end_fact_ergo(
+        engine, agent_id, subject, predicate, at,
+        provenance=prov, confidence=confidence,
+    )
+    return {
+        "claim_ref": receipt.claim_ref,
+        "disposition": receipt.disposition,
+        "effective_at": receipt.effective_at,
+        "no_op": receipt.no_op,
+    }

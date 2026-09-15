@@ -105,6 +105,8 @@ for full per-version detail.
 | Ledger-scope correctness fix | Write/audit paths use uncapped, claim-scoped ledger lookup — fixes a silent-wrong-belief risk on agents with >10,000 ledger rows |
 | As-of / bi-temporal correctness benchmark | Reproducible `cargo run --release --example asof_correctness_benchmark -p mempill`; results published on the [documentation site](https://mempill.netlify.app/concepts/benchmark-results/) |
 | Date granularity on `query_history` / `history()` | `HistoryEntry` gains `valid_from_granularity` / `valid_until_granularity`; the Python wheel's `query_history` gains honest-display `valid_from_display` / `valid_until_display`, matching `query_memory` / `query_subject` |
+| History read-path + succession correctness fix | `query_history` / `history()` no longer discards a claim's own valid-time end; `HistoryEntryStatus` gains `Contested` and `Ended` (additive). Succession classification checks a new claim against every live claim on the subject line, not only the current one. `reconcile` never writes supersessions — only `submit_adjudication` / `sweep_adjudications` resolve a contested line. See [CHANGELOG.md](./CHANGELOG.md) |
+| `assert_validity` / `end_fact` | Host-facing, oracle-free path to explicitly close (bound) or reopen an open-ended fact — Rust, Python, and MCP (`end_fact` tool). Closes the SDK contract's `assert_validity` gap; see [CHANGELOG.md](./CHANGELOG.md) |
 
 ### 0.5.0 — planned
 
@@ -292,6 +294,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let r = recall(&engine, "my-agent", "user", "city").await?;
     println!("city = {:?}", r.as_str());   // Some("Berlin")
+
+    // Later, the fact stops being true — close it explicitly, in place (no duplicate
+    // "closed copy" row). A subsequent remember() then folds as a clean succession.
+    use mempill::{end_fact, EndFactOptions};
+    end_fact(&engine, "my-agent", "user", "city", "2026-01-01", EndFactOptions::default()).await?;
     Ok(())
 }
 ```
@@ -345,6 +352,11 @@ result = engine.query_memory({
     "predicate": "city",
 })
 print(result["belief"])
+
+# Later, the fact stops being true — close it explicitly, in place. A subsequent
+# remember()/ingest_claim() then folds as a clean succession, no oracle needed.
+from mempill import end_fact
+end_fact(engine, "my-agent", "user", "city", "2026-01-01")
 ```
 
 ### MCP
@@ -357,7 +369,7 @@ export MEMPILL_DB_DIR="/data"                # omit for in-memory (ephemeral); d
 mempill-mcp
 ```
 
-The server exposes four tools over stdio MCP transport:
+The server exposes five tools over stdio MCP transport:
 
 | Tool | Description |
 |---|---|
@@ -365,6 +377,7 @@ The server exposes four tools over stdio MCP transport:
 | `query_memory` | Read the canonical belief for a (subject, predicate) pair |
 | `reconcile` | Trigger conflict reconciliation for a set of subject lines |
 | `audit` | Query the immutable ledger for claim history |
+| `end_fact` | Explicitly close an open-ended fact at a given instant (subject, predicate, at) |
 
 `ingest_claim` accepts provenance as a friendly string (`"External:UserAsserted"`,
 `"External:ExternalFirstHand"`, `"RecallReEntry"`, `"ModelDerived"`) or as a wire-shape dict.
@@ -538,7 +551,7 @@ adapters is a hard requirement.
 | `mempill-postgres` | Rust | PostgreSQL `PersistencePort` adapter; `PostgresEngine` alias | ✅ Shipped |
 | `mempill` (facade) | Rust | Thin re-export of core + adapters; `cargo add mempill` with `sqlite`/`postgres` features | ✅ Shipped |
 | `mempill-python` | Rust + Python | PyO3/maturin wheel (`mempill`); Python SDK with `Engine`, `Disposition`, `ProvenanceLabel` | ✅ Shipped |
-| `mempill-mcp` | Python | FastMCP server; 4 tools; stdio transport; `MEMPILL_AGENT_ID` + `MEMPILL_DB_DIR` env contract | ✅ Shipped |
+| `mempill-mcp` | Python | FastMCP server; 5 tools; stdio transport; `MEMPILL_AGENT_ID` + `MEMPILL_DB_DIR` env contract | ✅ Shipped |
 | `mempill-ts` | Rust | napi-rs TypeScript binding stub — **not yet implemented** | ⏳ Planned |
 
 ---

@@ -42,11 +42,13 @@ pub mod testing;
 // ── Key public re-exports ─────────────────────────────────────────────────────
 
 pub use application::{
-    AuditQueryRequest, AuditQueryResponse, AuditUseCase, HistoryEntry, IngestClaimRequest,
-    IngestClaimResponse, IngestClaimUseCase, QueryHistoryRequest, QueryHistoryResponse,
-    QueryHistoryUseCase, QueryMemoryRequest, QueryMemoryResponse, QueryMemoryUseCase,
-    QuerySubjectRequest, QuerySubjectResponse, QuerySubjectUseCase, SubjectFactEntry,
-    ReconcileRequest, ReconcileResponse, ReconcileUseCase,
+    AssertValidityRequest, AssertValidityResponse, AssertValidityUseCase, AuditQueryRequest,
+    AuditQueryResponse, AuditUseCase, HistoryEntry, IngestClaimRequest,
+    IngestClaimResponse, IngestClaimUseCase, LiveClaimResolution, QueryHistoryRequest,
+    QueryHistoryResponse, QueryHistoryUseCase, QueryMemoryRequest, QueryMemoryResponse,
+    QueryMemoryUseCase, QuerySubjectRequest, QuerySubjectResponse, QuerySubjectUseCase,
+    SubjectFactEntry, ReconcileRequest, ReconcileResponse, ReconcileUseCase,
+    ValidityAssertionInput,
 };
 pub use config::EngineConfig;
 pub use engine_handle::{EngineHandle, ErasedPendingStore, ErasedPendingStoreAdapter};

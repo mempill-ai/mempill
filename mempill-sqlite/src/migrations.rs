@@ -12,7 +12,7 @@ use rusqlite::{Connection, Result, Transaction, TransactionBehavior};
 
 /// The target schema version this runner brings the database to.
 /// Increment this constant (and add a new migration step) for every future DDL change.
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Embedded DDL — the 4-table append-only schema (§5).
 const V1_INITIAL_SQL: &str = include_str!("schema/v1_initial.sql");
@@ -25,6 +25,9 @@ const V2_PENDING_ADJUDICATIONS_SQL: &str = include_str!("schema/v2_pending_adjud
 
 /// Embedded DDL — per-endpoint date-granularity columns on claims.
 const V3_DATE_GRANULARITY_SQL: &str = include_str!("schema/v3_date_granularity.sql");
+
+/// Embedded DDL — bound_at_granularity column on validity_assertions.
+const V4_BOUND_GRANULARITY_SQL: &str = include_str!("schema/v4_bound_granularity.sql");
 
 /// Migration error wrapper.
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +74,10 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), MigrationError> {
         apply_v3(&tx)?;
     }
 
+    if current < 4 {
+        apply_v4(&tx)?;
+    }
+
     tx.commit()?;
     Ok(())
 }
@@ -115,6 +122,17 @@ pub(crate) fn apply_v2(conn: &Connection) -> Result<(), MigrationError> {
 pub(crate) fn apply_v3(conn: &Connection) -> Result<(), MigrationError> {
     conn.execute_batch(V3_DATE_GRANULARITY_SQL)?;
     set_user_version(conn, 3)?;
+    Ok(())
+}
+
+/// Migration v4: add `bound_at_granularity` nullable TEXT column to `validity_assertions`
+/// (TASK-33-W5-LIB-R2, DIAG-5).
+///
+/// Old rows upgrade cleanly: the new column defaults to NULL, which the read path maps to
+/// `None` on `AssertionKind::Bound::bound_at_granularity`.
+pub(crate) fn apply_v4(conn: &Connection) -> Result<(), MigrationError> {
+    conn.execute_batch(V4_BOUND_GRANULARITY_SQL)?;
+    set_user_version(conn, 4)?;
     Ok(())
 }
 
@@ -238,6 +256,8 @@ mod tests {
             "value_confidence",
             "valid_time_confidence",
             "asserted_at",
+            // v4 — bound_at display-precision granularity (TASK-33-W5-LIB-R2)
+            "bound_at_granularity",
         ] {
             assert!(
                 cols.contains(&expected.to_string()),
@@ -497,5 +517,88 @@ mod tests {
         let cols = column_names(&conn, "claims");
         assert!(cols.contains(&"valid_time_start_granularity".to_string()));
         assert!(cols.contains(&"valid_time_end_granularity".to_string()));
+    }
+
+    // ── v4 migration tests (TASK-33-W5-LIB-R2, DIAG-5) ───────────────────────
+
+    /// v4 adds the nullable `bound_at_granularity` column to validity_assertions.
+    #[test]
+    fn v4_bound_granularity_column_exists_after_migration() {
+        let conn = open_memory();
+        apply_migrations(&conn).expect("migrations should succeed");
+
+        let cols = column_names(&conn, "validity_assertions");
+        assert!(
+            cols.contains(&"bound_at_granularity".to_string()),
+            "validity_assertions table missing column: bound_at_granularity (added in v4)"
+        );
+    }
+
+    /// v4 upgrade invariant: a DB at v3 (pre-existing rows, written before this field existed)
+    /// can be upgraded to v4, and the old row's new column reads back as NULL — the exact
+    /// "legacy row deserializes without the field" guarantee at the storage layer.
+    #[test]
+    fn v4_upgrade_from_v3_preserves_legacy_rows_as_null() {
+        let conn = open_memory();
+        apply_v1(&conn).expect("v1 must succeed");
+        apply_v2(&conn).expect("v2 must succeed");
+        apply_v3(&conn).expect("v3 must succeed");
+        assert_eq!(user_version(&conn).unwrap(), 3, "after v3 version must be 3");
+
+        // Seed a claim + a v3-era Bound validity_assertion row (no bound_at_granularity column
+        // exists yet at this point — the INSERT simply doesn't reference it).
+        conn.execute(
+            "INSERT INTO claims (
+                claim_id, agent_id, subject, predicate, value, cardinality,
+                provenance_label, derivation_depth, tx_time,
+                valid_time_start, valid_time_end, valid_time_confidence,
+                value_confidence, criticality, derived_from, snapshot_schema_version
+            ) VALUES ('c1', 'agent-1', 's', 'p', '\"v\"', 'Functional',
+                'External_UserAsserted', 0, '2024-01-01T00:00:00Z',
+                NULL, NULL, 0.5, 0.5, 'Medium', '[]', 1)",
+            [],
+        ).expect("legacy claim insert must succeed");
+        conn.execute(
+            "INSERT INTO validity_assertions (
+                assertion_id, agent_id, target_claim_id, assertion_kind, bound_at, reopen_at,
+                provenance_label, value_confidence, valid_time_confidence, asserted_at
+            ) VALUES ('a1', 'agent-1', 'c1', 'Bound', '2024-09-01T00:00:00Z', NULL,
+                'External_ExternalFirstHand', 1.0, 1.0, '2024-09-01T00:00:00Z')",
+            [],
+        ).expect("legacy Bound assertion insert (no bound_at_granularity column yet) must succeed");
+
+        // Upgrade to v4.
+        apply_v4(&conn).expect("v4 upgrade must succeed");
+        assert_eq!(user_version(&conn).unwrap(), 4, "after v4 version must be 4");
+
+        let cols = column_names(&conn, "validity_assertions");
+        assert!(cols.contains(&"bound_at_granularity".to_string()), "column must exist after v4");
+
+        let gran: Option<String> = conn
+            .query_row(
+                "SELECT bound_at_granularity FROM validity_assertions WHERE assertion_id = 'a1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy row must still be readable after v4 upgrade");
+        assert_eq!(gran, None, "legacy pre-v4 row must read back bound_at_granularity = NULL");
+    }
+
+    /// Running apply_migrations on a v3 database upgrades it to v4 (CURRENT_SCHEMA_VERSION).
+    #[test]
+    fn apply_migrations_upgrades_v3_to_v4() {
+        let conn = open_memory();
+        apply_v1(&conn).expect("v1 must succeed");
+        apply_v2(&conn).expect("v2 must succeed");
+        apply_v3(&conn).expect("v3 must succeed");
+
+        apply_migrations(&conn).expect("apply_migrations must succeed on v3 db");
+
+        let v = user_version(&conn).unwrap();
+        assert_eq!(v, CURRENT_SCHEMA_VERSION, "version must be CURRENT_SCHEMA_VERSION after upgrade");
+        assert_eq!(v, 4);
+
+        let cols = column_names(&conn, "validity_assertions");
+        assert!(cols.contains(&"bound_at_granularity".to_string()));
     }
 }

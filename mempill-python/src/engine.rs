@@ -12,8 +12,8 @@
 use std::sync::OnceLock;
 
 use mempill_core::application::dto::{
-    AuditQueryRequest, IngestClaimRequest, QueryHistoryRequest, QueryMemoryRequest,
-    QuerySubjectRequest, ReconcileRequest,
+    AssertValidityRequest, AuditQueryRequest, IngestClaimRequest, LiveClaimResolution,
+    QueryHistoryRequest, QueryMemoryRequest, QuerySubjectRequest, ReconcileRequest,
 };
 use mempill_sqlite::DefaultEngine;
 use pyo3::prelude::*;
@@ -167,6 +167,81 @@ impl PyEngine {
             .map_err(mem_err_to_pyerr)?;
         Ok(pythonize(py, &resp.entries)?)
     }
+
+    /// Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1 `assert_validity`,
+    /// TASK-33 E2) — the host-facing, oracle-free path to `Superseded`/`Reinstated`.
+    ///
+    /// `request` must be a dict with:
+    ///   - `agent_id`  — str
+    ///   - `target`    — claim_ref UUID string
+    ///   - `assertion` — `{"type": "Bound", "value": {"at": "<RFC3339>", "at_granularity":
+    ///     "year"|"month"|"day"|"instant"}}` or `{"type": "Reopen"}`. `at_granularity` is
+    ///     OPTIONAL (omit or `None` = unknown precision, never a fabricated `"instant"`); it
+    ///     is DISPLAY-ONLY — `at` alone determines the bound instant. Derive it with
+    ///     `date_granularity_of()` from the caller's original date string so `"2024-09"`
+    ///     renders as `2024-09`, not `2024-09-01`.
+    ///   - `provenance` — must be `External(*)`; any other channel raises `ValidationError`
+    ///   - `confidence` — `{"value_confidence": float, "valid_time_confidence": float}`
+    ///
+    /// Returns a dict with `claim_ref`, `assertion_ref` (nullable), `kind`, `effective_at`
+    /// (nullable RFC3339 string), `disposition`, `no_op`.
+    ///
+    /// Prefer `mempill.ergonomic.end_fact()` unless you already hold the target `claim_ref`.
+    #[pyo3(signature = (request))]
+    fn assert_validity<'py>(&self, py: Python<'py>, request: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let req: AssertValidityRequest = depythonize(request)
+            .map_err(|e| ValidationError::new_err(format!("bad request: {e}")))?;
+        let engine = self.engine.clone();
+        let resp = py.detach(|| runtime().block_on(engine.assert_validity(req)))
+            .map_err(mem_err_to_pyerr)?;
+        Ok(pythonize(py, &resp)?)
+    }
+
+    /// Resolve a (subject, predicate) subject-line to the single live claim, if any —
+    /// the SAME canonical fold `query_memory`/`query_history` use (I8 single source of
+    /// truth; never a heuristic re-derivation). Backs `mempill.ergonomic.end_fact()`.
+    ///
+    /// Returns a dict: `{"status": "empty"|"single"|"ambiguous", "claim_ref": str|None,
+    /// "live_count": int|None}`. `live_count` is populated only for `"ambiguous"`.
+    #[pyo3(signature = (agent_id, subject, predicate))]
+    fn resolve_live_claim_for_line<'py>(
+        &self,
+        py: Python<'py>,
+        agent_id: String,
+        subject: String,
+        predicate: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let engine = self.engine.clone();
+        let resolution = py
+            .detach(|| {
+                runtime().block_on(engine.resolve_live_claim_for_line(
+                    mempill_types::AgentId(agent_id),
+                    subject,
+                    predicate,
+                ))
+            })
+            .map_err(mem_err_to_pyerr)?;
+
+        let dict = pyo3::types::PyDict::new(py);
+        match resolution {
+            LiveClaimResolution::Empty => {
+                dict.set_item("status", "empty")?;
+                dict.set_item("claim_ref", py.None())?;
+                dict.set_item("live_count", py.None())?;
+            }
+            LiveClaimResolution::Single(claim_ref) => {
+                dict.set_item("status", "single")?;
+                dict.set_item("claim_ref", claim_ref.0.to_string())?;
+                dict.set_item("live_count", py.None())?;
+            }
+            LiveClaimResolution::Ambiguous(n) => {
+                dict.set_item("status", "ambiguous")?;
+                dict.set_item("claim_ref", py.None())?;
+                dict.set_item("live_count", n)?;
+            }
+        }
+        Ok(dict.into_any())
+    }
 }
 
 // ── Module-level constructors ─────────────────────────────────────────────────
@@ -195,6 +270,23 @@ pub fn open_in_memory() -> PyResult<PyEngine> {
     mempill_sqlite::open_default_in_memory()
         .map(|engine| PyEngine { engine })
         .map_err(|e| StorageError::new_err(e.to_string()))
+}
+
+/// Derive the DISPLAY PRECISION of a lenient date string — `"2024"` → `"year"`,
+/// `"2024-09"` → `"month"`, `"2024-09-15"` → `"day"`, RFC-3339 → `"instant"`; `None` when
+/// the string is not a date mempill can parse.
+///
+/// Thin wrapper over `mempill_types::parse_valid_time_date` — the SINGLE date parser in the
+/// system (the Rust `end_fact` facade derives its `at_granularity` from the very same call),
+/// so Python and Rust can never disagree about what `"2024-09"` means. Python's
+/// `mempill.ergonomic.end_fact()` calls this to populate the `Bound` assertion's
+/// `at_granularity`; without it, `"2024-09"` would round-trip as a bare
+/// `2024-09-01T00:00:00Z` instant and history would render the fabricated day.
+#[pyfunction]
+#[pyo3(signature = (value))]
+pub fn date_granularity_of(value: &str) -> Option<String> {
+    mempill_types::parse_valid_time_date(value)
+        .map(|(_, gran)| mempill_types::date_granularity_to_str(gran).to_string())
 }
 
 // ── Rust unit tests ───────────────────────────────────────────────────────────

@@ -114,18 +114,23 @@ class TestSingleClaim:
 
 class TestSuccession:
     def _ingest_succession(self, engine: mempill.Engine) -> tuple[str, str, str]:
-        """Ingest 3 CEO succession facts with explicit valid_from dates.
+        """Ingest 3 CEO succession facts as a GENUINE trusted, non-overlapping chain
+        (each predecessor's valid_until = its successor's valid_from).
 
-        Each ingest is followed by a reconcile call so the engine folds
-        the contested claims into a proper Superseded/Current chain.
+        A predecessor with NO explicit end is open-ended and therefore genuinely
+        OVERLAPS any later-starting claim (both extend to infinity) — under the
+        fold-derived history design that is honestly Contested, not a succession.
+        `reconcile()` also never silently resolves a Contested pair (only
+        `submit_adjudication` may) — so this helper must supply real, non-overlapping
+        windows for the write path to classify ingest-time as a clean `Succession`.
 
         Returns (alice_ref, john_ref, bob_ref).
         """
         r_alice = remember(engine, AGENT, "acme", "ceo", "Alice",
-                           opts=RememberOptions(valid_from="2010-01-01"))
+                           opts=RememberOptions(valid_from="2010-01-01", valid_until="2018-06-01"))
         engine.reconcile({"agent_id": AGENT, "subject_lines": [["acme", "ceo"]]})
         r_john = remember(engine, AGENT, "acme", "ceo", "John",
-                          opts=RememberOptions(valid_from="2018-06-01"))
+                          opts=RememberOptions(valid_from="2018-06-01", valid_until="2023-03-15"))
         engine.reconcile({"agent_id": AGENT, "subject_lines": [["acme", "ceo"]]})
         r_bob = remember(engine, AGENT, "acme", "ceo", "Bob",
                          opts=RememberOptions(valid_from="2023-03-15"))
@@ -145,11 +150,16 @@ class TestSuccession:
             f"Expected oldest→newest order [Alice, John, Bob], got {values}"
         )
 
-    def test_succession_predecessors_superseded(self, engine: mempill.Engine) -> None:
+    def test_succession_predecessors_ended(self, engine: mempill.Engine) -> None:
+        """A genuine valid-time succession never explicitly supersedes its predecessors
+        (only HeavyPath / oracle-affirmed supersession writes a Bound assertion) — so
+        Alice and John stay raw-live with status "Ended" (window closed, no conflict,
+        not the narrowed-current selection), not "Superseded" (explicit bound/dispose).
+        """
         self._ingest_succession(engine)
         h = history(engine, AGENT, "acme", "ceo")
-        assert h.entries[0].status == "Superseded", "Alice must be Superseded"
-        assert h.entries[1].status == "Superseded", "John must be Superseded"
+        assert h.entries[0].status == "Ended", "Alice must be Ended (never explicitly Bound)"
+        assert h.entries[1].status == "Ended", "John must be Ended (never explicitly Bound)"
 
     def test_succession_last_entry_current(self, engine: mempill.Engine) -> None:
         self._ingest_succession(engine)
@@ -346,15 +356,19 @@ class TestHistoryGranularity:
         assert h.entries[0].valid_until_granularity is None
         assert h.entries[0].valid_until_display is None
 
-    def test_supersession_valid_until_uses_successor_granularity(self, engine: mempill.Engine) -> None:
-        """Predecessor (Day-precision start) superseded by successor (Year-precision
-        start): the predecessor's valid_until_granularity/_display must reflect the
-        SUCCESSOR's start precision (Year / "2020"), never the predecessor's own
-        end_granularity (which was never set).
+    def test_supersession_valid_until_uses_own_end_granularity(self, engine: mempill.Engine) -> None:
+        """Predecessor (Day-precision start, EXPLICIT Day-precision end at the
+        successor's start) followed by a Year-precision successor: the predecessor's
+        valid_until_granularity/_display must be its OWN end_granularity (Day), never
+        the successor's start_granularity (Year) — own end always wins over a later
+        successor's key (bug A fix). Two mutually-trusted open-ended claims would
+        instead be a genuine valid-time overlap (Contested, no narrowing) under the
+        fold-derived history design, so the predecessor needs an explicit end here.
         """
         _ingest_with_granularity(
             engine, AGENT, "corp", "ceo", "Alice",
             start_dt="2019-06-15T00:00:00Z", start_gran="day",
+            end_dt="2020-01-01T00:00:00Z", end_gran="day",
         )
         engine.reconcile({"agent_id": AGENT, "subject_lines": [["corp", "ceo"]]})
         _ingest_with_granularity(
@@ -369,11 +383,12 @@ class TestHistoryGranularity:
         alice, bob = h.entries
         assert alice.valid_from_granularity == "day"
         assert alice.valid_from_display == "2019-06-15"
-        assert alice.valid_until_granularity == "year", (
-            "Alice's valid_until_granularity must be Bob's (successor) start_granularity"
+        assert alice.valid_until_granularity == "day", (
+            "Alice's valid_until_granularity must be her OWN end_granularity (Day), "
+            "not Bob's (successor) start_granularity (Year) — own end always wins"
         )
-        assert alice.valid_until_display == "2020", (
-            "Alice's valid_until_display must render at the successor's Year precision"
+        assert alice.valid_until_display == "2020-01-01", (
+            "Alice's valid_until_display must render at HER OWN Day precision"
         )
 
         assert bob.valid_from_granularity == "year"
@@ -382,17 +397,21 @@ class TestHistoryGranularity:
         assert bob.valid_until_display is None
 
     def test_mixed_precision_three_way_succession(self, engine: mempill.Engine) -> None:
-        """Month → Day → Year succession: each predecessor's derived valid_until
-        must match its immediate successor's own start precision.
+        """Month → Day → Year succession, each predecessor with an EXPLICIT own end at
+        the successor's start: each predecessor's derived valid_until must match its
+        OWN end_granularity (own end always wins over a later successor's key — bug A
+        fix), never the successor's start precision.
         """
         _ingest_with_granularity(
             engine, AGENT, "mixed-corp", "ceo", "Alice",
             start_dt="2010-01-01T00:00:00Z", start_gran="month",
+            end_dt="2018-06-01T00:00:00Z", end_gran="month",
         )
         engine.reconcile({"agent_id": AGENT, "subject_lines": [["mixed-corp", "ceo"]]})
         _ingest_with_granularity(
             engine, AGENT, "mixed-corp", "ceo", "John",
             start_dt="2018-06-01T00:00:00Z", start_gran="day",
+            end_dt="2023-01-01T00:00:00Z", end_gran="day",
         )
         engine.reconcile({"agent_id": AGENT, "subject_lines": [["mixed-corp", "ceo"]]})
         _ingest_with_granularity(
@@ -406,12 +425,12 @@ class TestHistoryGranularity:
         alice, john, bob = h.entries
 
         assert alice.valid_from_granularity == "month"
-        assert alice.valid_until_granularity == "day", "Alice's bound = John's start precision"
-        assert alice.valid_until_display == "2018-06-01"
+        assert alice.valid_until_granularity == "month", "Alice's bound = her OWN end precision"
+        assert alice.valid_until_display == "2018-06"
 
         assert john.valid_from_granularity == "day"
-        assert john.valid_until_granularity == "year", "John's bound = Bob's start precision"
-        assert john.valid_until_display == "2023"
+        assert john.valid_until_granularity == "day", "John's bound = his OWN end precision"
+        assert john.valid_until_display == "2023-01-01"
 
         assert bob.valid_from_granularity == "year"
         assert bob.valid_until_granularity is None
@@ -423,14 +442,19 @@ class TestInlineDemo:
     def test_inline_timeline_demo(self, engine: mempill.Engine) -> None:
         """Demonstrates history() as a quick timeline inspection tool.
 
-        Each remember() is followed by reconcile() so the engine folds
-        contested entries into Superseded / Current.
+        Each remember() supplies an explicit valid_until closing the window at the next
+        entry's valid_from, forming a GENUINE trusted, non-overlapping succession — an
+        open-ended predecessor would genuinely OVERLAP a later-starting claim (both
+        extend to infinity) and correctly surface as Contested, not a succession.
+        `reconcile()` never silently resolves a Contested pair (only
+        `submit_adjudication` may); the calls here are effectively no-ops once ingest
+        already classified each write as a clean Succession.
         """
         remember(engine, AGENT, "demo-corp", "ceo", "Alice",
-                 opts=RememberOptions(valid_from="2010"))
+                 opts=RememberOptions(valid_from="2010", valid_until="2018"))
         engine.reconcile({"agent_id": AGENT, "subject_lines": [["demo-corp", "ceo"]]})
         remember(engine, AGENT, "demo-corp", "ceo", "John",
-                 opts=RememberOptions(valid_from="2018"))
+                 opts=RememberOptions(valid_from="2018", valid_until="2023"))
         engine.reconcile({"agent_id": AGENT, "subject_lines": [["demo-corp", "ceo"]]})
         remember(engine, AGENT, "demo-corp", "ceo", "Bob",
                  opts=RememberOptions(valid_from="2023"))
@@ -439,8 +463,10 @@ class TestInlineDemo:
         h = history(engine, AGENT, "demo-corp", "ceo")
         timeline = [(e.value, e.status) for e in h]
 
+        # Alice/John are never explicitly Bound (a clean succession never supersedes) —
+        # their correct status is "Ended" (window closed, no conflict, not narrowed-current).
         assert timeline == [
-            ("Alice", "Superseded"),
-            ("John",  "Superseded"),
+            ("Alice", "Ended"),
+            ("John",  "Ended"),
             ("Bob",   "Current"),
         ], f"Unexpected timeline: {timeline}"

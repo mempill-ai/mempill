@@ -108,6 +108,11 @@ class PyEngine:
                   valid-time axis; selects the claim whose valid-time window
                   contains this instant.  When absent, as_of_tx_time (or now)
                   is used as the valid-time instant (backward-compatible).
+                  Note: a claim explicitly ended (``end_fact``/``assert_validity``)
+                  CAN re-enter a point-in-time read with its window narrowed to
+                  when it was actually believed true; a denied or hard-excluded
+                  claim (Quarantined/Invalidated/Rejected, or rejected by an
+                  oracle Deny verdict) never re-enters, at any instant.
 
         Returns:
             dict with:
@@ -187,17 +192,31 @@ class PyEngine:
         Returns:
             dict with:
                 - entries (list[dict]): all claims ordered oldest -> newest, each tagged
-                  with status ("Current" or "Superseded"), value, valid_from, valid_until,
-                  provenance, value_confidence, and claim_ref. Each entry also includes:
+                  with status ("Current" | "Superseded" | "Contested" | "Ended" — see
+                  below), value, valid_from, valid_until, provenance, value_confidence,
+                  and claim_ref. Each entry also includes:
                     - valid_from_display / valid_until_display (str | None): pre-rendered
                       display strings at the recorded precision, identical rendering to
                       query_memory (e.g. "2020-03" for Month, "2020" for Year). Absent
                       when the corresponding endpoint is unknown/open.
                     - valid_from_granularity / valid_until_granularity (str | None): raw
                       granularity ("year" | "month" | "day" | "instant"), otherwise
-                      absent. valid_until_granularity is a DERIVED value: it reflects
-                      the SUCCESSOR claim's start_granularity (the honest source of the
-                      bounding instant), not this entry's own end_granularity.
+                      absent. valid_until_granularity reflects whichever timestamp
+                      actually bounded the window: this entry's own end_granularity
+                      when its own end was used (the common case), the SUCCESSOR
+                      claim's start_granularity only when the successor's ordering key
+                      was used and itself came from valid_time.start, or absent when
+                      the winning value came from a transaction-time fallback.
+
+            Status values:
+                - "Current": live, unconflicted, and in effect at the query instant.
+                - "Superseded": not live — explicitly bounded/superseded by the ledger.
+                - "Contested": live and part of an unresolved conflict (structural or a
+                  pairwise valid-time overlap against the adjacent entry) — never
+                  silently narrowed or picked (I7).
+                - "Ended": still live per the ledger (never explicitly bounded), but its
+                  own valid-time window has expired with no live successor covering the
+                  query instant.
 
         Raises:
             ValidationError: bad request
@@ -212,7 +231,10 @@ class PyEngine:
             request: dict with:
                 - agent_id (str)
                 - subject (str)
-                - valid_at (str | None): optional ISO-8601 string (valid-time axis)
+                - valid_at (str | None): optional ISO-8601 string (valid-time axis).
+                  A claim explicitly ended (``end_fact``/``assert_validity``) can
+                  re-enter with its window narrowed to when it was believed true;
+                  a denied/hard-excluded claim never does.
                 - as_of_tx_time (str | None): optional ISO-8601 string (tx-time axis)
 
         Returns:
@@ -223,6 +245,74 @@ class PyEngine:
 
         Raises:
             ValidationError: bad request
+            StorageError: persistence layer failure
+        """
+        ...
+
+    def assert_validity(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1, TASK-33 E2).
+
+        The host-facing, oracle-free path to Superseded/Reinstated. Prefer
+        ``mempill.ergonomic.end_fact()`` unless you already hold the target claim_ref.
+
+        Args:
+            request: dict with:
+                - agent_id (str)
+                - target (str): claim_ref UUID
+                - assertion: {"type": "Bound", "value": {"at": "<RFC3339>",
+                  "at_granularity": "year"|"month"|"day"|"instant" | None}}
+                  or {"type": "Reopen"}. ``at_granularity`` is optional and
+                  DISPLAY-ONLY: it records the precision the caller's date was
+                  written at, so a bound at "2024-09" renders as "2024-09" in
+                  history() instead of the fabricated day "2024-09-01". Omit it (or
+                  pass None) for unknown precision — never fabricate "instant".
+                  Derive it with ``date_granularity_of()`` from the ORIGINAL date
+                  string; ``at`` alone still determines the bound instant.
+                - provenance (dict): must be External(*) — any other channel raises
+                  ValidationError (only first-hand external evidence may bound/reopen)
+                - confidence: {"value_confidence": float, "valid_time_confidence": float}
+
+        Returns:
+            dict with claim_ref, assertion_ref (str | None), kind, effective_at
+            (str | None, RFC3339), disposition ("Superseded" | "Reinstated"), no_op (bool).
+            no_op is True when no new write was made: an idempotent repeat of an
+            identical Bound, a Reopen with no active Bound to reverse, or a Bound whose
+            `at` is at/after the claim's own valid_time.end (has zero effect on the
+            derived window — effective_at then honestly reports min(at, own_end),
+            i.e. own_end, not the raw requested `at`).
+
+        Raises:
+            ValidationError: provenance not External(*), or `at` precedes the claim's
+                own valid_time.start (IncoherentTemporalWindow); also raised when
+                `target` is currently `QueuedForAdjudication` or terminally
+                Deny-superseded (TargetUnderAdjudication — the oracle owns
+                resolution; use `Reopen` to reverse a Deny). Reachable via
+                `mempill.ergonomic.end_fact()` too: if a subject-line's sole LIVE
+                claim (per `resolve_live_claim_for_line`) is itself
+                `QueuedForAdjudication`, `end_fact` resolves to it and hits this
+                same gate.
+            NotFoundError: target does not exist or belongs to another agent
+            ConflictError: a different bound is already active (never "later wins")
+            StorageError: persistence layer failure
+        """
+        ...
+
+    def resolve_live_claim_for_line(
+        self, agent_id: str, subject: str, predicate: str
+    ) -> dict[str, Any]:
+        """Resolve a (subject, predicate) line to the single live claim, if any.
+
+        Uses the SAME canonical fold query_memory()/query_history() use (I8 single
+        source of truth) — never a heuristic re-derivation. Backs
+        ``mempill.ergonomic.end_fact()``.
+
+        Returns:
+            dict: {"status": "empty" | "single" | "ambiguous",
+                   "claim_ref": str | None,
+                   "live_count": int | None}
+            live_count is populated only when status == "ambiguous".
+
+        Raises:
             StorageError: persistence layer failure
         """
         ...
@@ -275,11 +365,11 @@ class PyOracleEngine:
 
         Returns:
             dict with ``entries`` — all claims ordered oldest -> newest, each tagged
-            with status ("Current" or "Superseded"), value, valid_from, valid_until,
-            provenance, value_confidence, and claim_ref. Each entry also includes
-            ``valid_from_display`` / ``valid_until_display`` and
-            ``valid_from_granularity`` / ``valid_until_granularity``
-            (see ``PyEngine.query_history`` for details).
+            with status ("Current" | "Superseded" | "Contested" | "Ended"), value,
+            valid_from, valid_until, provenance, value_confidence, and claim_ref.
+            Each entry also includes ``valid_from_display`` / ``valid_until_display``
+            and ``valid_from_granularity`` / ``valid_until_granularity``
+            (see ``PyEngine.query_history`` for the full status/granularity contract).
         """
         ...
 
@@ -312,7 +402,10 @@ class PyOracleEngine:
 
         Args:
             request: dict with: agent_id, subject, valid_at (optional ISO-8601),
-                as_of_tx_time (optional ISO-8601).
+                as_of_tx_time (optional ISO-8601). valid_at: a claim explicitly
+                ended (end_fact/assert_validity) can re-enter with its window
+                narrowed to when it was believed true; a denied/hard-excluded
+                claim never does.
 
         Returns:
             list[dict]: one per distinct predicate, sorted by predicate.
@@ -349,6 +442,20 @@ class PyOracleEngine:
         """
         ...
 
+    def assert_validity(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Bound or reopen a claim's valid-time window. Identical contract to
+        ``PyEngine.assert_validity``.
+        """
+        ...
+
+    def resolve_live_claim_for_line(
+        self, agent_id: str, subject: str, predicate: str
+    ) -> dict[str, Any]:
+        """Resolve a (subject, predicate) line to the single live claim, if any.
+        Identical contract to ``PyEngine.resolve_live_claim_for_line``.
+        """
+        ...
+
 # ── Module-level constructors ─────────────────────────────────────────────────
 
 def open_default_for_agent(base_dir: str, agent_id: str) -> PyEngine:
@@ -359,6 +466,19 @@ def open_default_for_agent(base_dir: str, agent_id: str) -> PyEngine:
     Raises:
         StorageError: if ``agent_id`` contains characters that could cause a filename
             collision, if the database cannot be opened, or if migrations fail.
+    """
+    ...
+
+def date_granularity_of(value: str) -> str | None:
+    """Display precision of a lenient date string, as the engine's own parser sees it.
+
+    "2024" -> "year", "2024-09" -> "month", "2024-09-15" -> "day", an RFC3339 string
+    -> "instant"; None when the string is not a date mempill can parse.
+
+    Thin wrapper over the single Rust date parser shared with the Rust facade, so Python
+    and Rust can never disagree about what a date string means. Used to populate the
+    ``at_granularity`` field of an ``assert_validity`` Bound assertion (see
+    ``PyEngine.assert_validity``); ``mempill.ergonomic.end_fact()`` calls it for you.
     """
     ...
 

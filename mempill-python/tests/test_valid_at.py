@@ -4,16 +4,22 @@ test_valid_at.py — Bi-temporal valid_at query tests.
 Verifies that valid_at (valid-time axis) is accepted, forwarded, and composed
 independently with as_of_tx_time (transaction-time axis).
 
-Engine behavior notes (important for correct test expectations):
-  - valid_at selection only narrows a LIVE claim set.  When a successor is
-    ingested through the public ingest_claim API, the predecessor claim is
-    marked Superseded in the ledger.  The disposition filter removes Superseded
-    claims BEFORE the valid_at selection fires — so a superseded predecessor
-    cannot be "recovered" by valid_at through the public API.
-  - valid_at selection DOES fire when multiple claims are BOTH live (neither
-    superseded).  This happens during the window before reconciliation, or for
-    SetValued cardinality, or in as_of_tx_time queries that look back before
-    the supersession ledger entry was written.
+Engine behavior notes (TASK-33-W5-LIB A, DIAG-4 finding A — updated; these notes
+previously claimed "valid_at does not change the result" for a single-claim fold,
+which was true ONLY when the query instant fell inside that claim's window. That
+claim was a symptom of a bug, not a rule — see below):
+  - valid_at now ALWAYS window-tests every candidate, including a single live
+    claim: an instant BEFORE that claim's own valid_time.start correctly yields
+    NoBelief (`test_valid_at_before_single_claim_start_returns_no_belief`), not
+    the claim unconditionally.
+  - valid_at also re-enters a claim that is excluded ONLY by an active
+    ValidityAssertion::Bound (e.g. `end_fact`/`assert_validity`), narrowed to its
+    real believed window — a claim ended via `end_fact` is NOT "gone" for an
+    in-window valid_at instant, it is the CORRECT historical answer
+    (`test_valid_at_reenters_end_fact_bounded_claim`). A claim excluded by a
+    disposition with no accompanying Bound (Quarantined/Invalidated/Rejected, or
+    a Deny-bounded challenger) still stays excluded — it was never genuinely
+    believed.
   - The canonical bi-temporal scenario (different valid_at → different belief)
     is tested in the Rust conformance suite (mempill-core/src/testing/conformance.rs
     run_valid_at_conformance), which bypasses the ingest pipeline to keep both
@@ -26,6 +32,9 @@ What these tests verify:
   4. valid_at in a gap with a single bounded claim returns the claim
      (single-claim fold does not apply succession narrowing).
   5. The live belief is still correct when valid_at is set (no regression).
+  6. A single live claim queried at an instant BEFORE its own valid_time.start
+     returns NoBelief (the `len() > 1` guard drop).
+  7. A claim ended via `end_fact` re-enters for an in-window valid_at instant.
 """
 
 from __future__ import annotations
@@ -150,9 +159,14 @@ class TestValidAtD2Independence:
         assert "belief" in resp, (
             f"Expected belief dict, got: {resp}"
         )
-        # With one live claim, valid_at does not change the result (single-claim fold).
+        # valid_at=2020-06-01 is INSIDE Carol's window (start=2015-01-01, open end) — the
+        # single-claim fold is window-tested, and the instant falls inside it, so Carol is
+        # returned. This is NOT "valid_at has no effect on a single-claim fold" as a general
+        # rule (TASK-33-W5-LIB A) — see `test_valid_at_before_single_claim_start_returns_no_belief`
+        # for the same single-claim fold with an out-of-window instant, which correctly yields
+        # NoBelief instead.
         assert resp["belief"]["primary"]["fact"]["value"] == "Carol", (
-            f"Single live claim: valid_at does not filter it out. Got: {resp}"
+            f"valid_at=2020-06-01 is inside Carol's window [2015-01-01, ∞) → Carol. Got: {resp}"
         )
 
     def test_as_of_tx_time_with_valid_at_no_error(
@@ -218,7 +232,12 @@ class TestValidAtLiveBeliefUnchanged:
     def test_valid_at_returns_correct_value_single_claim(
         self, engine: mempill.Engine, agent_id: str
     ) -> None:
-        """With a single live claim, valid_at does not change the result."""
+        """A single live claim, queried at an in-window valid_at instant, returns the same
+        value as omitting valid_at — NOT because "valid_at has no effect on a single-claim
+        fold" (see TASK-33-W5-LIB A), but because the instant is genuinely inside the claim's
+        window. `test_valid_at_before_single_claim_start_returns_no_belief` below proves the
+        window IS checked: an out-of-window instant on the same single claim yields NoBelief.
+        """
         _ingest_ceo(engine, agent_id, "Eve", "2010-01-01T00:00:00Z")
         resp_no_vat = engine.query_memory({
             "agent_id": agent_id,
@@ -229,12 +248,69 @@ class TestValidAtLiveBeliefUnchanged:
             "agent_id": agent_id,
             "subject": "acme",
             "predicate": "ceo",
-            "valid_at": "2015-06-01T00:00:00Z",
+            "valid_at": "2015-06-01T00:00:00Z",  # inside Eve's window [2010-01-01, ∞)
         })
-        # Both must agree (single-claim fold; succession not triggered).
         v1 = resp_no_vat["belief"]["primary"]["fact"]["value"]
         v2 = resp_with_vat["belief"]["primary"]["fact"]["value"]
         assert v1 == v2 == "Eve", (
-            f"Single-claim fold: valid_at must not change result. "
+            f"valid_at=2015-06-01 is inside Eve's window → same result as omitting valid_at. "
             f"Without: {v1!r}, With: {v2!r}"
+        )
+
+    def test_valid_at_before_single_claim_start_returns_no_belief(
+        self, engine: mempill.Engine, agent_id: str
+    ) -> None:
+        """TASK-33-W5-LIB A (DIAG-4 finding A, scenario 6): a single live, unbounded claim
+        queried at an instant BEFORE its own valid_time.start must return NoBelief — the
+        `len() > 1` guard is dropped so even a lone candidate is window-tested.
+        """
+        _ingest_ceo(engine, agent_id, "Eve", "2010-01-01T00:00:00Z")
+        resp = engine.query_memory({
+            "agent_id": agent_id,
+            "subject": "acme",
+            "predicate": "ceo",
+            "valid_at": "1995-01-01T00:00:00Z",  # before Eve's start
+        })
+        assert resp["belief"]["status"] == "NoBelief", (
+            f"valid_at before the only claim's start must be NoBelief. Got: {resp['belief']}"
+        )
+        assert resp["belief"].get("primary") is None, (
+            f"NoBelief must not carry a primary belief. Got: {resp['belief']}"
+        )
+
+    def test_valid_at_reenters_end_fact_bounded_claim(
+        self, engine: mempill.Engine, agent_id: str
+    ) -> None:
+        """TASK-33-W5-LIB A (DIAG-4 finding A, scenario 1): a claim explicitly ended via
+        `end_fact` must still re-enter the valid_at candidate set, narrowed to its real
+        believed window — the raw-live-only fold alone would incorrectly return the
+        successor (or NoBelief) for an instant that predates the bound.
+        """
+        from mempill import end_fact
+
+        _ingest_ceo(engine, agent_id, "Diane", "2021-04-01T00:00:00Z")
+        end_fact(engine, agent_id, "acme", "ceo", "2025-01-01")
+        _ingest_ceo(engine, agent_id, "John", "2025-01-01T00:00:00Z")
+
+        # valid_at before the bound must still return Diane, not John or NoBelief.
+        resp = engine.query_memory({
+            "agent_id": agent_id,
+            "subject": "acme",
+            "predicate": "ceo",
+            "valid_at": "2022-06-01T00:00:00Z",
+        })
+        assert resp["belief"]["primary"]["fact"]["value"] == "Diane", (
+            f"valid_at=2022-06-01 (before the end_fact bound at 2025-01-01) must return "
+            f"Diane, got: {resp['belief']}"
+        )
+
+        # valid_at after the bound must return John.
+        resp2 = engine.query_memory({
+            "agent_id": agent_id,
+            "subject": "acme",
+            "predicate": "ceo",
+            "valid_at": "2025-06-01T00:00:00Z",
+        })
+        assert resp2["belief"]["primary"]["fact"]["value"] == "John", (
+            f"valid_at=2025-06-01 (after the bound) must return John, got: {resp2['belief']}"
         )

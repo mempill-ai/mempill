@@ -61,7 +61,8 @@ mcp: FastMCP = FastMCP(
     instructions=(
         "mempill memory engine adapter. "
         "Use ingest_claim to write beliefs, query_memory to read them, "
-        "reconcile to resolve conflicts, and audit to inspect history."
+        "reconcile to resolve conflicts, audit to inspect history, "
+        "and end_fact to explicitly close an open-ended fact at a given instant."
     ),
     lifespan=_lifespan,
 )
