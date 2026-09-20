@@ -10,14 +10,7 @@ See the [root README](../README.md) for full architecture and concepts.
 ## Install
 
 ```sh
-# 1. Install the mempill Python wheel first.
-cd mempill-python
-maturin develop --release
-cd ..
-
-# 2. Install mempill-mcp.
-cd mempill-mcp
-pip install .
+pip install mempill-mcp
 ```
 
 ## Run
