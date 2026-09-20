@@ -732,7 +732,7 @@ impl PersistencePort for PostgresPersistenceStore {
                 let value_confidence: f64 = row.get(7);
                 let valid_time_confidence: f64 = row.get(8);
                 let asserted_at_str: String = row.get(9);
-                // v4 column (TASK-33-W5-LIB-R2). Nullable — absent/NULL on legacy pre-v4 rows.
+                // v4 column. Nullable — absent/NULL on legacy pre-v4 rows.
                 let bound_at_granularity_str: Option<String> = row.get(10);
 
                 let assertion_ref = uuid::Uuid::parse_str(&assertion_id_str)

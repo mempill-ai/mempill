@@ -152,7 +152,7 @@ where
 
         // Build LATEST disposition per claim from the ledger (for the disposition-based fold filter).
         let latest_disposition = build_latest_disposition_map(&ledger_for_fold);
-        // TASK-33-W5-LIB C: same ledger slice, zero extra reads — see build_conflict_candidate_claims.
+        // Same ledger slice, zero extra reads — see build_conflict_candidate_claims.
         let denied_via_adjudication = build_denied_via_adjudication_set(&ledger_for_fold);
 
         // Fold the incumbent claims to get the live canonical belief.
@@ -170,7 +170,7 @@ where
             &latest_disposition,
         );
         // N-wide succession/conflict check (fixes the silent chain-overlap defect, and
-        // TASK-33-W5-LIB C: a retroactive claim over an explicitly-closed historical window
+        // A retroactive claim over an explicitly-closed historical window
         // must be contested, not committed silently): the challenger is compared against
         // EVERY raw-live claim ON this subject-line PLUS every claim closed by an active Bound
         // (end_fact/assert_validity/Affirm), narrowed to its real believed window — not just
@@ -179,7 +179,7 @@ where
         let all_live_claims: Vec<mempill_types::Claim> =
             truth_engine::build_conflict_candidate_claims(&fold_result, &denied_via_adjudication);
 
-        // TASK-33-W5-LIB-R1 (review blocker 1): `incumbent_belief` (reconciler step 1's
+        // `incumbent_belief` (reconciler step 1's
         // None-check / step 3's same-value check — see `reconciler::classify_conflict`) must
         // prefer the fold's step-4-selected CURRENT belief — `fold_result.live_claims.first()`
         // — not `all_live_claims.first()`. `all_live_claims` is `all_claims` filtered/widened,
@@ -463,9 +463,9 @@ pub(crate) fn build_latest_disposition_map(
 
 /// Claims whose LATEST ledger entry is a `Superseded` written by an oracle `Deny` verdict
 /// (`submit_adjudication.rs::bound_claim`) — i.e. rejected, never genuinely "believed" for any
-/// valid-time window (TASK-33-W5-LIB A, DIAG-4 finding A).
+/// valid-time window.
 ///
-/// TASK-33-W5-LIB-R1 (review should-fix 2): `bound_claim` now writes an explicit
+/// `bound_claim` now writes an explicit
 /// `"verdict": "affirm" | "deny"` field into the Superseded entry's `rationale` JSON — read
 /// that directly off the LATEST entry rather than inferring it from ledger-entry ORDER.
 ///
@@ -529,7 +529,7 @@ pub(crate) fn build_denied_via_adjudication_set(
             // Legacy fallback: the terminal Superseded entry carries no explicit marker — scan
             // the adjacent-entry history for a QueuedForAdjudication -> Superseded transition
             // (not just the immediate last pair; see rustdoc above). The scan window starts
-            // AFTER the last `Reinstated` entry (TASK-33-W5-LIB-R2): a Reopen reverses any
+            // AFTER the last `Reinstated` entry: a Reopen reverses any
             // denial that preceded it, so an earlier QFA->Superseded(deny) pair from before
             // the Reopen must never resurrect a denial once the claim has since been closed
             // again by an unrelated, unmarked Superseded write (e.g. a legacy host closure).
@@ -1123,8 +1123,7 @@ mod tests {
         assert_eq!(rows.len(), 0, "B11a: no pending row when Contested");
     }
 
-    // ── build_denied_via_adjudication_set: reachable-sequence table (TASK-33-W5-LIB-R1
-    // review should-fix 2) ──────────────────────────────────────────────────────────────
+    // ── build_denied_via_adjudication_set: reachable-sequence table ──────────────────────
 
     fn dvs_entry(
         claim_ref: &ClaimRef,
@@ -1231,7 +1230,7 @@ mod tests {
     #[test]
     fn dvs_deny_reinstated_then_unmarked_host_close_is_not_denied() {
         // [Queued, Superseded(deny), Reinstated, Superseded(end_fact, no marker)] -> NOT
-        // denied (TASK-33-W5-LIB-R2). The Reopen reverses the earlier deny; a later legacy
+        // denied. The Reopen reverses the earlier deny; a later legacy
         // (unmarked) host closure must not resurrect it by tripping the full-history
         // fallback heuristic — the fallback scan window starts AFTER the last Reinstated.
         let r = ClaimRef(uuid::Uuid::new_v4());

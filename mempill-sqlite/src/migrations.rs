@@ -125,8 +125,7 @@ pub(crate) fn apply_v3(conn: &Connection) -> Result<(), MigrationError> {
     Ok(())
 }
 
-/// Migration v4: add `bound_at_granularity` nullable TEXT column to `validity_assertions`
-/// (TASK-33-W5-LIB-R2, DIAG-5).
+/// Migration v4: add `bound_at_granularity` nullable TEXT column to `validity_assertions`.
 ///
 /// Old rows upgrade cleanly: the new column defaults to NULL, which the read path maps to
 /// `None` on `AssertionKind::Bound::bound_at_granularity`.
@@ -256,7 +255,7 @@ mod tests {
             "value_confidence",
             "valid_time_confidence",
             "asserted_at",
-            // v4 — bound_at display-precision granularity (TASK-33-W5-LIB-R2)
+            // v4 — bound_at display-precision granularity
             "bound_at_granularity",
         ] {
             assert!(
@@ -519,7 +518,7 @@ mod tests {
         assert!(cols.contains(&"valid_time_end_granularity".to_string()));
     }
 
-    // ── v4 migration tests (TASK-33-W5-LIB-R2, DIAG-5) ───────────────────────
+    // ── v4 migration tests ────────────────────────────────────────────────
 
     /// v4 adds the nullable `bound_at_granularity` column to validity_assertions.
     #[test]

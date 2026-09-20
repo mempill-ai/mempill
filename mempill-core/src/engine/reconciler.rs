@@ -110,7 +110,7 @@ pub(crate) fn reconcile(input: ReconcilerInput<'_>, _config: &EngineConfig) -> P
 /// 3. Same (subject, predicate) + same JSON value AND the candidate's window does not
 ///    overlap any OTHER live claim (`all_live_claims`) with a DIFFERENT value → NoConflict
 ///    (idempotent re-statement). Identical value overlapping a differently-valued OLDER live
-///    claim falls through to step 4 instead (TASK-33-W5-LIB-R1).
+///    claim falls through to step 4 instead.
 /// 4. Same (subject, predicate) + different value:
 ///    4a. Candidate forms a trusted, pairwise-non-overlapping succession against EVERY OTHER
 ///        raw-live claim on the subject-line (N-wide, not just one incumbent) → Succession.
@@ -145,7 +145,7 @@ fn classify_conflict(input: &ReconcilerInput<'_>) -> ConflictType {
     if cand_subject == incumb_subject && cand_predicate == incumb_predicate {
         // Same subject-line.
         //
-        // TASK-33-W5-LIB-R1 (review blocker 1, step-3 refinement): the identical-value
+        // The identical-value
         // shortcut below is a legitimate re-assertion ONLY when the candidate's window does
         // not overlap any OTHER live claim (`all_live_claims`) whose value differs from the
         // candidate's. Re-affirming the CURRENT incumbent's value while silently overlapping
@@ -156,8 +156,8 @@ fn classify_conflict(input: &ReconcilerInput<'_>) -> ConflictType {
         // window that belonged to a DIFFERENT, earlier claim. Overlapping the incumbent
         // itself (same value) never disqualifies the shortcut.
         //
-        // Precondition: `.start.is_some()` gates the check on BOTH sides (TASK-33-W5-LIB-R2
-        // nit). A claim with no stated `valid_time.start` has no closed-form window to test
+        // Precondition: `.start.is_some()` gates the check on BOTH sides. A claim with
+        // no stated `valid_time.start` has no closed-form window to test
         // via `windows_non_overlapping` (open-start windows are only ever narrowed/ordered by
         // `bound_at`, never compared here) — such a claim is simply excluded from the
         // differently-valued-overlap scan rather than being treated as trivially overlapping
@@ -907,7 +907,7 @@ mod tests {
     }
 
     // ── Step 3 refinement: identical-value shortcut must not wave through an overlap with
-    // an OLDER, differently-valued live claim (TASK-33-W5-LIB-R1 review blocker 1) ─────────
+    // an OLDER, differently-valued live claim ─────────────────────────────────────────────
 
     /// Candidate value matches the CURRENT incumbent B ("Paris"), but the candidate's window
     /// overlaps A ("Berlin"), an OLDER, differently-valued member of `all_live_claims`. The

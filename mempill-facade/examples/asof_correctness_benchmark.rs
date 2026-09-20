@@ -22,7 +22,7 @@
 //! 2. Transaction-time as-of correctness — independent axis, held constant across
 //!    valid-time.
 //! 3. Succession — a 3+ window non-overlapping valid-time chain, confirming correct
-//!    claim selection at multiple query instants (exercises the reconciler, TASK-11).
+//!    claim selection at multiple query instants (exercises the reconciler).
 //! 4. Contested (genuine conflict) — included deliberately so this benchmark does not
 //!    only show the case where mempill resolves cleanly. A benchmark that only
 //!    demonstrated clean resolution, with no honest look at the case mempill

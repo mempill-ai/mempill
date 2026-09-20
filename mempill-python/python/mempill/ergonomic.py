@@ -83,7 +83,12 @@ class RememberOptions:
     Args:
         valid_from:   Lenient date string — YYYY / YYYY-MM / YYYY-MM-DD / RFC3339.
                       None means open / unknown start (valid_time_confidence = 0.0).
-        valid_until:  Lenient date string. None means open-ended.
+                      The precision it was written with is preserved: "2021" stays a
+                      year, "2021-04" stays a month, "2021-04-15" stays a day, a full
+                      timestamp stays an instant — history() and recall() display that
+                      precision, never a fabricated day.
+        valid_until:  Lenient date string. None means open-ended. Same precision
+                      preservation as valid_from.
         confidence:   Value confidence [0.0, 1.0]. Also used as valid_time_confidence
                       when dates are provided (eliminates the duplicate-field quirk).
                       Defaults to 1.0 (user-stated facts are user-stated truth).
@@ -266,7 +271,9 @@ def remember(
         predicate: Property key (e.g. "city", "ceo").
         value:     The asserted value (any JSON-serialisable type).
         opts:      Optional overrides. Pass RememberOptions(...) to set dates,
-                   confidence, cardinality, provenance, criticality.
+                   confidence, cardinality, provenance, criticality. Date strings keep
+                   the precision they were written with ("2021" -> year, "2021-04" ->
+                   month, "2021-04-15" -> day, a full timestamp -> instant).
 
     Returns:
         RememberReceipt with claim_ref, disposition, and contested_with.
@@ -277,6 +284,8 @@ def remember(
         mempill.ValidationError: propagated from the engine on malformed requests.
         mempill.StorageError: propagated from the engine on storage failures.
     """
+    from mempill._mempill import date_granularity_of
+
     if opts is None:
         opts = RememberOptions()
 
@@ -290,8 +299,17 @@ def remember(
     valid_time: dict[str, Any] = {"valid_time_confidence": vtc}
     if opts.valid_from is not None:
         valid_time["start"] = _to_rfc3339(opts.valid_from)
+        # Precision of `valid_from` AS THE CALLER WROTE IT (never derived from the
+        # normalized instant, which has already had its placeholder month/day filled
+        # in) — mirrors end_fact()'s `at_granularity` handling above.
+        start_granularity = date_granularity_of(opts.valid_from)
+        if start_granularity is not None:
+            valid_time["start_granularity"] = start_granularity
     if opts.valid_until is not None:
         valid_time["end"] = _to_rfc3339(opts.valid_until)
+        end_granularity = date_granularity_of(opts.valid_until)
+        if end_granularity is not None:
+            valid_time["end_granularity"] = end_granularity
 
     request: dict[str, Any] = {
         "agent_id": agent_id,
@@ -615,7 +633,7 @@ def history(
     return History(entries)
 
 
-# ── assert_validity / end_fact (SDK_CONTRACT.md §3.1, TASK-33 E2) ──────────────
+# ── assert_validity / end_fact ─────────────────────────────────────────────────
 
 @dataclass
 class EndFactReceipt:

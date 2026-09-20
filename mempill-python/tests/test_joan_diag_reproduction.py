@@ -1,11 +1,11 @@
 """
-test_joan_diag_reproduction.py — TASK-33-W3-LIB: end-to-end Python reproduction of the
-Joan/Linda/John/Sam/Diane CEO-succession shape from DIAG_joan_history.md §1 and
-DIAG_silent_succession.md §3 (the acme-corp / ceo real-demo defect that motivated this task).
+test_joan_diag_reproduction.py — End-to-end Python reproduction of the
+Joan/Linda/John/Sam/Diane CEO-succession shape from a real-world acme-corp / ceo
+demo defect that motivated this test.
 
-Scope note: the ORIGINAL demo ledger (DIAG_joan_history.md §1) is a real production trace
+Scope note: the ORIGINAL demo ledger is a real production trace
 spanning two sessions and containing entries produced by the OLD (pre-fix) engine's silent
-supersession bug (DIAG_silent_succession (ii)) plus duplicate near-identical re-assertions
+supersession bug plus duplicate near-identical re-assertions
 that are demo-tool artifacts, not engine behavior. This test reproduces the SAME people,
 the SAME subject/predicate ("acme-corp"/"ceo"), and the SAME valid-time windows/precisions
 (day/day/day/month/month for Diane/Linda/John/Sam/Joan respectively, matching the ground-
@@ -16,9 +16,10 @@ mixed-history shape named in the task (real supersession + a genuinely pending C
 overlap coexisting on the same subject-line).
 
 Uses the RAW `engine.ingest_claim()` dict path (not the `remember()` ergonomic helper) so
-`start_granularity` / `end_granularity` are set explicitly — `remember()` does not yet
-propagate granularity on write (a pre-existing, separately-tracked gap noted in
-test_history.py's `_ingest_with_granularity` helper, which this test mirrors).
+`start_granularity` / `end_granularity` are set explicitly for this reproduction's
+day/day/day/month/month precisions — `remember()` also propagates granularity on write
+(see test_remember_granularity.py), but this test mirrors test_history.py's
+`_ingest_with_granularity` helper for direct control over each claim's precision.
 
 Deliberate ordering choice: John is ingested BEFORE Joan (Linda -> John forms a clean
 non-overlapping succession first; Joan then arrives and overlaps Linda specifically). This

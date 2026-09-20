@@ -1,4 +1,4 @@
-//! QA: Oracle resolution belief-surfacing tests (TASK-9-W4-W5-QA).
+//! QA: Oracle resolution belief-surfacing tests.
 //!
 //! These tests verify what a user ACTUALLY SEES via `query_memory` across the full
 //! oracle resolution lifecycle. The engineer's existing `oracle_resolution_e2e.rs` tests

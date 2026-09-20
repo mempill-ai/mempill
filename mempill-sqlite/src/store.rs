@@ -832,7 +832,7 @@ impl PersistencePort for SqlitePersistenceStore {
                 let value_confidence: f64 = row.get(7)?;
                 let valid_time_confidence: f64 = row.get(8)?;
                 let asserted_at_str: String = row.get(9)?;
-                // v4 column (TASK-33-W5-LIB-R2). Nullable — absent/NULL on legacy pre-v4 rows.
+                // v4 column. Nullable — absent/NULL on legacy pre-v4 rows.
                 let bound_at_granularity_str: Option<String> = row.get(10)?;
 
                 let assertion_ref = uuid::Uuid::parse_str(&assertion_id_str)
@@ -2080,7 +2080,7 @@ mod tests {
         assert!(loaded.is_empty(), "must return empty vec when no assertions");
     }
 
-    /// TASK-33-W5-LIB-R2 (DIAG-5): `bound_at_granularity` round-trips through the real store
+    /// `bound_at_granularity` round-trips through the real store
     /// (append → commit → load), across the full Some(DateGranularity) range.
     #[test]
     fn read_load_validity_assertions_bound_at_granularity_round_trip() {

@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(windows[2].valid_until, None);
     }
 
-    // ── Derived-endpoint granularity tests (TASK-32, updated for the fold-derived design) ──
+    // ── Derived-endpoint granularity tests (updated for the fold-derived design) ──
 
     #[allow(clippy::too_many_arguments)]
     fn make_claim_gran(
@@ -688,7 +688,7 @@ mod tests {
         );
     }
 
-    // ── Bound-derived-end granularity (TASK-33-W5-LIB-R2, DIAG-5) ────────────────
+    // ── Bound-derived-end granularity ─────────────────────────────────────────
 
     /// The bound-narrowed end of an open-ended incumbent honours the Bound's OWN tracked
     /// granularity (e.g. the winning challenger's `start_granularity` on an Affirm) instead of
@@ -735,7 +735,7 @@ mod tests {
 
     /// When the Bound carries no granularity (Deny's tx_time fallback, or a legacy row) but
     /// its instant numerically coincides with the successor's start key, the successor's start
-    /// granularity is attributed to the bound-derived end (DIAG-5 fallback rule) — never
+    /// granularity is attributed to the bound-derived end (fallback rule) — never
     /// fabricated when the instants differ.
     #[test]
     fn bound_derived_end_falls_back_to_successor_granularity_when_instants_coincide() {

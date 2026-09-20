@@ -3,11 +3,6 @@
 Python bindings for the mempill AI-agent memory engine — temporal, contested-belief-aware
 fact storage for AI agents.
 
-> **Note:** 0.4.0 is unreleased on `main` as of this writing; the published PyPI wheel is
-> still 0.3.0 and does not have `open_for_agent` / `open_oracle_for_agent` (see the root
-> [CHANGELOG.md](../CHANGELOG.md) for the 0.3.0 → 0.4.0 migration note). This caveat resolves
-> itself once 0.4.0 is published.
-
 ## Install
 
 ```sh

@@ -1,4 +1,4 @@
-//! TASK-11: Valid-time-aware conflict classification — end-to-end tests.
+//! Valid-time-aware conflict classification — end-to-end tests.
 //!
 //! Tests the full §H matrix using the real SQLite engine (EngineHandle).
 //! All succession scenarios supply confident bounded valid_time on the claims
@@ -15,7 +15,7 @@
 //!   no_valid_time_regression    — no valid_time → Contested (existing behavior unchanged)
 //!   n_gt_1_incumbent            — 2 live incumbents + new claim → stays SameLineConflict
 //!
-//! TASK-25-W4 (verification wave) gap-fill additions:
+//! Verification-wave gap-fill additions:
 //!   succession_boundary_via_valid_at   — exact boundary instant queried through the public
 //!                                        `valid_at` API param (integration-level proof of the
 //!                                        unit-level `select_boundary_start_inclusive` guarantee;
@@ -727,7 +727,7 @@ async fn n_gt_1_incumbent() {
     println!("[n_gt_1_incumbent] PASS: N>1 incumbents → succession skipped → Contested");
 }
 
-// ── succession_boundary_via_valid_at (TASK-25-W4 gap-fill) ─────────────────────
+// ── succession_boundary_via_valid_at (gap-fill) ─────────────────────────────
 
 /// Alice [2020-01-01, 2024-03-01), Bob [2024-03-01, ∞).
 /// Query with `valid_at` set EXACTLY to the boundary instant (2024-03-01T00:00:00Z),
@@ -791,7 +791,7 @@ async fn succession_boundary_via_valid_at() {
     );
 }
 
-// ── one_sided_no_valid_time_is_conflict (TASK-25-W4 gap-fill) ──────────────────
+// ── one_sided_no_valid_time_is_conflict (gap-fill) ──────────────────────────
 
 /// Alice has NO valid_time (None), Bob has a confident bounded window.
 /// A trusted succession requires ALL claims in the fold to be trusted
@@ -851,7 +851,7 @@ async fn one_sided_no_valid_time_is_conflict() {
     println!("[one_sided_no_valid_time_is_conflict] PASS: one-sided missing valid_time → Contested");
 }
 
-// ── succession_point_claim (TASK-25-W4 gap-fill) ────────────────────────────────
+// ── succession_point_claim (gap-fill) ───────────────────────────────────────────
 
 /// Alice is a zero-duration POINT claim: start == end == 2020-01-01T00:00:00Z.
 /// Bob: [2020-01-02, ∞).

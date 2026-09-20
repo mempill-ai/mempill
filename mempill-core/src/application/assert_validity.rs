@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 //! AssertValidityUseCase — the host-facing, oracle-free write op that bounds or reopens a
-//! claim's valid-time window (SDK_CONTRACT.md §3.1 `assert_validity`, TASK-33 E2).
+//! claim's valid-time window (`assert_validity`).
 //!
 //! This is the ONLY writer of `ValidityAssertion` outside the adjudication path
 //! (`submit_adjudication.rs`). It is explicit and host-initiated: the engine never infers
@@ -124,14 +124,14 @@ where
             ValidityAssertionInput::Bound { at, at_granularity } => {
                 // ── Gate 2.5: reject Bound against a claim under active oracle
                 // adjudication, or one already terminally rejected by a Deny verdict
-                // (TASK-33-W5-LIB-R1 nit). A QueuedForAdjudication claim has no
+                // A QueuedForAdjudication claim has no
                 // host-asserted window to narrow — the oracle owns its resolution — and a
                 // Deny-superseded claim was never genuinely believed for any window, so
                 // bounding it again is meaningless. `Reopen` (the other match arm) is NOT
                 // gated here: a Deny verdict may legitimately be reversed via `Reopen`,
                 // which is the intended escape hatch (module docs).
                 //
-                // This gate is reachable through `end_fact` too (TASK-33-W5-LIB-R2): a
+                // This gate is reachable through `end_fact` too: a
                 // subject-line's sole LIVE claim can still be `QueuedForAdjudication` —
                 // `resolve_live_claim_for_line`'s fold does not exclude queued claims from
                 // the live set — so `end_fact("s", "p", at)` resolving to that single queued
@@ -194,7 +194,7 @@ where
                     });
                 }
 
-                // ── Gate 5: no-effect bound (TASK-33-W4-LIB-R1 review #3) ──────
+                // ── Gate 5: no-effect bound ──────────────────────────────────
                 // `compute_history_windows` (truth_engine.rs) only ever NARROWS a claim's
                 // displayed window via `min(bound_at, own_end)` — it never widens a narrower
                 // stated end (see that function's module docs). A Bound whose `at` is at or
@@ -250,7 +250,7 @@ where
                     serde_json::json!({
                         "event": "assert_validity_bound",
                         "bound_at": at.to_rfc3339(),
-                        // TASK-33-W5-LIB-R2: explicit origin marker on EVERY host-bound
+                        // Explicit origin marker on EVERY host-bound
                         // Superseded ledger entry (end_fact routes through this same arm) —
                         // read by `ingest_claim::build_denied_via_adjudication_set` so new
                         // rows never need the legacy fallback scan.
@@ -384,7 +384,7 @@ where
 /// then reopened).
 ///
 /// Delegates to `truth_engine::active_bound_at` — the SINGLE SOURCE OF TRUTH for the
-/// Bound/Reopen toggle walk (TASK-33-W4-LIB-R1 review #1) — evaluated `as_of_tx_time = now`.
+/// Bound/Reopen toggle walk — evaluated `as_of_tx_time = now`.
 /// All existing assertions were persisted before this call, so `asserted_at <= now` always
 /// holds and every stored assertion is visible; this is equivalent to the previous
 /// unconditional (non-tx-gated) walk, now unified with the read-path implementation.
@@ -666,7 +666,7 @@ mod tests {
     }
 
     // ── Gate 2.5: Bound rejected on a QueuedForAdjudication / Deny-superseded target
-    // (TASK-33-W5-LIB-R1 nit) — Reopen is NOT gated ─────────────────────────────────
+    // Reopen is NOT gated ──────────────────────────────────────────────────────────
 
     #[test]
     fn bound_against_queued_for_adjudication_target_is_rejected() {

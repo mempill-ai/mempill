@@ -1,6 +1,6 @@
 """
 test_end_fact_tool.py — In-process FastMCP client tests for the end_fact tool
-(TASK-33 E2, 5th mempill-mcp tool).
+(5th mempill-mcp tool).
 
 Covers:
   - end_fact bounds the sole live claim and returns claim_ref/disposition/effective_at/no_op.

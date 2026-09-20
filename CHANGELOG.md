@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version headings are dated at publish time. A version with no date and the
 `— Unreleased` suffix is on `main` but has not yet been published to crates.io/PyPI.
 
-## [0.4.0] — Unreleased
+## [0.4.0] — 2026-09-20
 
 ### Changed (Breaking)
 
@@ -58,8 +58,7 @@ Version headings are dated at publish time. A version with no date and the
   ```
 
   This is a correctness benchmark only — no timing/latency numbers are captured
-  or published. See `tasks/25-storage-and-roadmap-merged/AS_OF_CORRECTNESS_BENCHMARK.md`
-  for the full results table and results published on the
+  or published. See the full results table on the
   [documentation site](https://mempill.netlify.app/concepts/benchmark-results/).
 - **Date granularity on `query_history` / `history()`.** `HistoryEntry` gained two
   additive fields, `valid_from_granularity` and `valid_until_granularity`
@@ -125,6 +124,7 @@ Version headings are dated at publish time. A version with no date and the
 - Point-in-time reads (`valid_at` on `query_memory`, `query_subject`, `recall`) now consider claims that were explicitly ended and always window-check the candidate: an instant inside an ended fact's window returns that fact, and an instant before any claim's start returns no belief.
 - An affirmed adjudication now ends the losing incumbent at the winning claim's valid-time start instead of at the adjudication's transaction time.
 - A claim written retroactively into a window that was explicitly ended is now contested against the ended incumbent instead of being committed silently.
+- Python `remember()` now records the date precision of `valid_from` / `valid_until` as written (`"2021-04"` stays a month), matching the Rust `remember` and `end_fact`; previously the Python helper stored these dates without granularity and they displayed with a fabricated day.
 
 ### Notes
 

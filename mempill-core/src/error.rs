@@ -96,11 +96,11 @@ pub enum MemError {
         end: String,
     },
 
-    // ── ASSERT_VALIDITY / END_FACT (TASK-33 E2) ───────────────────────────────
+    // ── ASSERT_VALIDITY / END_FACT ─────────────────────────────────────────────
     /// `assert_validity` was called with a provenance channel that is not `External(*)`.
     /// Only first-hand external evidence (the host acting as oracle) may bound or reopen
     /// a claim's validity — mirrors the rule that only first-hand external evidence may
-    /// overturn a belief (SDK_CONTRACT.md §2.1 rule 1).
+    /// overturn a belief.
     #[error(
         "Insufficient provenance to overturn claim validity: {provenance:?} is not eligible \
          (only External(*) may bound/reopen a claim)"
@@ -125,8 +125,8 @@ pub enum MemError {
     },
 
     /// `assert_validity` `Bound` was requested against a claim that is currently
-    /// `QueuedForAdjudication`, or was terminally rejected by an oracle `Deny` verdict
-    /// (TASK-33-W5-LIB-R1 nit): a claim under active adjudication has no host-asserted
+    /// `QueuedForAdjudication`, or was terminally rejected by an oracle `Deny` verdict:
+    /// a claim under active adjudication has no host-asserted
     /// window to narrow (the oracle owns its resolution), and a Deny-superseded claim was
     /// never genuinely believed for any window, so bounding it again is meaningless.
     /// `Reopen` on such a target is NOT rejected by this gate (a Deny verdict may

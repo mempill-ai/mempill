@@ -1,4 +1,4 @@
-//! TASK-33 / QA-A (🟡8): Postgres connection-pool exhaustion.
+//! Postgres connection-pool exhaustion.
 //!
 //! With `max_size=2` and a short `connection_timeout`, holds BOTH pooled connections
 //! open via two long-running (uncommitted) transactions, then proves a third operation

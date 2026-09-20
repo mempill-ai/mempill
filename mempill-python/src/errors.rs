@@ -50,7 +50,7 @@ pub fn mem_err_to_pyerr(e: MemError) -> PyErr {
         MemError::WriteAuthorityViolation { .. } => ValidationError::new_err(msg),
         MemError::MalformedFact { .. } => ValidationError::new_err(msg),
         MemError::IncoherentTemporalWindow { .. } => ValidationError::new_err(msg),
-        // assert_validity / end_fact gates (TASK-33 E2)
+        // assert_validity / end_fact gates
         MemError::InsufficientProvenanceForOverturn { .. } => ValidationError::new_err(msg),
         MemError::AmbiguousLineForClose { .. } => ValidationError::new_err(msg),
         MemError::TargetUnderAdjudication { .. } => ValidationError::new_err(msg),

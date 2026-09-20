@@ -2183,7 +2183,7 @@ pub fn run_reconcile_incumbent_selection_matches_query_memory_primary_conformanc
     );
 }
 
-// ── TASK-33-W5-LIB-R1 review blocker 1: narrowed-succession incumbent selection ───────────
+// ── Narrowed-succession incumbent selection ──────────────────────────────────────────────
 
 /// Cross-adapter conformance for the review blocker: `ingest_claim`'s incumbent selection
 /// must prefer the fold's step-4-selected CURRENT belief (`fold_result.live_claims.first()`)
@@ -2203,7 +2203,7 @@ pub fn run_reconcile_incumbent_selection_matches_query_memory_primary_conformanc
 ///    incumbent.
 /// 4. DIAG-C: incumbent fully closed via `assert_validity` Bound (fold_result.live_claims
 ///    empty) — must fall back to the WIDENED set and stay Contested with the ended incumbent.
-/// 5. DIAG-C variant, WITH a live successor present (TASK-33-W5-LIB-R2 nit):
+/// 5. DIAG-C variant, WITH a live successor present:
 ///    incumbent D is closed via `assert_validity` Bound, then a NEW live successor E is
 ///    written on the same line — `fold_result.live_claims` is now NON-EMPTY (`[E]`), so
 ///    `incumbent_belief` prefers `E` (per the review-blocker-1 rule above; the widened-set
@@ -3033,7 +3033,7 @@ where
     );
 }
 
-/// Sub-test va7 (TASK-33-W5-LIB A, DIAG-4 finding A): an incumbent explicitly ended via
+/// Sub-test va7: an incumbent explicitly ended via
 /// `end_fact`/`assert_validity` (a host-asserted `ValidityAssertion::Bound`, NOT its own
 /// stored `valid_time.end`) must still re-enter the valid_at candidate set, narrowed to its
 /// real believed window — `fold`'s raw-live-only view alone would incorrectly return the
@@ -3106,7 +3106,7 @@ where
     );
 }
 
-/// Sub-test va8 (TASK-33-W5-LIB A, DIAG-4 finding A / scenario 6): a single open, unbounded
+/// Sub-test va8 (scenario 6): a single open, unbounded
 /// claim queried at an instant BEFORE its own valid-time start must return NoBelief — dropping
 /// `fold`'s `len() > 1` guard so even a lone candidate is window-tested.
 #[cfg(any(test, feature = "test-support"))]
@@ -3363,7 +3363,7 @@ where
     );
 }
 
-// ── History granularity conformance harness (TASK-32) ─────────────────────────
+// ── History granularity conformance harness ────────────────────────────────────
 
 /// Run the `HistoryEntry` granularity/derived-endpoint conformance suite against `store`.
 ///
@@ -3637,7 +3637,7 @@ where
     );
 }
 
-// ── Cross-agent scope-isolation conformance harness (TASK-33 / QA-A) ──────────
+// ── Cross-agent scope-isolation conformance harness ────────────────────────────
 //
 // Proves that two agents (A and B) sharing ONE store never see or affect each
 // other's data through any application-layer use-case. Uses value-level
@@ -4221,7 +4221,7 @@ fn make_vt_free_claim(agent_id: &AgentId, subject: &str, predicate: &str, value:
     )
 }
 
-// ── Scale × tenancy conformance harness (TASK-33 / QA-A, 🔴2) ─────────────────
+// ── Scale × tenancy conformance harness ─────────────────────────────────────
 
 /// Extends the `>10k`-row conformance scenario to TWO agents in one store: agent A
 /// accumulates an oversized (`>10_000`) noise ledger while agent B has a small ledger
@@ -4328,7 +4328,7 @@ where
     assert_eq!(current_b.claim_ref, resp_b2_claim_ref, "ISOLATION DEFECT at scale: B's current history entry must reference B's own second (Carol) claim_ref");
 }
 
-// ── Ledger pagination conformance harness (TASK-33 / QA-A, 🟡9) ───────────────
+// ── Ledger pagination conformance harness ──────────────────────────────────
 
 /// Proves `PersistencePort::load_ledger` supports correct page-walking via
 /// `limit` + `from_tx_time` continuation: full coverage, no skips, including a
@@ -4447,11 +4447,11 @@ where
     );
 }
 
-// ── assert_validity / end_fact conformance (TASK-33 E2, SDK_CONTRACT.md §3.1) ──
+// ── assert_validity / end_fact conformance ─────────────────────────────────
 
 /// Cross-adapter conformance for `assert_validity` + `end_fact` resolution.
 ///
-/// Covers TASK-33 test matrix items 1–11 (item 12 — the demo D1 rewrite — lives in the
+/// Covers test matrix items 1–11 (item 12 — the demo rewrite — lives in the
 /// mempill-demo repo, out of scope here).
 #[cfg(any(test, feature = "test-support"))]
 pub fn run_assert_validity_conformance<P>(store: &std::sync::Arc<P>)
@@ -4986,9 +4986,9 @@ where
     assert_eq!(resp.claim_ref, claim, "av12: bound must apply to the resolved incumbent");
 }
 
-/// av13 (DIAG-3 sequence): A open-ended → `end_fact(A, at=e)` → B from `e` open-ended ⇒
+/// av13: A open-ended → `end_fact(A, at=e)` → B from `e` open-ended ⇒
 /// B resolves `CommittedCheap`, belief is B, and history shows [A ended at e, B current].
-/// This is the exact regression `assert_validity` fixes (DIAG_close_incumbent.md §1).
+/// This is the exact regression `assert_validity` fixes.
 #[cfg(any(test, feature = "test-support"))]
 fn av_diag3_sequence_end_fact_then_challenger_is_clean_succession<P>(store: &std::sync::Arc<P>)
 where
@@ -5055,7 +5055,7 @@ where
     assert_eq!(b_entry.status, HistoryEntryStatus::Current, "av13: B must be Current");
 }
 
-/// DIAG-4 finding C (TASK-33-W5-LIB C): a retroactive claim written INTO a window that was
+/// A retroactive claim written INTO a window that was
 /// explicitly ended via `end_fact` must be contested against the ended incumbent, not
 /// committed silently. Diane [2021-04, ∞) end_fact'd at 2025-01; IMPOSTOR [2022-01, 2023-01)
 /// — entirely inside Diane's now-narrowed [2021-04, 2025-01) window — must route to

@@ -355,7 +355,7 @@ async fn i9_heavypath_supersession_commits_atomically() {
     // ── Step 3: assert atomicity — original claim A is retained (I1) ──────────
     // After B11 Contested ingest (oracle absent), claim A must still appear in the audit
     // ledger with ClaimCommitted. It must NOT have a ValidityAsserted entry — the incumbent
-    // is NOT superseded at ingest time (TASK-9-W4-W5-FIX: ingest-time supersession removed).
+    // is NOT superseded at ingest time (ingest-time supersession removed).
     // Supersession only happens at submit_adjudication Affirm time.
     let audit = engine.query_audit(AuditQueryRequest {
         agent_id: agent.clone(),
@@ -373,7 +373,7 @@ async fn i9_heavypath_supersession_commits_atomically() {
          contested ingest (append-only — incumbent retained). Found: {committed_count}"
     );
 
-    // CORRECTED (TASK-9-W4-W5-FIX): ValidityAsserted MUST NOT be present at ingest time.
+    // CORRECTED: ValidityAsserted MUST NOT be present at ingest time.
     // HeavyPath (B11, oracle absent) no longer writes a Bound assertion on the incumbent.
     // This was the root cause of the Contested-surfacing bug: the Bound assertion excluded
     // the incumbent from live_claims, producing NoBelief after Deny and missing-incumbent

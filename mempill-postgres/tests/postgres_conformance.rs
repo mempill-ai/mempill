@@ -118,7 +118,7 @@ fn postgres_granularity_conformance_pg18() {
     });
 }
 
-/// `HistoryEntry` granularity + derived-endpoint conformance suite against postgres:16 (TASK-32).
+/// `HistoryEntry` granularity + derived-endpoint conformance suite against postgres:16.
 ///
 /// Mirrors `sqlite_passes_history_granularity_conformance` — same scenarios, different
 /// adapter. Proves the supersession derived-endpoint rule (successor's `start_granularity`
@@ -130,7 +130,7 @@ fn postgres_history_granularity_conformance_pg16() {
     });
 }
 
-/// `HistoryEntry` granularity + derived-endpoint conformance suite against postgres:18 (TASK-32).
+/// `HistoryEntry` granularity + derived-endpoint conformance suite against postgres:18.
 #[test]
 fn postgres_history_granularity_conformance_pg18() {
     common::with_pg("18", |store| {
@@ -155,7 +155,7 @@ fn postgres_reconcile_incumbent_selection_matches_query_memory_primary_pg18() {
     });
 }
 
-/// TASK-33-W5-LIB-R1 review blocker 1: narrowed-succession incumbent selection must prefer
+/// Narrowed-succession incumbent selection must prefer
 /// the fold's current belief over the widened set's oldest claim (postgres:16).
 #[test]
 fn postgres_narrowed_succession_incumbent_selection_pg16() {
@@ -172,7 +172,7 @@ fn postgres_narrowed_succession_incumbent_selection_pg18() {
     });
 }
 
-/// DIAG_silent_succession §6(b): sweep reverts without superseding; only
+/// A sweep reverts without superseding; only
 /// submit_adjudication(Affirm) may supersede the incumbent (postgres:16).
 #[test]
 fn postgres_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_pg16() {
@@ -189,7 +189,7 @@ fn postgres_sweep_resolves_then_supersession_happens_only_via_submit_adjudicatio
     });
 }
 
-/// TASK-33 E2: `assert_validity` + `end_fact` conformance suite against postgres:16.
+/// `assert_validity` + `end_fact` conformance suite against postgres:16.
 #[test]
 fn postgres_assert_validity_conformance_pg16() {
     common::with_pg("16", |store| {
