@@ -4,7 +4,7 @@ test_valid_at.py — Bi-temporal valid_at query tests.
 Verifies that valid_at (valid-time axis) is accepted, forwarded, and composed
 independently with as_of_tx_time (transaction-time axis).
 
-Engine behavior notes (TASK-33-W5-LIB A, DIAG-4 finding A — updated; these notes
+Engine behavior notes (updated; these notes
 previously claimed "valid_at does not change the result" for a single-claim fold,
 which was true ONLY when the query instant fell inside that claim's window. That
 claim was a symptom of a bug, not a rule — see below):
@@ -162,7 +162,7 @@ class TestValidAtD2Independence:
         # valid_at=2020-06-01 is INSIDE Carol's window (start=2015-01-01, open end) — the
         # single-claim fold is window-tested, and the instant falls inside it, so Carol is
         # returned. This is NOT "valid_at has no effect on a single-claim fold" as a general
-        # rule (TASK-33-W5-LIB A) — see `test_valid_at_before_single_claim_start_returns_no_belief`
+        # rule — see `test_valid_at_before_single_claim_start_returns_no_belief`
         # for the same single-claim fold with an out-of-window instant, which correctly yields
         # NoBelief instead.
         assert resp["belief"]["primary"]["fact"]["value"] == "Carol", (
@@ -234,7 +234,7 @@ class TestValidAtLiveBeliefUnchanged:
     ) -> None:
         """A single live claim, queried at an in-window valid_at instant, returns the same
         value as omitting valid_at — NOT because "valid_at has no effect on a single-claim
-        fold" (see TASK-33-W5-LIB A), but because the instant is genuinely inside the claim's
+        fold", but because the instant is genuinely inside the claim's
         window. `test_valid_at_before_single_claim_start_returns_no_belief` below proves the
         window IS checked: an out-of-window instant on the same single claim yields NoBelief.
         """
@@ -260,7 +260,7 @@ class TestValidAtLiveBeliefUnchanged:
     def test_valid_at_before_single_claim_start_returns_no_belief(
         self, engine: mempill.Engine, agent_id: str
     ) -> None:
-        """TASK-33-W5-LIB A (DIAG-4 finding A, scenario 6): a single live, unbounded claim
+        """Scenario 6: a single live, unbounded claim
         queried at an instant BEFORE its own valid_time.start must return NoBelief — the
         `len() > 1` guard is dropped so even a lone candidate is window-tested.
         """
@@ -281,7 +281,7 @@ class TestValidAtLiveBeliefUnchanged:
     def test_valid_at_reenters_end_fact_bounded_claim(
         self, engine: mempill.Engine, agent_id: str
     ) -> None:
-        """TASK-33-W5-LIB A (DIAG-4 finding A, scenario 1): a claim explicitly ended via
+        """Scenario 1: a claim explicitly ended via
         `end_fact` must still re-enter the valid_at candidate set, narrowed to its real
         believed window — the raw-live-only fold alone would incorrectly return the
         successor (or NoBelief) for an instant that predates the bound.

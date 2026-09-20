@@ -1,9 +1,9 @@
-//! QA temporal succession test — TASK-9-W4-W5-FIX guard + TASK-11 valid-time-aware update.
+//! QA temporal succession test — regression guard + valid-time-aware update.
 //!
 //! PURPOSE: verify that a clean temporal succession (non-overlapping trusted valid-time windows)
 //! is NOT treated as a conflict, AND that genuine conflicts still surface as Contested.
 //!
-//! TASK-11 BEHAVIORAL CHANGE (test1 assertions updated):
+//! BEHAVIORAL CHANGE (test1 assertions updated):
 //! With valid-time-aware conflict classification, two claims with confident NON-overlapping
 //! valid-time windows are now classified as `ConflictType::Succession` → `CommittedCheap`
 //! (not Contested). The read-time fold performs instant-selection: querying as-of NOW returns
@@ -11,7 +11,7 @@
 //! claim for that window.
 //!
 //! TEST 1: Legitimate temporal succession (non-conflicting valid-time windows, both confident)
-//!   - TASK-11: Bob's ingest is now CommittedCheap (succession), NOT Contested.
+//!   - Bob's ingest is now CommittedCheap (succession), NOT Contested.
 //!   - Query as-of NOW → single belief Bob (Resolved, NOT Contested).
 //!   - Query as-of Feb 2022 (in Alice's window) → single belief Alice (Resolved).
 //!   - This is the CORRECT behavior: no silent incumbent-wins — instead, the engine
@@ -31,18 +31,18 @@ use mempill_types::{
     Disposition, ExternalKind, ProvenanceLabel, ValidTime,
 };
 
-// ── TEST 1: Temporal succession with non-overlapping valid-time windows (TASK-11 updated) ──
+// ── TEST 1: Temporal succession with non-overlapping valid-time windows ───────────────────
 //
 // Scenario: "acme" CEO was Alice valid [2020-01-01, 2024-03-01), then Bob valid
 // [2024-03-01, ∞). Both ingested without an oracle. Both windows have confidence=0.9 ≥ 0.7.
 //
-// TASK-11 EXPECTED RESULT: The reconciler recognizes the non-overlapping trusted windows as
+// EXPECTED RESULT: The reconciler recognizes the non-overlapping trusted windows as
 // a `ConflictType::Succession` → CommittedCheap (NOT Contested). The read-time fold performs
 // instant-selection: NOW falls in Bob's window → single belief Bob (Resolved). A past instant
 // in Feb 2022 falls in Alice's window → single belief Alice (Resolved).
 //
-// Pre-TASK-11 behavior (OLD): Bob was Contested because valid-time windows were ignored.
-// Post-TASK-11 behavior (NEW): Bob is CommittedCheap; query selects by window.
+// Old behavior: Bob was Contested because valid-time windows were ignored.
+// New behavior: Bob is CommittedCheap; query selects by window.
 #[tokio::test]
 async fn test1_temporal_succession_non_overlapping_valid_time() {
     let engine = open_default_in_memory().expect("in-memory engine must open");
@@ -115,7 +115,7 @@ async fn test1_temporal_succession_non_overlapping_valid_time() {
         resp_bob.disposition, resp_bob.claim_ref.0
     );
 
-    // TASK-11: Bob's windows are non-overlapping with Alice's + both confident → Succession.
+    // Bob's windows are non-overlapping with Alice's + both confident → Succession.
     // Gate routes Succession → CheapPath / CommittedCheap (NOT Contested, NOT HeavyPath).
     assert_eq!(
         resp_bob.disposition,
@@ -139,7 +139,7 @@ async fn test1_temporal_succession_non_overlapping_valid_time() {
         qr_now.belief.alternatives.len(),
     );
 
-    // TASK-11 CRITICAL ASSERTION: fold instant-selection → single live claim Bob.
+    // CRITICAL ASSERTION: fold instant-selection → single live claim Bob.
     assert_eq!(
         qr_now.belief.status, BeliefStatus::Resolved,
         "TEST1 (TASK-11): instant-selection at NOW MUST yield Resolved (Bob's window). Got {:?}",

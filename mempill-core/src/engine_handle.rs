@@ -270,9 +270,8 @@ where
             .map_err(|e| MemError::SpawnBlocking { reason: e.to_string() })?
     }
 
-    /// Write path: bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1
-    /// `assert_validity`, TASK-33 E2). The host-facing, oracle-free path to
-    /// `Superseded`/`Invalidated`/`Reinstated` (I11).
+    /// Write path: bound or reopen a claim's valid-time window (`assert_validity`).
+    /// The host-facing, oracle-free path to `Superseded`/`Invalidated`/`Reinstated` (I11).
     ///
     /// Locking order matches `ingest_claim`: `store_write_lock` first (conditional), then
     /// the per-agent lock. Clock read ONCE here (DETERMINISM).

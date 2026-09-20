@@ -1,12 +1,12 @@
 """
-test_end_fact.py — Tests for assert_validity (raw) and end_fact (ergonomic), TASK-33 E2.
+test_end_fact.py — Tests for assert_validity (raw) and end_fact (ergonomic).
 
 Covers:
   - engine.assert_validity() raw dict passthrough: bound, idempotent no-op, AlreadyBound,
     IncoherentTemporalWindow, InsufficientProvenanceForOverturn (ModelDerived rejected).
   - engine.resolve_live_claim_for_line() raw resolution: empty / single / ambiguous.
   - end_fact() ergonomic sugar: resolves and bounds, never guesses on an ambiguous line,
-    raises NotFoundError on an empty line, and the DIAG-3 regression sequence
+    raises NotFoundError on an empty line, and the fixed regression sequence
     (open incumbent -> end_fact -> non-overlapping challenger -> clean CommittedCheap
     succession, not Contested).
 """
@@ -203,7 +203,7 @@ class TestEndFact:
         assert result.value == "NYC"
 
 
-# ── end_fact date precision (TASK-33-W5-LIB-R2, F2) ────────────────────────────
+# ── end_fact date precision ─────────────────────────────────────────────────
 
 class TestEndFactGranularity:
     """`end_fact(at=...)` must preserve the PRECISION of the caller's date string.

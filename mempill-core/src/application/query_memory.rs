@@ -92,7 +92,7 @@ where
             &latest_disposition,
         );
 
-        // TASK-33-W5-LIB A (DIAG-4 finding A): when the caller supplies an explicit `valid_at`,
+        // When the caller supplies an explicit `valid_at`,
         // re-derive the live set from `fold.all_claims` so a claim excluded only by an active
         // Bound (a succession/host/Affirm closure) re-enters, narrowed to its real believed
         // window — `fold`'s own step 4 above only ever sees the raw-live set. Zero extra DB

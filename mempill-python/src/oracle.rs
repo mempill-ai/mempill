@@ -406,8 +406,8 @@ impl PyOracleEngine {
         Ok(list.into_any())
     }
 
-    /// Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1 `assert_validity`,
-    /// TASK-33 E2). Identical contract to `PyEngine.assert_validity`.
+    /// Bound or reopen a claim's valid-time window (`assert_validity`). Identical
+    /// contract to `PyEngine.assert_validity`.
     #[pyo3(signature = (request))]
     fn assert_validity<'py>(&self, py: Python<'py>, request: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let req: AssertValidityRequest = pythonize::depythonize(request)

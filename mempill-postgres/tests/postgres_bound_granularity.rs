@@ -1,5 +1,5 @@
 //! postgres_bound_granularity — Postgres store-level round-trip + legacy-row tests for
-//! `AssertionKind::Bound::bound_at_granularity` (TASK-33-W5-LIB-R2, DIAG-5).
+//! `AssertionKind::Bound::bound_at_granularity`.
 //!
 //! Requires Docker; panics (does not skip) if testcontainers cannot start postgres.
 //! Run with:

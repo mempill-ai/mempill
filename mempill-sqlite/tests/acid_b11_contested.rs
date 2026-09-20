@@ -104,7 +104,7 @@ async fn b11_oracle_absent_external_contradiction_resolves_to_contested() {
         query_resp.belief.status
     );
 
-    // STRENGTHENED (TASK-9-W4-W5-FIX): BOTH values must surface in the Contested projection,
+    // STRENGTHENED: BOTH values must surface in the Contested projection,
     // not just one. The previous assertion only checked that at least one was visible — this
     // masked the bug where the incumbent was excluded (only challenger surfaced).
     let all_surfaced_refs: Vec<_> = query_resp.belief.primary

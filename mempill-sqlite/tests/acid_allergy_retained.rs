@@ -108,7 +108,7 @@ async fn acid_allergy_first_claim_committed_cheap() {
 
 /// B11 oracle-absent contested ingest: BOTH claims stay live, incumbent is NEVER superseded at ingest.
 ///
-/// TASK-9-W4-W5-FIX: The old behavior was to run supersession::execute at ingest time for HeavyPath,
+/// The old behavior was to run supersession::execute at ingest time for HeavyPath,
 /// writing a ValidityAssertion::Bound + Superseded ledger entry on the incumbent. This was incorrect:
 /// it silently excluded the incumbent before the oracle could respond (or in oracle-absent cases,
 /// before the Contested state could be properly surfaced with BOTH values).
@@ -144,7 +144,7 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
     let original_ref = original.claim_ref.clone();
 
     // Second ingest with a conflicting value: oracle absent → B11(a) → Contested.
-    // Fix (TASK-9-W4-W5-FIX): incumbent is NOT superseded at ingest time.
+    // Fix: incumbent is NOT superseded at ingest time.
     let challenger_resp = engine
         .ingest_claim(IngestClaimRequest {
             agent_id: agent.clone(),
@@ -194,7 +194,7 @@ async fn acid_allergy_supersession_succeeds_and_incumbent_retained() {
          after B11 contested ingest (append-only). Found: {committed}"
     );
 
-    // CORRECTED ASSERTION (TASK-9-W4-W5-FIX): the incumbent must NOT have a ValidityAsserted
+    // CORRECTED ASSERTION: the incumbent must NOT have a ValidityAsserted
     // (Bound) entry in the audit trail after ingest. Supersession of the incumbent only happens
     // at submit_adjudication time (Affirm verdict). At ingest time (oracle absent / B11),
     // the incumbent remains CommittedCheap and live.
@@ -317,7 +317,7 @@ async fn acid_allergy_three_distinct_first_ingests_all_committed() {
 
 /// I1 non-destruction audit trail: after B11 contested ingest (oracle absent), both claims live.
 ///
-/// TASK-9-W4-W5-FIX: After the fix, a conflicting ingest with no oracle produces B11(a) Contested.
+/// After the fix, a conflicting ingest with no oracle produces B11(a) Contested.
 /// The incumbent is NEVER superseded at ingest time. Only ClaimCommitted appears in the audit trail
 /// for the incumbent. No ValidityAsserted (Bound) entry exists until an Affirm verdict is submitted.
 /// The belief is Contested with BOTH the incumbent AND challenger values visible.
@@ -395,7 +395,7 @@ async fn acid_allergy_audit_shows_incumbent_retained_after_supersession() {
         "I1: original penicillin-allergy claim MUST have exactly 1 ClaimCommitted audit entry. Found: {committed}"
     );
 
-    // CORRECTED (TASK-9-W4-W5-FIX): no ValidityAsserted at ingest time for oracle-absent B11.
+    // CORRECTED: no ValidityAsserted at ingest time for oracle-absent B11.
     // The incumbent is retained as CommittedCheap (live) — no Bound assertion is written.
     // Only an Affirm verdict at submit_adjudication time would produce a ValidityAsserted entry.
     let validity_asserted = audit

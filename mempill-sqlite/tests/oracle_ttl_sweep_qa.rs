@@ -1,4 +1,4 @@
-//! W6 TTL/sweep/orphan-recovery QA tests (TASK-9 W6).
+//! TTL/sweep/orphan-recovery QA tests.
 //!
 //! These tests verify engine-enforced TTL expiry, the sweep routine, and orphan recovery.
 //! All assertions go through `query_memory` to verify SURFACED BELIEF (Contested[both])

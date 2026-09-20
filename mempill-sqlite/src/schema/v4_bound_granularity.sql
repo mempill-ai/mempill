@@ -1,8 +1,8 @@
 -- schema/v4_bound_granularity.sql
 -- mempill-sqlite v4 migration: add bound_at_granularity to validity_assertions.
 --
--- Persists the display-only precision hint for a Bound assertion's `bound_at`
--- (TASK-33-W5-LIB-R2, DIAG-5): an Affirm sets this from the winning challenger's
+-- Persists the display-only precision hint for a Bound assertion's `bound_at`:
+-- an Affirm sets this from the winning challenger's
 -- start_granularity; assert_validity/end_fact set it from the parsed date's
 -- granularity; Deny and legacy rows leave it NULL.
 --

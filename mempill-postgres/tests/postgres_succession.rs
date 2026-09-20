@@ -1,4 +1,4 @@
-//! TASK-11 (Resolution #3): Postgres cross-adapter succession + TIMESTAMPTZ boundary precision.
+//! Postgres cross-adapter succession + TIMESTAMPTZ boundary precision.
 //!
 //! Verifies that:
 //!   1. Temporal succession (non-overlapping trusted valid-time windows) works on real PG16+PG18.

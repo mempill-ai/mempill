@@ -1,4 +1,4 @@
-//! TASK-33 / QA-A (🔴5): Postgres durable-reopen granularity proof.
+//! Postgres durable-reopen granularity proof.
 //!
 //! Ingests month/year-granular facts, DROPS the `PostgresPersistenceStore` handle
 //! entirely, then opens a NEW `PostgresPersistenceStore` on the SAME database and

@@ -1,4 +1,4 @@
-//! End-to-end oracle resolution tests (TASK-9 W4+W5, ORACLE_DESIGN §C.4).
+//! End-to-end oracle resolution tests.
 //!
 //! Uses a real `EngineHandle::new_with_pending_store` wired with:
 //!   - `SqlitePersistenceStore` (in-memory)

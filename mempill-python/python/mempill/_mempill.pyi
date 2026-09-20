@@ -250,7 +250,7 @@ class PyEngine:
         ...
 
     def assert_validity(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1, TASK-33 E2).
+        """Bound or reopen a claim's valid-time window.
 
         The host-facing, oracle-free path to Superseded/Reinstated. Prefer
         ``mempill.ergonomic.end_fact()`` unless you already hold the target claim_ref.

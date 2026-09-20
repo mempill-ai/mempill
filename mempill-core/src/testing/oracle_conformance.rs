@@ -210,14 +210,14 @@ pub async fn scenario_affirm_challenger_wins_with_handle<P, O, V>(
 }
 
 // ── Scenario 1b: Affirm bounds the incumbent at the winning challenger's valid-time
-//    start (TASK-33-W5-LIB B, DIAG-4 finding B) ──────────────────────────────
+//    start ──────────────────────────────────────────────────────────────────
 
 /// Diane open from 2021-04; Joan from 2024-09 contests; Affirm Joan.
 ///
-/// Verifies (DIAG-4 finding B / scenario 3):
+/// Verifies (scenario 3):
 ///   - `query_history`: Diane's `valid_until` == Joan's `valid_from` (2024-09-01), NOT the
 ///     adjudication's transaction time ("today") — and no overlapping pair (`contested=false`).
-///   - `query_memory(valid_at=2022-06)` → Diane (the bound-narrowed reentry, TASK-33-W5-LIB A).
+///   - `query_memory(valid_at=2022-06)` → Diane (the bound-narrowed reentry).
 ///
 /// Callers pass `handle_id` matching the UUID used when building the engine's `TestOracle`.
 #[cfg(any(test, feature = "test-support"))]
@@ -315,7 +315,7 @@ pub async fn scenario_affirm_bounds_incumbent_at_challenger_valid_time_start_wit
         "conformance[affirm-vt]: joan must not be flagged contested (no overlapping pair)");
     assert_eq!(joan_entry.status, HistoryEntryStatus::Current, "conformance[affirm-vt]: joan must be Current");
 
-    // query_memory(valid_at=2022-06) → diane (bound-narrowed reentry, TASK-33-W5-LIB A).
+    // query_memory(valid_at=2022-06) → diane (bound-narrowed reentry).
     let valid_at_2022 = chrono::Utc.with_ymd_and_hms(2022, 6, 1, 0, 0, 0).unwrap();
     let qr = engine.query_memory(QueryMemoryRequest {
         agent_id: agent.clone(),

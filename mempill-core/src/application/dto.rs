@@ -104,7 +104,7 @@ pub struct ReconcileResponse {
     pub oracle_escalations: u32,
 }
 
-// ── ASSERT VALIDITY (SDK_CONTRACT.md §3.1) ──────────────────────────────────
+// ── ASSERT VALIDITY ──────────────────────────────────────────────────────────
 
 /// The validity assertion the host wants to apply to `target` — bound (close) or reopen.
 ///
@@ -125,7 +125,7 @@ pub enum ValidityAssertionInput {
         /// The display precision `at` was supplied at (e.g. `Month` for `"2024-09"`), if
         /// known. `None` for callers that only have a bare instant (raw `assert_validity`
         /// JSON) — honest absence, not a fabricated `Instant`. `#[serde(default)]` so
-        /// pre-existing callers that never sent this field keep deserializing (TASK-33-W5-LIB-R2).
+        /// pre-existing callers that never sent this field keep deserializing.
         #[serde(default)]
         at_granularity: Option<DateGranularity>,
     },
@@ -136,7 +136,7 @@ pub enum ValidityAssertionInput {
 }
 
 /// Request for `assert_validity` — the host-facing, oracle-free path to
-/// `Superseded`/`Invalidated`/`Reinstated` (SDK_CONTRACT.md §3.1, I11).
+/// `Superseded`/`Invalidated`/`Reinstated` (I11).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AssertValidityRequest {
     /// The agent that owns `target` and is submitting this assertion.

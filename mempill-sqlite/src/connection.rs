@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(path, dir.path().join("agent_Agent_123-test.db"));
     }
 
-    // ── TASK-33 / QA-A (🟡7): open_for_agent edges ──────────────────────────────
+    // ── open_for_agent edges ───────────────────────────────────────────────────
 
     /// (c) A whitespace-only agent_id must be rejected — it is not
     /// `[A-Za-z0-9_-]`, so it is already caught by the existing character-class
