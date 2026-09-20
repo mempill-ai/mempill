@@ -107,8 +107,8 @@ fn run_01_affirm(conn_str: &str) {
     });
 }
 
-/// TASK-33-W5-LIB B: Affirm bounds the incumbent at the winning challenger's valid-time
-/// start, not tx_time — Diane/Joan scenario (DIAG-4 finding B).
+/// Affirm bounds the incumbent at the winning challenger's valid-time
+/// start, not tx_time — Diane/Joan scenario.
 fn run_01b_affirm_bounds_incumbent_at_challenger_valid_time_start(conn_str: &str) {
     let conn_str = conn_str.to_owned();
     run_in_thread(move || {

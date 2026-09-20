@@ -129,7 +129,7 @@ pub fn enrich_query_memory(resp: QueryMemoryResponse) -> EnrichedQueryMemoryResp
     }
 }
 
-// ── query_history enrichment (TASK-32) ──────────────────────────────────────
+// ── query_history enrichment ─────────────────────────────────────────────────
 
 /// A `QueryHistoryResponse` augmented with per-entry display strings.
 ///

@@ -368,7 +368,7 @@ async def end_fact(
     ctx: Context = None,
 ) -> dict[str, Any]:
     """End an open-ended fact: explicitly close the incumbent claim on (subject,
-    predicate) as of `at` (SDK_CONTRACT.md §3.1 `assert_validity`, TASK-33 E2).
+    predicate) as of `at` (the SDK contract's `assert_validity` op).
 
     This is the correct way to say "X stopped being true at time T" — it bounds the
     incumbent claim in place (the original row is never touched or duplicated) so a

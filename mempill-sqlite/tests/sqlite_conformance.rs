@@ -56,7 +56,7 @@ fn sqlite_passes_granularity_conformance() {
     run_granularity_conformance(&store);
 }
 
-/// `HistoryEntry` granularity + derived-endpoint conformance suite against SQLite (TASK-32).
+/// `HistoryEntry` granularity + derived-endpoint conformance suite against SQLite.
 ///
 /// Proves `valid_from_granularity` / `valid_until_granularity` round-trip honestly through
 /// `QueryHistoryUseCase`, including the supersession case where `valid_until_granularity`
@@ -77,7 +77,7 @@ fn sqlite_reconcile_incumbent_selection_matches_query_memory_primary() {
     run_reconcile_incumbent_selection_matches_query_memory_primary_conformance(&store);
 }
 
-/// TASK-33-W5-LIB-R1 review blocker 1: narrowed-succession incumbent selection must prefer
+/// Narrowed-succession incumbent selection must prefer
 /// the fold's current belief over the widened set's oldest claim (SQLite).
 #[test]
 fn sqlite_narrowed_succession_incumbent_selection() {
@@ -95,7 +95,7 @@ fn sqlite_sweep_resolves_then_supersession_happens_only_via_submit_adjudication(
     run_sweep_resolves_then_supersession_happens_only_via_submit_adjudication_conformance(&store);
 }
 
-/// TASK-33 E2: `assert_validity` + `end_fact` conformance suite against SQLite.
+/// `assert_validity` + `end_fact` conformance suite against SQLite.
 #[test]
 fn sqlite_passes_assert_validity_conformance() {
     let conn = open_in_memory().expect("in-memory SQLite connection must open");

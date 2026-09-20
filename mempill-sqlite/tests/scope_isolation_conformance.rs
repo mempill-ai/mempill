@@ -1,4 +1,4 @@
-//! TASK-33 / QA-A: cross-agent scope-isolation + scale-tenancy + ledger-pagination
+//! Cross-agent scope-isolation + scale-tenancy + ledger-pagination
 //! conformance suite against the SQLite adapter (in-memory).
 //!
 //! `run_agent_isolation_conformance` proves that two agents (A, B) sharing ONE store

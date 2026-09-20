@@ -259,7 +259,7 @@ class TestOracleEngineQueryHistory:
         assert h.entries[0].status == "Current"
 
 
-# ── TASK-32 — granularity / honest display fields ────────────────────────────
+# ── Granularity / honest display fields ───────────────────────────────────────
 #
 # NOTE: the pure-Python `remember()` ergonomic helper does not yet propagate
 # start_granularity/end_granularity on write (a pre-existing, separately-tracked

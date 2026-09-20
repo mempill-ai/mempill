@@ -32,7 +32,7 @@ pub enum AssertionKind {
     Bound {
         /// The UTC instant at which the claim's validity ends.
         bound_at: chrono::DateTime<chrono::Utc>,
-        /// The display precision `bound_at` was supplied at (TASK-33-W5-LIB-R2, DIAG-5):
+        /// The display precision `bound_at` was supplied at:
         /// an Affirm sets this from the winning challenger's `start_granularity`; a Deny
         /// (tx-time fallback) and `assert_validity`/`end_fact` populate it from the parsed
         /// date's granularity, when known. `None` for legacy rows written before this field
@@ -84,7 +84,7 @@ mod tests {
         assert_ne!(bound, reopen);
     }
 
-    /// TASK-33-W5-LIB-R2: a `Bound` row written BEFORE `bound_at_granularity` existed (no key
+    /// A `Bound` row written BEFORE `bound_at_granularity` existed (no key
     /// in the JSON at all) must still deserialize — `#[serde(default)]` makes the field
     /// optional on read, so old JSON blobs (and, by the same mechanism, old adapter rows)
     /// upgrade cleanly to `None` rather than failing to parse.

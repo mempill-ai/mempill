@@ -6,8 +6,7 @@ Tests:
   1. query_memory with valid_at accepted (no error, returns a belief).
   2. query_memory with valid_at + as_of_tx_time both set (D2 independence).
   3. query_memory without valid_at still works (backward-compatible).
-  4. query_memory with valid_at re-enters a claim closed by the end_fact tool
-     (TASK-33-W5-LIB A, DIAG-4 finding A).
+  4. query_memory with valid_at re-enters a claim closed by the end_fact tool.
 """
 
 from __future__ import annotations
@@ -142,7 +141,7 @@ async def test_query_memory_without_valid_at_still_works(agent_id: str) -> None:
 
 @pytest.mark.anyio
 async def test_query_memory_valid_at_reenters_end_fact_bounded_claim(agent_id: str) -> None:
-    """TASK-33-W5-LIB A (DIAG-4 finding A): a claim closed via the `end_fact` tool must
+    """A claim closed via the `end_fact` tool must
     still re-enter the valid_at candidate set for an in-window instant, narrowed to its
     real believed window — not silently replaced by the successor or dropped to NoBelief.
     """

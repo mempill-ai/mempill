@@ -58,8 +58,7 @@ Version headings are dated at publish time. A version with no date and the
   ```
 
   This is a correctness benchmark only — no timing/latency numbers are captured
-  or published. See `tasks/25-storage-and-roadmap-merged/AS_OF_CORRECTNESS_BENCHMARK.md`
-  for the full results table and results published on the
+  or published. See the full results table on the
   [documentation site](https://mempill.netlify.app/concepts/benchmark-results/).
 - **Date granularity on `query_history` / `history()`.** `HistoryEntry` gained two
   additive fields, `valid_from_granularity` and `valid_until_granularity`

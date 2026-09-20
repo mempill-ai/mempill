@@ -817,7 +817,7 @@ pub async fn history(
     Ok(History { entries: resp.entries })
 }
 
-// ── assert_validity / end_fact (SDK_CONTRACT.md §3.1, TASK-33 E2) ──────────────
+// ── assert_validity / end_fact ─────────────────────────────────────────────────
 
 /// Options for [`end_fact`]. Defaults mirror [`RememberOptions`]'s host-assertion defaults.
 #[derive(Debug, Clone, Default)]
@@ -865,7 +865,7 @@ pub struct EndFactReceipt {
     pub no_op: bool,
 }
 
-/// Typed passthrough to the engine's `assert_validity` op (SDK_CONTRACT.md §3.1) — bound or
+/// Typed passthrough to the engine's `assert_validity` op — bound or
 /// reopen a claim's valid-time window by its `ClaimRef`.
 ///
 /// Most callers should prefer [`end_fact`], which resolves `(subject, predicate)` to a
@@ -935,7 +935,7 @@ pub async fn end_fact(
     let subject = subject.into();
     let predicate = predicate.into();
 
-    // TASK-33-W5-LIB-R2 (DIAG-5): use the granularity-aware parse (not the discarding
+    // Use the granularity-aware parse (not the discarding
     // `parse_lenient_date` shim) so the closing bound honestly carries the precision the
     // caller supplied (`"2024-09"` -> `Month`), not a fabricated day/instant precision.
     let at_str = at.into();
@@ -1491,7 +1491,7 @@ mod tests {
         assert!(h.current().is_none());
     }
 
-    // ── TASK-32 — HistoryEntry granularity + derived-endpoint rule ────────────
+    // ── HistoryEntry granularity + derived-endpoint rule ───────────────────────
 
     /// End-to-end: history() entries carry the claim's own `valid_from_granularity`
     /// verbatim (Month precision survives ingest → persist → fold → HistoryEntry).

@@ -106,7 +106,7 @@ where
             .load_ledger_for_claims(&req.agent_id, &all_claim_refs, None)
             .map_err(|e| MemError::Persistence { source: Box::new(e) })?;
         let latest_disposition = build_latest_disposition_map(&all_ledger);
-        // TASK-33-W5-LIB D: same ledger slice, zero extra reads — see build_conflict_candidate_claims.
+        // Same ledger slice, zero extra reads — see build_conflict_candidate_claims.
         let denied_via_adjudication =
             crate::application::ingest_claim::build_denied_via_adjudication_set(&all_ledger);
 
@@ -127,7 +127,7 @@ where
             );
 
             // N-wide succession/conflict check (fixes the silent chain-overlap defect, and
-            // TASK-33-W5-LIB D: mirrors ingest_claim.rs — a retroactive claim over an
+            // Mirrors ingest_claim.rs — a retroactive claim over an
             // explicitly-closed historical window must be contested, not committed silently).
             // Each candidate is compared against EVERY raw-live claim on this subject-line PLUS
             // every claim closed by an active Bound, narrowed to its real believed window — see
@@ -142,12 +142,12 @@ where
             for cs in &fold.live_claims {
                 let candidate = &cs.claim;
 
-                // Per-candidate incumbent (DIAG_silent_succession §6(b)): NEVER feed the
+                // Per-candidate incumbent: NEVER feed the
                 // candidate itself as `incumbent` — `classify_conflict`'s step-3 same-value
                 // check would then trivially match (identical claim), returning
                 // NoConflict/CheapPath for a claim that is genuinely part of a contested line.
                 //
-                // TASK-33-W5-LIB-R1 (review blocker 1, mirrors the ingest_claim.rs fix): prefer
+                // Mirrors the ingest_claim.rs fix: prefer
                 // the first OTHER claim in the NARROWED `fold.live_claims` (the fold's
                 // step-4-selected current belief) over `all_live_claims` — the latter is the
                 // WIDENED set, still sorted ascending by canonical ordering key, so its
@@ -156,7 +156,7 @@ where
                 // shortcut wave through a candidate whose value matches a STALE claim.
                 //
                 // Fall back to the first OTHER claim in the WIDENED `all_live_claims` set
-                // (TASK-33-W5-LIB D) only when `fold.live_claims` has no OTHER member —
+                // only when `fold.live_claims` has no OTHER member —
                 // drawing from `fold.live_claims` alone in that case would present
                 // `incumbent = None` whenever every OTHER claim on the line is bound-excluded,
                 // short-circuiting reconciler step 1 to NoConflict before the N-wide overlap

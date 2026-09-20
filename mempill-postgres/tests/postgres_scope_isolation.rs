@@ -1,4 +1,4 @@
-//! TASK-33 / QA-A: cross-agent scope-isolation + scale-tenancy + ledger-pagination
+//! Cross-agent scope-isolation + scale-tenancy + ledger-pagination
 //! conformance suite against the Postgres adapter.
 //!
 //! Mirrors `mempill-sqlite/tests/scope_isolation_conformance.rs` exactly — same

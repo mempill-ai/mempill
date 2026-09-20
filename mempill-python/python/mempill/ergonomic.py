@@ -615,7 +615,7 @@ def history(
     return History(entries)
 
 
-# ── assert_validity / end_fact (SDK_CONTRACT.md §3.1, TASK-33 E2) ──────────────
+# ── assert_validity / end_fact ─────────────────────────────────────────────────
 
 @dataclass
 class EndFactReceipt:

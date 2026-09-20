@@ -3,7 +3,7 @@
 //! These tests run against real Postgres containers (PG16 + PG18) via testcontainers and
 //! assert on `query_memory` surfaced beliefs after each oracle verdict.
 //!
-//! # Lifecycle verified (TASK-9 W7-FIX — full resolution loop on Postgres)
+//! # Lifecycle verified (full resolution loop on Postgres)
 //!
 //! 1. Construct engine via `open_postgres_with_oracle(conn, oracle, None, config)`.
 //! 2. Ingest incumbent → CommittedCheap.

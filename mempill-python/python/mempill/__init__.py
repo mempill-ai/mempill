@@ -201,7 +201,7 @@ __all__ = [
     "history",
     "History",
     "HistoryEntry",
-    # assert_validity / end_fact API (TASK-33 E2)
+    # assert_validity / end_fact API
     "end_fact",
     "EndFactReceipt",
 ]

@@ -125,7 +125,7 @@ Returns: `{"entries": [LedgerEntry, ...]}`
 ### `end_fact`
 
 End an open-ended fact: explicitly close the incumbent claim on a (subject, predicate)
-line as of a given instant (SDK_CONTRACT.md §3.1 `assert_validity`). This is the correct
+line as of a given instant (the SDK contract's `assert_validity` op). This is the correct
 way to say "X stopped being true at time T" — it bounds the incumbent claim in place (the
 original row is never touched or duplicated), so a later non-overlapping claim on the
 same line folds to a clean succession with no conflict and no adjudication needed.

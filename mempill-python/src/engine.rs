@@ -168,8 +168,8 @@ impl PyEngine {
         Ok(pythonize(py, &resp.entries)?)
     }
 
-    /// Bound or reopen a claim's valid-time window (SDK_CONTRACT.md §3.1 `assert_validity`,
-    /// TASK-33 E2) — the host-facing, oracle-free path to `Superseded`/`Reinstated`.
+    /// Bound or reopen a claim's valid-time window (`assert_validity`) — the
+    /// host-facing, oracle-free path to `Superseded`/`Reinstated`.
     ///
     /// `request` must be a dict with:
     ///   - `agent_id`  — str

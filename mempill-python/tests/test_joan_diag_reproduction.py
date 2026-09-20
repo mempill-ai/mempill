@@ -1,11 +1,11 @@
 """
-test_joan_diag_reproduction.py — TASK-33-W3-LIB: end-to-end Python reproduction of the
-Joan/Linda/John/Sam/Diane CEO-succession shape from DIAG_joan_history.md §1 and
-DIAG_silent_succession.md §3 (the acme-corp / ceo real-demo defect that motivated this task).
+test_joan_diag_reproduction.py — End-to-end Python reproduction of the
+Joan/Linda/John/Sam/Diane CEO-succession shape from a real-world acme-corp / ceo
+demo defect that motivated this test.
 
-Scope note: the ORIGINAL demo ledger (DIAG_joan_history.md §1) is a real production trace
+Scope note: the ORIGINAL demo ledger is a real production trace
 spanning two sessions and containing entries produced by the OLD (pre-fix) engine's silent
-supersession bug (DIAG_silent_succession (ii)) plus duplicate near-identical re-assertions
+supersession bug plus duplicate near-identical re-assertions
 that are demo-tool artifacts, not engine behavior. This test reproduces the SAME people,
 the SAME subject/predicate ("acme-corp"/"ceo"), and the SAME valid-time windows/precisions
 (day/day/day/month/month for Diane/Linda/John/Sam/Joan respectively, matching the ground-
