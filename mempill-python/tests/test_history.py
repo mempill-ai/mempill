@@ -261,13 +261,13 @@ class TestOracleEngineQueryHistory:
 
 # ── Granularity / honest display fields ───────────────────────────────────────
 #
-# NOTE: the pure-Python `remember()` ergonomic helper does not yet propagate
-# start_granularity/end_granularity on write (a pre-existing, separately-tracked
-# gap in `RememberOptions`/`_to_rfc3339` — see ergonomic.py's `_to_rfc3339`
-# docstring). These tests use the raw `engine.ingest_claim()` dict path (which
-# DOES support start_granularity/end_granularity verbatim, mirroring
-# test_granularity.py's `_ingest_with_granularity` helper) so the read-path
-# (`history()`) granularity plumbing under test here is exercised honestly.
+# NOTE: the pure-Python `remember()` ergonomic helper DOES propagate
+# start_granularity/end_granularity on write (see test_remember_granularity.py).
+# These tests instead use the raw `engine.ingest_claim()` dict path (which
+# accepts start_granularity/end_granularity verbatim, mirroring
+# test_granularity.py's `_ingest_with_granularity` helper) for direct control
+# over each claim's precision, so the read-path (`history()`) granularity
+# plumbing under test here is exercised in isolation.
 
 def _ingest_with_granularity(
     engine: mempill.Engine,

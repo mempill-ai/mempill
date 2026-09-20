@@ -16,9 +16,10 @@ mixed-history shape named in the task (real supersession + a genuinely pending C
 overlap coexisting on the same subject-line).
 
 Uses the RAW `engine.ingest_claim()` dict path (not the `remember()` ergonomic helper) so
-`start_granularity` / `end_granularity` are set explicitly — `remember()` does not yet
-propagate granularity on write (a pre-existing, separately-tracked gap noted in
-test_history.py's `_ingest_with_granularity` helper, which this test mirrors).
+`start_granularity` / `end_granularity` are set explicitly for this reproduction's
+day/day/day/month/month precisions — `remember()` also propagates granularity on write
+(see test_remember_granularity.py), but this test mirrors test_history.py's
+`_ingest_with_granularity` helper for direct control over each claim's precision.
 
 Deliberate ordering choice: John is ingested BEFORE Joan (Linda -> John forms a clean
 non-overlapping succession first; Joan then arrives and overlaps Linda specifically). This
