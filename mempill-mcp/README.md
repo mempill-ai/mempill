@@ -55,15 +55,6 @@ Parameters:
 - `provenance` (str or dict) — see below
 - `cardinality` (str, default `"Functional"`) — `"Functional"` | `"SetValued"` | `"Unknown"`
 - `confidence_value` (float, default 0.9) — value confidence in [0, 1]
-- `confidence_valid_time` (float, default 0.9) — **not persisted; currently a no-op.**
-  The mempill storage layer (SQLite and Postgres both) keeps only a single
-  `valid_time_confidence` column per claim, and that column is populated exclusively
-  from `valid_time["valid_time_confidence"]` (see below). This parameter's value is
-  forwarded into the ingest request but is silently dropped by both storage backends —
-  it is never written, never read back, and has no effect on gating, succession, or the
-  returned belief. **Do not rely on this parameter for anything; it will be removed or
-  wired up in a future release.** The single source of truth for valid-time confidence
-  is `valid_time["valid_time_confidence"]`.
 - `criticality` (str, default `"Low"`) — `"Low"` | `"Medium"` | `"High"` | `"Critical"`
 - `valid_time` (dict, optional) — `{"start"?: ISO-8601, "end"?: ISO-8601, "valid_time_confidence": float, "start_granularity"?: str, "end_granularity"?: str}`.
   `start` / `end` are optional (omit for unknown/open-ended). `valid_time_confidence`
