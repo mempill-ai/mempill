@@ -31,7 +31,7 @@ chrono        = { workspace = true }
 thiserror     = { workspace = true }
 
 [dev-dependencies]
-testcontainers-modules = { version = "0.15", features = ["postgres", "blocking", "watchdog"] }
+testcontainers-modules = { version = "0.15", features = ["postgres", "blocking"] }
 mempill-core = { path = "../mempill-core", version = "0.4.0", features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
