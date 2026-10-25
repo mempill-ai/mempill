@@ -491,8 +491,9 @@ cargo test -p mempill-postgres --features postgres-integration       # the 86 PG
 cargo test --workspace --features mempill-postgres/postgres-integration   # full verification (everything)
 ```
 
-testcontainers' `watchdog` is enabled, so an interrupted run (Ctrl-C / SIGTERM) cleans up its
-own containers. As a fallback (e.g. after a hard `kill -9`), sweep any strays with:
+An interrupted run (Ctrl-C / SIGTERM) does not remove its `postgres:<tag>` containers
+automatically (the testcontainers `watchdog` is not enabled); normal completion still removes them.
+To sweep leftovers, run:
 
 ```sh
 docker rm -f $(docker ps -aq --filter 'label=org.testcontainers.managed-by=testcontainers')
