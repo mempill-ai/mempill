@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mempill_postgres::PostgresPersistenceStore;
+use mempill_postgres::{PostgresPersistenceStore, PostgresStoreError};
 use postgres::{Client, NoTls};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::SyncRunner;
@@ -41,12 +41,39 @@ fn connect_with_retry(conn_str: &str, tag: &str) -> Arc<PostgresPersistenceStore
         }
     }
 
-    Arc::new(PostgresPersistenceStore::new(conn_str).unwrap_or_else(|e| {
-        panic!(
-            "PostgresPersistenceStore::new failed for postgres:{tag} — \
-             migration or pool error: {e}"
-        )
-    }))
+    Arc::new(store_with_retry(conn_str, tag))
+}
+
+/// Construct the store, retrying only on r2d2 pool-build timeouts.
+///
+/// `PostgresPersistenceStore::new` builds its pool eagerly, so every connection must
+/// be established within the pool's connection timeout. Under Docker Desktop load this
+/// can miss even after the probe succeeded. Migrations are idempotent (refinery), so
+/// re-running `new` is safe. Any other error panics immediately.
+///
+/// Panics with the last error and attempt count if the deadline passes.
+fn store_with_retry(conn_str: &str, tag: &str) -> PostgresPersistenceStore {
+    let deadline = Instant::now() + READY_DEADLINE;
+    let mut attempts: u32 = 0;
+    loop {
+        attempts += 1;
+        match PostgresPersistenceStore::new(conn_str) {
+            Ok(store) => return store,
+            Err(e @ PostgresStoreError::Pool(_)) => {
+                if Instant::now() >= deadline {
+                    panic!(
+                        "PostgresPersistenceStore::new failed for postgres:{tag} — \
+                         pool error after {attempts} attempts within {READY_DEADLINE:?}: {e}"
+                    );
+                }
+                thread::sleep(READY_BACKOFF);
+            }
+            Err(e) => panic!(
+                "PostgresPersistenceStore::new failed for postgres:{tag} — \
+                 migration or pool error: {e}"
+            ),
+        }
+    }
 }
 
 /// Read the host port mapped to 5432, waiting for Docker to publish it.

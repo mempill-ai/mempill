@@ -25,7 +25,8 @@ Version headings are dated at publish time. A version with no date and the
   is also polled (up to 10 s) when Docker has not yet published it under parallel container
   starts. The testcontainers `watchdog` feature is removed from the dev-dependencies (it pulled in
   `conquer-once`, which panicked during parallel first starts); as a side effect, Ctrl-C no longer
-  auto-reaps test containers. Test-only; no production code changed.
+  auto-reaps test containers. Store construction is also retried (up to 30 s) on r2d2 pool-build
+  timeouts under Docker load; other errors still fail immediately. Test-only; no production code changed.
 
 ## [0.4.0] — 2026-09-20
 
