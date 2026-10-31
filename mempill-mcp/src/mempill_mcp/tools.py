@@ -136,7 +136,6 @@ async def ingest_claim(
     provenance: Any,
     cardinality: str = "Functional",
     confidence_value: float = 0.9,
-    confidence_valid_time: float = 0.9,
     criticality: str = "Low",
     valid_time: Optional[dict[str, Any]] = None,
     derived_from: Optional[list[str]] = None,
@@ -153,13 +152,6 @@ async def ingest_claim(
             "RecallReEntry", or "ModelDerived".
         cardinality: "Functional" (one value), "SetValued" (multiple), or "Unknown".
         confidence_value: Value confidence in [0, 1]. Default 0.9.
-        confidence_valid_time: NOT PERSISTED — currently a no-op. Both storage backends
-            (SQLite and Postgres) keep a single `valid_time_confidence` column per claim,
-            populated exclusively from `valid_time["valid_time_confidence"]`. This
-            parameter is forwarded into the request but silently dropped by storage: it
-            is never written, never read back, and has no effect on gating, succession,
-            or the returned belief. Do not rely on it; it may be removed or wired up in a
-            future release. Default 0.9 (irrelevant while unused).
         criticality: "Low", "Medium", "High", or "Critical".
         valid_time: Optional temporal bound: {"start"?: ISO-8601, "end"?: ISO-8601,
             "valid_time_confidence": float, "start_granularity"?: str,
@@ -187,6 +179,10 @@ async def ingest_claim(
     engine = lc["engine"]
     agent_id = lc["agent_id"]
 
+    # The engine's wire type requires confidence.valid_time_confidence, but ingest
+    # only reads valid_time.valid_time_confidence; mirror that authoritative value.
+    valid_time_confidence = valid_time.get("valid_time_confidence", 0.0) if valid_time else 0.0
+
     request = {
         "agent_id": agent_id,
         "subject": subject,
@@ -196,7 +192,7 @@ async def ingest_claim(
         "cardinality": cardinality,
         "confidence": {
             "value_confidence": confidence_value,
-            "valid_time_confidence": confidence_valid_time,
+            "valid_time_confidence": valid_time_confidence,
         },
         "criticality": criticality,
         "derived_from": derived_from or [],
