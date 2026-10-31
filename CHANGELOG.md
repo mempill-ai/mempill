@@ -19,10 +19,13 @@ Version headings are dated at publish time. A version with no date and the
 
 ### Fixed
 
-- **Postgres test harness waits for database readiness.** `mempill-postgres` integration
-  tests now poll the started container (up to 30 s) before constructing the store, instead
-  of racing the entrypoint's temporary server during initialisation. Test-only; no
-  production code changed.
+- **Postgres test harness waits for database readiness and port publication.** `mempill-postgres`
+  integration tests now poll the started container (up to 30 s) before constructing the store,
+  instead of racing the entrypoint's temporary server during initialisation. The mapped port 5432
+  is also polled (up to 10 s) when Docker has not yet published it under parallel container
+  starts. The testcontainers `watchdog` feature is removed from the dev-dependencies (it pulled in
+  `conquer-once`, which panicked during parallel first starts); as a side effect, Ctrl-C no longer
+  auto-reaps test containers. Test-only; no production code changed.
 
 ## [0.4.0] — 2026-09-20
 

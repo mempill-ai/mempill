@@ -12,10 +12,12 @@ use mempill_postgres::PostgresPersistenceStore;
 use postgres::{Client, NoTls};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::SyncRunner;
-use testcontainers_modules::testcontainers::{Container, ImageExt};
+use testcontainers_modules::testcontainers::{Container, ImageExt, TestcontainersError};
 
 const READY_DEADLINE: Duration = Duration::from_secs(30);
 const READY_BACKOFF: Duration = Duration::from_millis(250);
+const PORT_DEADLINE: Duration = Duration::from_secs(10);
+const PORT_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Wait until the container's DB accepts a TCP connection, then build the store.
 ///
@@ -47,6 +49,27 @@ fn connect_with_retry(conn_str: &str, tag: &str) -> Arc<PostgresPersistenceStore
     }))
 }
 
+/// Read the host port mapped to 5432, waiting for Docker to publish it.
+///
+/// Under Docker Desktop, with many containers starting in parallel, the port map
+/// can lag behind `start()` returning, so `PortNotExposed` is retried until the
+/// deadline. Any other error fails immediately.
+fn host_port_with_retry(node: &Container<Postgres>, tag: &str) -> u16 {
+    let deadline = Instant::now() + PORT_DEADLINE;
+    loop {
+        match node.get_host_port_ipv4(5432) {
+            Ok(port) => return port,
+            Err(e @ TestcontainersError::PortNotExposed { .. }) => {
+                if Instant::now() >= deadline {
+                    panic!("postgres:{tag} did not publish port 5432 within {PORT_DEADLINE:?}: {e}");
+                }
+                thread::sleep(PORT_BACKOFF);
+            }
+            Err(e) => panic!("testcontainers: get_host_port_ipv4 for postgres:{tag} — {e}"),
+        }
+    }
+}
+
 /// Start a `postgres:<tag>` container and return it with its connection string.
 fn start_pg(tag: &str) -> (Container<Postgres>, String) {
     let node = Postgres::default()
@@ -57,9 +80,7 @@ fn start_pg(tag: &str) -> (Container<Postgres>, String) {
     let host = node
         .get_host()
         .unwrap_or_else(|e| panic!("testcontainers: get_host for postgres:{tag} — {e}"));
-    let port = node
-        .get_host_port_ipv4(5432)
-        .unwrap_or_else(|e| panic!("testcontainers: get_host_port_ipv4 for postgres:{tag} — {e}"));
+    let port = host_port_with_retry(&node, tag);
 
     let conn_str = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
     (node, conn_str)
